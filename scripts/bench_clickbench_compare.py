@@ -50,10 +50,14 @@ def compare(baseline, candidate, threshold=0.2):
         ratio = new[query]["median"] / old[query]["median"]
         if not math.isfinite(ratio):
             raise ValueError(f"ClickBench query {query} latency ratio is not finite")
+        if ratio <= 0:
+            raise ValueError(f"ClickBench query {query} latency ratio underflowed to zero")
+        rounded = round(ratio, 4)
+        reported_ratio = rounded if rounded > 0 else float(f"{ratio:.4g}")
         compared.append({
             "id": query,
             "same_result": old[query]["hash"] == new[query]["hash"],
-            "median_ratio": round(ratio, 4),
+            "median_ratio": reported_ratio,
             "regression": ratio > 1 + threshold,
         })
     return {

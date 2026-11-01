@@ -27,6 +27,25 @@ class VariabilityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "p95"):
                     variation.inspect(data)
 
+    def test_extreme_finite_samples_do_not_overflow_mean_or_stddev(self):
+        stable = variation.inspect(report([1e308, 1e308, 1e308]))
+        self.assertEqual(stable["results"][0]["coefficient_of_variation"], 0)
+        self.assertEqual(stable["unstable_queries"], [])
+        noisy = variation.inspect(report([5e307, 7.5e307, 1e308]))
+        self.assertGreater(noisy["results"][0]["coefficient_of_variation"], 0.25)
+        self.assertEqual(noisy["unstable_queries"], [1])
+
+    def test_even_count_large_finite_samples_keep_finite_median(self):
+        samples = [1e308] * 4
+        data = {"results": [{
+            "id": 1, "status": "ok",
+            "median_ms": 1e308, "samples_ms": samples,
+            "p95_ms": 1e308,
+        }]}
+        result = variation.inspect(data)
+        self.assertEqual(result["unstable_queries"], [])
+        self.assertEqual(result["results"][0]["median_absolute_deviation_ms"], 0)
+
     def test_noisy_samples_flagged(self):
         result = variation.inspect(report([10, 20, 10, 20]))
         self.assertEqual(result["unstable_queries"], [1])
@@ -40,6 +59,26 @@ class VariabilityTests(unittest.TestCase):
         changed["results"][0]["median_ms"] = 999
         with self.assertRaisesRegex(ValueError, "median"):
             variation.inspect(changed)
+
+    def test_huge_timing_values_and_nonobject_reports_fail_cleanly(self):
+        for invalid in (None, [], "not a report"):
+            with self.assertRaises(ValueError):
+                variation.inspect(invalid)
+        data = report([1, 2, 3])
+        for field in ("median_ms", "p95_ms"):
+            data["results"][0][field] = 10**500
+            with self.assertRaises(ValueError):
+                variation.inspect(data)
+            if field == "median_ms":
+                data["results"][0][field] = 2.0
+            else:
+                data["results"][0].pop(field)
+        data["results"][0]["samples_ms"][0] = 10**500
+        with self.assertRaises(ValueError):
+            variation.inspect(data)
+        for key in ("threshold", "max_relative_mad"):
+            with self.assertRaises(ValueError):
+                variation.inspect(report([1, 1, 1]), **{key: 10**500})
 
     def test_duplicate_query_ids_and_threshold_rejected(self):
         r = report([1, 2, 3])

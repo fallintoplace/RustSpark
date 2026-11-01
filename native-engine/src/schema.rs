@@ -129,6 +129,12 @@ mod tests {
 impl Schema {
     /// Retain named fields in the requested order; reject unknown and duplicate names.
     pub fn project_columns(&self, names: &[&str]) -> Result<Self> {
+        // An identity projection only changes the caller's view, not the
+        // metadata. Reuse both Arc allocations and their column index.
+        if names.len() == self.len() && names.iter().enumerate()
+            .all(|(index, name)| self.column(name).ok() == Some(index)) {
+            return Ok(self.clone());
+        }
         Self::new(names.iter().map(|name| {
             Ok(self.field(self.column(name)?)?.clone())
         }).collect::<Result<Vec<_>>>()?)
@@ -216,5 +222,27 @@ mod schema_identity_equality_tests {
         let mut changed = fields;
         changed[255].nullable = false;
         assert_ne!(original, Schema::new(changed).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod identity_projection_sharing_tests {
+    use super::*;
+
+    #[test]
+    fn identity_projection_reuses_fields_and_index_with_case_insensitive_names() {
+        let source = Schema::new(vec![
+            Field::new("UserId", DataType::Integer, false),
+            Field::new("City", DataType::Text, true),
+            Field::new("東京", DataType::Text, false),
+        ]).unwrap();
+        let identity = source.project_columns(&["userid", "CITY", "東京"]).unwrap();
+        assert!(Arc::ptr_eq(&source.fields, &identity.fields));
+        assert!(Arc::ptr_eq(&source.indices, &identity.indices));
+        let reordered = source.project_columns(&["city", "userid", "東京"]).unwrap();
+        assert!(!Arc::ptr_eq(&source.fields, &reordered.fields));
+        assert_eq!(reordered.fields()[0].name, "City");
+        assert!(source.project_columns(&["userid", "userid", "東京"]).is_err());
+        assert!(source.project_columns(&["userid", "missing", "東京"]).is_err());
     }
 }
