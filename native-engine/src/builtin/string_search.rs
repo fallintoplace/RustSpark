@@ -36,6 +36,28 @@ fn split_part(args: &[Value]) -> Result<Value> {
     if index.unsigned_abs() > u64::try_from(possible_fields).unwrap_or(u64::MAX).saturating_add(1) {
         return Ok(Value::Text(String::new()));
     }
+    if index < -1 {
+        let from_end = usize::try_from(index.unsigned_abs()).unwrap_or(usize::MAX);
+        if delimiter.chars().count() == 1 {
+            // A single Unicode scalar never overlaps a second occurrence.
+            // Reverse splitting can select the requested tail in one scan.
+            return Ok(Value::Text(text.rsplit(delimiter)
+                .nth(from_end - 1).unwrap_or("").to_owned()));
+        }
+        if from_end <= 16 {
+            // Multicharacter delimiters can overlap. Keep forward split
+            // semantics with a bounded stack ring instead of two scans.
+            let mut recent: [Option<&str>; 16] = [None; 16];
+            let mut seen = 0usize;
+            for field in text.split(delimiter) {
+                recent[seen % from_end] = Some(field);
+                seen += 1;
+            }
+            let selected = if seen >= from_end { recent[seen % from_end] }
+                else { None };
+            return Ok(Value::Text(selected.unwrap_or("").to_owned()));
+        }
+    }
     let result = if index > 0 {
         usize::try_from(index - 1).ok()
             .and_then(|offset| text.split(delimiter).nth(offset))
@@ -300,5 +322,56 @@ mod overlapping_delimiter_split_part_tests {
             assert_eq!(split_part(&args(-2)).unwrap(), Value::Text(String::new()));
             assert_eq!(split_part(&args(-3)).unwrap(), Value::Text(String::new()));
         }
+    }
+}
+
+#[cfg(test)]
+mod single_scan_negative_split_part_regressions {
+    use super::*;
+
+    fn result(text: &str, delimiter: &str, index: i64) -> Value {
+        split_part(&[
+            Value::Text(text.into()), Value::Text(delimiter.into()), Value::Integer(index),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn single_unicode_delimiters_match_forward_split_for_all_positions() {
+        for text in ["", "a,b,c,", ",a,,b,", "é🙂東京🙂🙂x", "no match"] {
+            for delimiter in [",", "🙂", "é"] {
+                let pieces = text.split(delimiter).collect::<Vec<_>>();
+                for from_end in 2..=pieces.len() + 2 {
+                    let expected = pieces.len().checked_sub(from_end)
+                        .and_then(|index| pieces.get(index)).copied().unwrap_or("");
+                    assert_eq!(result(text, delimiter, -(from_end as i64)),
+                        Value::Text(expected.into()),
+                        "text={text:?}, delimiter={delimiter:?}, from_end={from_end}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_delimiters_use_forward_nonoverlapping_fields() {
+        for text in ["aaaaa", "aaaa", "abababab", "ababa", "éééé"] {
+            for delimiter in ["aa", "aba", "éé"] {
+                let pieces = text.split(delimiter).collect::<Vec<_>>();
+                for from_end in 2..=pieces.len() + 2 {
+                    let expected = pieces.len().checked_sub(from_end)
+                        .and_then(|index| pieces.get(index)).copied().unwrap_or("");
+                    assert_eq!(result(text, delimiter, -(from_end as i64)),
+                        Value::Text(expected.into()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_negative_indices_preserve_cheap_out_of_range_behavior() {
+        let large = "a,".repeat(30_000);
+        assert_eq!(result(&large, ",", -500),
+            Value::Text("a".into()));
+        assert_eq!(result("a,b", ",", i64::MIN), Value::Text(String::new()));
+        assert_eq!(result("abc", "", -1), Value::Text("abc".into()));
     }
 }
