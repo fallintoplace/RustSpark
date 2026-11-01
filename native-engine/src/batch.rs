@@ -195,6 +195,15 @@ impl Batch {
             }
             return Ok(Self { schema: self.schema, columns: Vec::new(), rows: indices.len() });
         }
+        // Ordered selections can transfer cells directly, without building a
+        // last-use hash map or an O(source rows) dense index.
+        if indices.len() == self.rows &&
+            indices.iter().enumerate().all(|(position, &row)| position == row) {
+            return Ok(self);
+        }
+        if indices.windows(2).all(|pair| pair[0] < pair[1]) {
+            return self.take_sorted_owned(indices);
+        }
         if indices.len() <= self.rows / 8 {
             let mut last = std::collections::HashMap::with_capacity(indices.len());
             let mut has_duplicates = false;
@@ -984,5 +993,48 @@ mod batch_owned_append_tests {
         let mut zero = Batch::new_with_row_count(empty_schema.clone(), vec![], 2).unwrap();
         zero.append_owned(Batch::new_with_row_count(empty_schema, vec![], 5).unwrap()).unwrap();
         assert_eq!(zero.num_rows(), 7);
+    }
+}
+
+#[cfg(test)]
+mod ordered_owned_gather_no_index_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn ordered_sparse_and_full_gathers_move_existing_text_storage() {
+        let schema = Schema::new(vec![
+            Field::new("text", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), (0..8)
+            .map(|n| vec![Value::Text(format!("value-{n}"))]).collect()).unwrap();
+        let ptr = match batch.value(5, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let sparse = batch.take_owned(&[1, 5, 7]).unwrap();
+        assert_eq!(sparse.rows().unwrap(), vec![
+            vec![Value::Text("value-1".into())],
+            vec![Value::Text("value-5".into())],
+            vec![Value::Text("value-7".into())],
+        ]);
+        match sparse.value(1, 0).unwrap() {
+            Value::Text(value) => assert_eq!(value.as_ptr(), ptr),
+            _ => unreachable!(),
+        }
+        let full = Batch::from_rows(schema, vec![
+            vec![Value::Text("left".into())],
+            vec![Value::Text("right".into())],
+        ]).unwrap();
+        let ptr = match full.value(0, 0).unwrap() {
+            Value::Text(value) => value.as_ptr(),
+            _ => unreachable!(),
+        };
+        let identity = full.take_owned(&[0, 1]).unwrap();
+        match identity.value(0, 0).unwrap() {
+            Value::Text(value) => assert_eq!(value.as_ptr(), ptr),
+            _ => unreachable!(),
+        }
+        assert!(identity.take_owned(&[1, 2]).is_err());
     }
 }
