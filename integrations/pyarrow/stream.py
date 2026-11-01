@@ -81,6 +81,46 @@ def build_command(
     return command
 
 
+class _BudgetedIPCStream:
+    """Bound Arrow IPC bytes read from a child process, including framing."""
+
+    def __init__(self, source, limit: int):
+        self.source = source
+        self.remaining = limit
+
+    def _account(self, count: int) -> None:
+        if count > self.remaining:
+            raise ValueError("RustSpark Arrow IPC output exceeds byte budget")
+        self.remaining -= count
+
+    def read(self, size: int = -1):
+        # Probe one byte beyond the budget to distinguish exact-fit EOF
+        # from an oversized stream. Never request unbounded input.
+        if size is None or size < 0:
+            size = self.remaining + 1
+        else:
+            size = min(size, self.remaining + 1)
+        data = self.source.read(size)
+        self._account(len(data))
+        return data
+
+    def readinto(self, buffer):
+        request = memoryview(buffer)[:self.remaining + 1]
+        if hasattr(self.source, "readinto"):
+            count = self.source.readinto(request)
+            if count is None:
+                return None
+        else:
+            data = self.source.read(len(request))
+            count = len(data)
+            request[:count] = data
+        self._account(count)
+        return count
+
+    def readable(self):
+        return True
+
+
 def iter_arrow_batches(
     sql: str, *,
     binary: str = "rustspark",
@@ -91,6 +131,7 @@ def iter_arrow_batches(
     max_rows: int | None = None,
     query_timeout: int | None = None,
     process_timeout: float | None = None,
+    max_ipc_bytes: int = 512 * 1024 * 1024,
     csv_tables: dict[str, str | Path] | None = None,
     parquet_tables: dict[str, str | Path] | None = None,
     json_tables: dict[str, str | Path] | None = None,
@@ -100,6 +141,8 @@ def iter_arrow_batches(
     Keep the iterator open until all batches have been consumed. Closing the
     generator early terminates the RustSpark process.
     """
+    if type(max_ipc_bytes) is not int or max_ipc_bytes <= 0:
+        raise ValueError("max_ipc_bytes must be a positive integer")
     if process_timeout is not None and (
         type(process_timeout) not in (int, float)
         or not math.isfinite(process_timeout) or process_timeout <= 0
@@ -145,7 +188,7 @@ def iter_arrow_batches(
 
         try:
             assert process.stdout is not None
-            with pa.ipc.open_stream(process.stdout) as reader:
+            with pa.ipc.open_stream(_BudgetedIPCStream(process.stdout, max_ipc_bytes)) as reader:
                 for batch in reader:
                     yield batch
             status = process.wait()
