@@ -148,9 +148,9 @@ impl TaskScheduler {
                 TaskStatus::Leased { worker, .. } => Some(*worker),
                 _ => None,
             };
-            let expired = task.expire_if_needed(now, self.max_attempts);
+            let did_expire = task.expire_if_needed(now, self.max_attempts);
             let queued = task.status == TaskStatus::Queued;
-            if expired {
+            if did_expire {
                 if let Some(worker) = owner {
                     if let Some(active) = self.worker_tasks.get_mut(&worker) {
                         active.remove(&id);
@@ -810,8 +810,8 @@ mod indexed_worker_reclamation_regressions {
     fn verify_index(scheduler: &TaskScheduler) {
         let mut expected: HashMap<u64, HashSet<u64>> = HashMap::new();
         for (&id, task) in &scheduler.tasks {
-            if let TaskStatus::Leased { worker, .. } = task.status {
-                expected.entry(worker).or_default().insert(id);
+            if let TaskStatus::Leased { worker, .. } = &task.status {
+                expected.entry(*worker).or_default().insert(id);
             }
         }
         assert_eq!(scheduler.worker_tasks, expected);
