@@ -208,6 +208,22 @@ class BoundedProcessCaptureTests(unittest.TestCase):
                 timeout=5, max_output_bytes=1024, max_error_bytes=1024,
             )
 
+    def test_direct_capture_rejects_invalid_budgets_before_spawn(self):
+        import rustspark_local.subprocess_budget as capture
+
+        command = [sys.executable, "-c", "print('should not run')"]
+        with patch.object(capture.subprocess, "Popen") as spawn:
+            for invalid in (True, 0, -1, 1.5):
+                with self.subTest(output_limit=invalid), self.assertRaises(ValueError):
+                    run_bounded(command, timeout=5, max_output_bytes=invalid)
+                with self.subTest(error_limit=invalid), self.assertRaises(ValueError):
+                    run_bounded(command, timeout=5, max_output_bytes=1024,
+                                max_error_bytes=invalid)
+            for invalid in (True, 0, -1, float("nan"), float("inf"), "5"):
+                with self.subTest(timeout=invalid), self.assertRaisesRegex(ValueError, "timeout"):
+                    run_bounded(command, timeout=invalid, max_output_bytes=1024)
+            spawn.assert_not_called()
+
     def test_deadline_kills_descendants_holding_stdout_open(self):
         if os.name != "posix":
             self.skipTest("requires POSIX process groups")
