@@ -11,6 +11,13 @@ fn locate_type(types: &[DataType]) -> Result<DataType> {
         (types.len() == 2 || types[2] == DataType::Integer) { Ok(DataType::Integer) }
     else { Err(Error::Type("LOCATE expects text, text, optional integer position".into())) }
 }
+fn bounded_split_field(value: &str) -> Result<Value> {
+    if value.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("SPLIT_PART result exceeds native 16 MiB budget".into()));
+    }
+    Ok(Value::Text(value.to_owned()))
+}
+
 fn split_part(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -19,16 +26,16 @@ fn split_part(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("SPLIT_PART position cannot be zero".into()));
     }
     if delimiter.is_empty() {
-        return Ok(Value::Text(if index == 1 || index == -1 { text } else { "" }.to_string()));
+        return bounded_split_field(if index == 1 || index == -1 { text } else { "" });
     }
     if index == 1 {
         let result = text.find(delimiter).map_or(text, |position| &text[..position]);
-        return Ok(Value::Text(result.to_owned()));
+        return bounded_split_field(result);
     }
     if index == -1 {
         // Reverse substring searches choose different matches for overlapping
         // delimiters. SQL positions refer to the same forward split fields.
-        return Ok(Value::Text(text.split(delimiter).last().unwrap_or("").to_owned()));
+        return bounded_split_field(text.split(delimiter).last().unwrap_or(""));
     }
     // Nonoverlapping delimiters can produce at most one additional field
     // per delimiter-width span. Byte lengths give a safe UTF-8 upper bound.
@@ -41,8 +48,8 @@ fn split_part(args: &[Value]) -> Result<Value> {
         if delimiter.chars().count() == 1 {
             // A single Unicode scalar never overlaps a second occurrence.
             // Reverse splitting can select the requested tail in one scan.
-            return Ok(Value::Text(text.rsplit(delimiter)
-                .nth(from_end - 1).unwrap_or("").to_owned()));
+            return bounded_split_field(text.rsplit(delimiter)
+                .nth(from_end - 1).unwrap_or(""));
         }
         if from_end <= 16 {
             // Multicharacter delimiters can overlap. Keep forward split
@@ -55,7 +62,7 @@ fn split_part(args: &[Value]) -> Result<Value> {
             }
             let selected = if seen >= from_end { recent[seen % from_end] }
                 else { None };
-            return Ok(Value::Text(selected.unwrap_or("").to_owned()));
+            return bounded_split_field(selected.unwrap_or(""));
         }
     }
     let result = if index > 0 {
@@ -66,7 +73,7 @@ fn split_part(args: &[Value]) -> Result<Value> {
             .and_then(|position| text.split(delimiter).count().checked_sub(position))
             .and_then(|offset| text.split(delimiter).nth(offset))
     };
-    Ok(Value::Text(result.unwrap_or("").to_string()))
+    bounded_split_field(result.unwrap_or(""))
 }
 fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Result<Value> {
     let Some(needle) = super::string(needle)? else { return Ok(Value::Null) };
@@ -373,5 +380,22 @@ mod single_scan_negative_split_part_regressions {
             Value::Text("a".into()));
         assert_eq!(result("a,b", ",", i64::MIN), Value::Text(String::new()));
         assert_eq!(result("abc", "", -1), Value::Text("abc".into()));
+    }
+}
+
+#[cfg(test)]
+mod split_part_result_limit_regressions {
+    use super::*;
+    #[test]
+    fn selects_small_fields_from_large_text_without_rejecting_input() {
+        let source = format!("first,{}", "x".repeat(16 * 1024 * 1024 + 1));
+        let args = |field| [Value::Text(source.clone()),
+            Value::Text(",".into()), Value::Integer(field)];
+        assert_eq!(split_part(&args(1)).unwrap(), Value::Text("first".into()));
+        assert!(matches!(split_part(&args(2)), Err(Error::Execution(_))));
+        assert!(matches!(split_part(&args(-1)), Err(Error::Execution(_))));
+        assert_eq!(split_part(&args(3)).unwrap(), Value::Text(String::new()));
+        assert_eq!(split_part(&[Value::Null, Value::Text(",".into()),
+            Value::Integer(1)]).unwrap(), Value::Null);
     }
 }

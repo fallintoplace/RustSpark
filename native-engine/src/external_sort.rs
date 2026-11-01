@@ -239,7 +239,7 @@ impl Iterator for ExternalSort {
                 break;
             }
             let run = &mut self.runs[selected];
-            let Some(batch) = run.batch.as_ref() else {
+            let Some(batch) = run.batch.as_mut() else {
                 let error = Error::Execution("missing active external sort batch".into());
                 if row_count == 0 {
                     self.finished = true;
@@ -248,7 +248,9 @@ impl Iterator for ExternalSort {
                 self.pending_error = Some(error);
                 break;
             };
-            if let Err(error) = batch.append_row_to_columns(run.position, &mut columns) {
+            // Every spill row is emitted once. Move the String allocation out
+            // of the owned run rather than deep-cloning it for the output.
+            if let Err(error) = batch.move_row_to_columns(run.position, &mut columns) {
                 if row_count == 0 {
                     self.finished = true;
                     return Some(Err(error));
@@ -659,5 +661,33 @@ mod owned_external_sort_run_regressions {
         let keys = [SortKey::ascending(crate::expr::Expr::Column("n".into()))];
         assert!(external_sort(input, &schema, &keys, std::env::temp_dir(), 3, 2)
             .unwrap().next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod moved_external_merge_payload_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn moves_wide_payloads_through_multiple_runs_and_output_windows() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..37).rev().map(|row| vec![
+            if row % 7 == 0 { Value::Null } else { Value::Integer(row % 5) },
+            if row % 11 == 0 { Value::Null } else {
+                Value::Text(format!("{row}-{}", "🦀".repeat(8_192)))
+            },
+        ]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let expected = sort::sort(&input, &keys).unwrap().rows().unwrap();
+        let chunks = external_sort([input], &schema, &keys, std::env::temp_dir(), 3, 4)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert!(chunks.iter().all(|batch| batch.num_rows() <= 4));
+        let actual = chunks.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }
