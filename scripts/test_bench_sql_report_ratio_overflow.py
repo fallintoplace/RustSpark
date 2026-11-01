@@ -20,6 +20,12 @@ class SqlRatioOverflowTests(unittest.TestCase):
         self.assertIsNone(timing["slowdown"])
         json.dumps(timing, allow_nan=False)
 
+    def test_huge_integer_duration_is_rejected(self):
+        self.assertFalse(compare.is_duration(10**500))
+        self.assertFalse(compare.is_duration(-10**500))
+        self.assertTrue(compare.is_duration(0))
+        self.assertTrue(compare.is_duration(1e308))
+
     def test_normal_ratio_preserved(self):
         timing, error, slowed = compare._compare_query(2, result(10), result(12), 1.3)
         self.assertIsNone(error)
