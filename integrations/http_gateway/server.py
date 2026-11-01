@@ -111,10 +111,15 @@ def pinned_query_template(template: Path):
         fd = os.open(template, flags)
     except OSError as error:
         raise ValueError("Unable to open SQL template") from error
-    with os.fdopen(fd, "rb") as source:
-        info = os.fstat(source.fileno())
+    # fdopen() can itself fail for directories, so validate the descriptor first.
+    try:
+        info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TEMPLATE_BYTES:
             raise ValueError("SQL template must be a bounded regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as source:
         sql = source.read(MAX_TEMPLATE_BYTES + 1)
         if len(sql) > MAX_TEMPLATE_BYTES:
             raise ValueError("SQL template exceeds byte limit")
