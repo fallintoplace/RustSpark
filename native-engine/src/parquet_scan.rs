@@ -120,9 +120,16 @@ fn projection_indices(
     let indexed = if columns.len().saturating_mul(fields.len()) >= 2048 {
         let mut indices = std::collections::HashMap::with_capacity(fields.len());
         for (position, field) in fields.iter().enumerate() {
-            // The previous linear lookup returned the first case-insensitive
-            // match when the schema contained names differing only in case.
-            indices.entry(field.name().to_ascii_lowercase()).or_insert(position);
+            // A case-insensitive collision must not silently read a different
+            // physical column. None marks an ambiguous root field name.
+            match indices.entry(field.name().to_ascii_lowercase()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(position));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    *entry.get_mut() = None;
+                }
+            }
         }
         Some(indices)
     } else {
@@ -132,9 +139,21 @@ fn projection_indices(
     let mut seen = std::collections::HashSet::with_capacity(columns.len());
     for &name in columns {
         let position = if let Some(indices) = &indexed {
-            indices.get(&name.to_ascii_lowercase()).copied()
+            match indices.get(&name.to_ascii_lowercase()) {
+                Some(Some(index)) => Some(*index),
+                Some(None) => return Err(Error::Schema(format!(
+                    "ambiguous Parquet column: {name}"
+                ))),
+                None => None,
+            }
         } else {
-            fields.iter().position(|field| field.name().eq_ignore_ascii_case(name))
+            let mut matches = fields.iter().enumerate()
+                .filter(|(_, field)| field.name().eq_ignore_ascii_case(name));
+            let first = matches.next().map(|(index, _)| index);
+            if matches.next().is_some() {
+                return Err(Error::Schema(format!("ambiguous Parquet column: {name}")));
+            }
+            first
         }.ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
         if !seen.insert(position) {
             return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
@@ -820,5 +839,34 @@ mod bounded_wide_parquet_batch_regressions {
         }
         assert_eq!(bounded_native_batch_rows(5, 1024), 5);
         assert_eq!(bounded_native_batch_rows(5, 0), 5);
+    }
+}
+
+#[cfg(test)]
+mod ambiguous_parquet_projection_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn rejects_casefold_collisions_in_small_and_indexed_schemas() {
+        let make_field = |name: String| Arc::new(arrow_schema::Field::new(
+            name, arrow_schema::DataType::Int64, false));
+        let small = vec![make_field("UserID".into()), make_field("userid".into())];
+        let error = projection_indices(&small, &["USERID"]).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(projection_indices(&small, &["missing"]).is_err());
+
+        let mut fields = (0..64).map(|n| make_field(format!("column{n}")))
+            .collect::<Vec<_>>();
+        fields.push(make_field("Amount".into()));
+        fields.push(make_field("AMOUNT".into()));
+        let names = (0..32).map(|n| format!("column{n}"))
+            .collect::<Vec<_>>();
+        let mut requested = names.iter().map(String::as_str).collect::<Vec<_>>();
+        requested.push("amount");
+        assert!(requested.len() * fields.len() >= 2048);
+        let error = projection_indices(&fields, &requested).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert_eq!(projection_indices(&fields, &["column3"]).unwrap(), [3]);
     }
 }
