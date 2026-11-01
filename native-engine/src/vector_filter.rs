@@ -353,6 +353,7 @@ fn fast_distinct_literal<'a>(
 
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
+    predicate.validate_budget()?;
     let kind = predicate.output_type(batch.schema())?;
     if kind != DataType::Boolean && !matches!(predicate, Expr::Literal(Value::Null)) {
         return Err(Error::Type("vector filter predicate must be boolean".into()));
@@ -1442,5 +1443,22 @@ mod negated_nullsafe_vector_tests {
             negated: false,
         }));
         assert_eq!(select_indices(&batch, &predicate).unwrap(), vec![0, 3]);
+    }
+}
+
+#[cfg(test)]
+mod direct_vector_filter_expression_budget_tests {
+    use super::*;
+    use crate::schema::Schema;
+
+    #[test]
+    fn oversized_predicate_fails_before_vector_type_inference() {
+        let empty = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut predicate = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { predicate = Expr::Not(Box::new(predicate)); }
+        for result in [select_indices(&empty, &predicate).map(|_| ()),
+                       filter(&empty, &predicate).map(|_| ())] {
+            assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
     }
 }

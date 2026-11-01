@@ -9,6 +9,64 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Text)
 }
 
+// Capture substitution is bounded before each append. In contrast,
+// captures.expand materializes a potentially huge intermediate string before
+// a caller can check whether the result exceeds the native byte budget.
+const MAX_REGEX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+fn push_bounded(output: &mut String, text: &str) -> Result<()> {
+    if output.len().checked_add(text.len())
+        .is_none_or(|total| total > MAX_REGEX_OUTPUT_BYTES) {
+        return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
+    }
+    output.push_str(text);
+    Ok(())
+}
+
+// Match the regex crate's $N, $name, ${name}, and $$ replacement grammar.
+fn append_bounded_expansion(
+    captures: &regex::Captures<'_>, mut replacement: &str, output: &mut String,
+) -> Result<()> {
+    while let Some(position) = replacement.find('$') {
+        push_bounded(output, &replacement[..position])?;
+        replacement = &replacement[position..];
+        if let Some(rest) = replacement.strip_prefix("$$") {
+            push_bounded(output, "$")?;
+            replacement = rest;
+            continue;
+        }
+        let (name, remaining) = if let Some(rest) = replacement.strip_prefix("${") {
+            if let Some(close) = rest.find('}') {
+                (&rest[..close], &rest[close + 1..])
+            } else {
+                push_bounded(output, "$")?;
+                replacement = &replacement[1..];
+                continue;
+            }
+        } else {
+            let width = replacement[1..].bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .count();
+            if width == 0 {
+                push_bounded(output, "$")?;
+                replacement = &replacement[1..];
+                continue;
+            }
+            (&replacement[1..width + 1], &replacement[width + 1..])
+        };
+        let captured = if let Ok(index) = name.parse::<usize>() {
+            captures.get(index)
+        } else {
+            captures.name(name)
+        };
+        if let Some(value) = captured {
+            push_bounded(output, value.as_str())?;
+        }
+        replacement = remaining;
+    }
+    push_bounded(output, replacement)
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -34,18 +92,25 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else { 0 };
     let suffix = &text[start..];
 
-    // For literal replacement strings, ASCII digit classes need no compiled
-    // regex or capture buffers. Every match begins and ends at UTF-8 boundaries.
-    if (pattern == "[0-9]" || pattern == "[0-9]+") && !replacement.contains('    // A dollar in replacement requires the regex capture-expansion path.
+    // ASCII digit classes can be replaced without compiling a regex.
+    // Digit positions are UTF-8 boundaries, even when the text is Unicode.
+    if (pattern == "[0-9]" || pattern == "[0-9]+") && !replacement.contains('    // Literal Unicode patterns do not need regex compilation or captures.
+    // A dollar in replacement requires the regex capture-expansion path.
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_') &&
         !replacement.contains('$') {
         // Scan once, appending whole unchanged UTF-8 spans. Check the
         // output budget incrementally to reject expansion before allocating it.
+        let mut matches = suffix.match_indices(pattern);
+        let Some(first_match) = matches.next() else {
+            // No substitution is required. Reuse a single clone and avoid
+            // constructing the incremental replacement buffer.
+            return Ok(Value::Text(text.to_owned()));
+        };
         let mut result = String::with_capacity(text.len());
         result.push_str(&text[..start]);
         let mut consumed = 0usize;
-        for (index, _) in suffix.match_indices(pattern) {
+        for (index, _) in std::iter::once(first_match).chain(matches) {
             let unchanged = &suffix[consumed..index];
             let next_len = result.len().checked_add(unchanged.len())
                 .and_then(|len| len.checked_add(replacement.len()))
@@ -69,27 +134,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let mut result = String::with_capacity(text.len());
     result.push_str(&text[..start]);
     let mut consumed = 0;
-    let mut expanded = String::new();
     for captures in compiled.captures_iter(suffix) {
         let matched = captures.get(0).expect("regex captures always contain the whole match");
-        let unchanged = &suffix[consumed..matched.start()];
-        expanded.clear();
-        captures.expand(replacement, &mut expanded);
-        if result.len().checked_add(unchanged.len())
-            .and_then(|len| len.checked_add(expanded.len()))
-            .is_none_or(|len| len > 16 * 1024 * 1024) {
-            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-        }
-        result.push_str(unchanged);
-        result.push_str(&expanded);
+        push_bounded(&mut result, &suffix[consumed..matched.start()])?;
+        append_bounded_expansion(&captures, replacement, &mut result)?;
         consumed = matched.end();
     }
-    let remaining = &suffix[consumed..];
-    if result.len().checked_add(remaining.len())
-        .is_none_or(|len| len > 16 * 1024 * 1024) {
-        return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-    }
-    result.push_str(remaining);
+    push_bounded(&mut result, &suffix[consumed..])?;
     Ok(Value::Text(result))
 }
 
@@ -389,38 +440,139 @@ mod unicode_literal_regex_fast_path_tests {
         assert!(call("é", "é", &"x".repeat(1_048_577), None).is_err());
     }
 }
+
+#[cfg(test)]
+mod bounded_capture_template_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn templates_match_regex_capture_expansion_semantics() {
+        let re = regex_support::compile(r"(?P<first>[a-z]+)-(?P<num>[0-9]+)").unwrap();
+        let captures = re.captures("abc-12").unwrap();
+        for template in [
+            "", "$$", "$0", "$1", "$2", "$first", "${first}",
+            "$num:$first", "$1x", "${1}x", "$unknown", "$999",
+            "$", "$?", "$-x", "$$1", "$$$1", "${unknown}",
+            "${not-closed", "é🙂$num", "$first_${num}",
+        ] {
+            let mut expected = String::new();
+            captures.expand(template, &mut expected);
+            let mut actual = String::new();
+            append_bounded_expansion(&captures, template, &mut actual).unwrap();
+            assert_eq!(actual, expected, "template={template:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_large_capture_cannot_expand_beyond_output_budget() {
+        let input = "x".repeat(1_000_000);
+        let args = [
+            Value::Text(input.clone()), Value::Text("(x+)".into()),
+            Value::Text("$1".repeat(30)),
+        ];
+        assert!(matches!(evaluate(&args), Err(Error::Execution(_))));
+        let allowed = [
+            Value::Text(input), Value::Text("(x+)".into()),
+            Value::Text("$1".repeat(10)),
+        ];
+        let Value::Text(value) = evaluate(&allowed).unwrap() else { panic!("expected TEXT"); };
+        assert_eq!(value.len(), 10_000_000);
+        assert!(value.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[test]
+    fn dollar_escapes_and_empty_groups_preserve_exact_output() {
+        let output = evaluate(&[
+            Value::Text("ab-12".into()),
+            Value::Text("(?P<first>[a-z]+)-(?P<num>[0-9]+)".into()),
+            Value::Text("$$:${num}/$first/$missing".into()),
+        ]).unwrap();
+        assert_eq!(output, Value::Text("$:12/ab/".into()));
+    }
+}
+
+#[cfg(test)]
+mod literal_no_match_replace_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_original_text_when_literal_never_matches() {
+        for text in ["", "é🙂東京", "no match here", "foofoo"] {
+            let args = [
+                Value::Text(text.into()), Value::Text("absent".into()),
+                Value::Text("replaced".into()),
+            ];
+            assert_eq!(evaluate(&args).unwrap(), Value::Text(text.into()));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("start é🙂".into()), Value::Text("start".into()),
+            Value::Text("X".into()), Value::Integer(3),
+        ]).unwrap(), Value::Text("start é🙂".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("ééé".into()), Value::Text("é".into()),
+            Value::Text("X".into()),
+        ]).unwrap(), Value::Text("XXX".into()));
+    }
+}
+
+#[cfg(test)]
+mod bounded_capture_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_expansion_agrees_with_regex_capture_format() {
+        let re = regex_support::compile(r"(?P<word>[a-z]+)([0-9]+)").unwrap();
+        let captures = re.captures("abc123").unwrap();
+        for replacement in [
+            "", "$0", "$1", "$2", "${1}", "$word", "${word}",
+            "$1a", "${1}a", "$missing", "${missing}", "$$", "$$$1",
+            "$", "${", "${}", "${1", "$-x", "é🙂-$2/$word-$$",
+        ] {
+            let mut expected = String::new();
+            captures.expand(replacement, &mut expected);
+            let mut actual = String::new();
+            append_bounded_expansion(&captures, replacement, &mut actual).unwrap();
+            assert_eq!(actual, expected, "replacement={replacement:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_large_captures_are_stopped_before_expansion_allocations() {
+        let input = "a".repeat(1_000_000);
+        let replacement = "$0".repeat(100);
+        assert!(matches!(evaluate(&[
+            Value::Text(input), Value::Text("(a+)".into()),
+            Value::Text(replacement),
+        ]), Err(Error::Execution(message)) if message.contains("budget")));
+        assert_eq!(evaluate(&[
+            Value::Text("ab12".into()), Value::Text(r"(?P<letters>[a-z]+)([0-9]+)".into()),
+            Value::Text("${letters}:$2:$$: $missing".into()),
+        ]).unwrap(), Value::Text("ab:12:$: ".into()));
+    }
+}
 ) {
-        const MAX_OUTPUT: usize = 16 * 1024 * 1024;
-        let mut result = String::with_capacity(text.len());
-        result.push_str(&text[..start]);
         let bytes = suffix.as_bytes();
+        let mut result = String::with_capacity(text.len().min(MAX_REGEX_OUTPUT_BYTES));
+        push_bounded(&mut result, &text[..start])?;
+        let mut cursor = 0usize;
         let mut consumed = 0usize;
-        let mut index = 0usize;
-        while index < bytes.len() {
-            if !bytes[index].is_ascii_digit() {
-                index += 1;
+        while cursor < bytes.len() {
+            if !bytes[cursor].is_ascii_digit() {
+                cursor += 1;
                 continue;
             }
-            let begin = index;
-            index += 1;
+            let begin = cursor;
+            cursor += 1;
             if pattern == "[0-9]+" {
-                while index < bytes.len() && bytes[index].is_ascii_digit() { index += 1; }
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
             }
-            let unchanged = &suffix[consumed..begin];
-            result.len().checked_add(unchanged.len())
-                .and_then(|length| length.checked_add(replacement.len()))
-                .filter(|&length| length <= MAX_OUTPUT)
-                .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
-            result.push_str(unchanged);
-            result.push_str(replacement);
-            consumed = index;
+            push_bounded(&mut result, &suffix[consumed..begin])?;
+            push_bounded(&mut result, replacement)?;
+            consumed = cursor;
         }
-        let remaining = &suffix[consumed..];
-        if result.len().checked_add(remaining.len())
-            .is_none_or(|length| length > MAX_OUTPUT) {
-            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-        }
-        result.push_str(remaining);
+        push_bounded(&mut result, &suffix[consumed..])?;
         return Ok(Value::Text(result));
     }
 
@@ -431,10 +583,16 @@ mod unicode_literal_regex_fast_path_tests {
         !replacement.contains('$') {
         // Scan once, appending whole unchanged UTF-8 spans. Check the
         // output budget incrementally to reject expansion before allocating it.
+        let mut matches = suffix.match_indices(pattern);
+        let Some(first_match) = matches.next() else {
+            // No substitution is required. Reuse a single clone and avoid
+            // constructing the incremental replacement buffer.
+            return Ok(Value::Text(text.to_owned()));
+        };
         let mut result = String::with_capacity(text.len());
         result.push_str(&text[..start]);
         let mut consumed = 0usize;
-        for (index, _) in suffix.match_indices(pattern) {
+        for (index, _) in std::iter::once(first_match).chain(matches) {
             let unchanged = &suffix[consumed..index];
             let next_len = result.len().checked_add(unchanged.len())
                 .and_then(|len| len.checked_add(replacement.len()))
@@ -458,27 +616,13 @@ mod unicode_literal_regex_fast_path_tests {
     let mut result = String::with_capacity(text.len());
     result.push_str(&text[..start]);
     let mut consumed = 0;
-    let mut expanded = String::new();
     for captures in compiled.captures_iter(suffix) {
         let matched = captures.get(0).expect("regex captures always contain the whole match");
-        let unchanged = &suffix[consumed..matched.start()];
-        expanded.clear();
-        captures.expand(replacement, &mut expanded);
-        if result.len().checked_add(unchanged.len())
-            .and_then(|len| len.checked_add(expanded.len()))
-            .is_none_or(|len| len > 16 * 1024 * 1024) {
-            return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-        }
-        result.push_str(unchanged);
-        result.push_str(&expanded);
+        push_bounded(&mut result, &suffix[consumed..matched.start()])?;
+        append_bounded_expansion(&captures, replacement, &mut result)?;
         consumed = matched.end();
     }
-    let remaining = &suffix[consumed..];
-    if result.len().checked_add(remaining.len())
-        .is_none_or(|len| len > 16 * 1024 * 1024) {
-        return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
-    }
-    result.push_str(remaining);
+    push_bounded(&mut result, &suffix[consumed..])?;
     Ok(Value::Text(result))
 }
 
@@ -776,6 +920,116 @@ mod unicode_literal_regex_fast_path_tests {
         assert_eq!(call("aé🙂a", "é🙂", "?", None).unwrap(), "a?a");
         assert_eq!(call("abc", "a.c", "yes", None).unwrap(), "yes");
         assert!(call("é", "é", &"x".repeat(1_048_577), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_capture_template_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn templates_match_regex_capture_expansion_semantics() {
+        let re = regex_support::compile(r"(?P<first>[a-z]+)-(?P<num>[0-9]+)").unwrap();
+        let captures = re.captures("abc-12").unwrap();
+        for template in [
+            "", "$$", "$0", "$1", "$2", "$first", "${first}",
+            "$num:$first", "$1x", "${1}x", "$unknown", "$999",
+            "$", "$?", "$-x", "$$1", "$$$1", "${unknown}",
+            "${not-closed", "é🙂$num", "$first_${num}",
+        ] {
+            let mut expected = String::new();
+            captures.expand(template, &mut expected);
+            let mut actual = String::new();
+            append_bounded_expansion(&captures, template, &mut actual).unwrap();
+            assert_eq!(actual, expected, "template={template:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_large_capture_cannot_expand_beyond_output_budget() {
+        let input = "x".repeat(1_000_000);
+        let args = [
+            Value::Text(input.clone()), Value::Text("(x+)".into()),
+            Value::Text("$1".repeat(30)),
+        ];
+        assert!(matches!(evaluate(&args), Err(Error::Execution(_))));
+        let allowed = [
+            Value::Text(input), Value::Text("(x+)".into()),
+            Value::Text("$1".repeat(10)),
+        ];
+        let Value::Text(value) = evaluate(&allowed).unwrap() else { panic!("expected TEXT"); };
+        assert_eq!(value.len(), 10_000_000);
+        assert!(value.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[test]
+    fn dollar_escapes_and_empty_groups_preserve_exact_output() {
+        let output = evaluate(&[
+            Value::Text("ab-12".into()),
+            Value::Text("(?P<first>[a-z]+)-(?P<num>[0-9]+)".into()),
+            Value::Text("$$:${num}/$first/$missing".into()),
+        ]).unwrap();
+        assert_eq!(output, Value::Text("$:12/ab/".into()));
+    }
+}
+
+#[cfg(test)]
+mod literal_no_match_replace_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_original_text_when_literal_never_matches() {
+        for text in ["", "é🙂東京", "no match here", "foofoo"] {
+            let args = [
+                Value::Text(text.into()), Value::Text("absent".into()),
+                Value::Text("replaced".into()),
+            ];
+            assert_eq!(evaluate(&args).unwrap(), Value::Text(text.into()));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("start é🙂".into()), Value::Text("start".into()),
+            Value::Text("X".into()), Value::Integer(3),
+        ]).unwrap(), Value::Text("start é🙂".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("ééé".into()), Value::Text("é".into()),
+            Value::Text("X".into()),
+        ]).unwrap(), Value::Text("XXX".into()));
+    }
+}
+
+#[cfg(test)]
+mod bounded_capture_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_expansion_agrees_with_regex_capture_format() {
+        let re = regex_support::compile(r"(?P<word>[a-z]+)([0-9]+)").unwrap();
+        let captures = re.captures("abc123").unwrap();
+        for replacement in [
+            "", "$0", "$1", "$2", "${1}", "$word", "${word}",
+            "$1a", "${1}a", "$missing", "${missing}", "$$", "$$$1",
+            "$", "${", "${}", "${1", "$-x", "é🙂-$2/$word-$$",
+        ] {
+            let mut expected = String::new();
+            captures.expand(replacement, &mut expected);
+            let mut actual = String::new();
+            append_bounded_expansion(&captures, replacement, &mut actual).unwrap();
+            assert_eq!(actual, expected, "replacement={replacement:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_large_captures_are_stopped_before_expansion_allocations() {
+        let input = "a".repeat(1_000_000);
+        let replacement = "$0".repeat(100);
+        assert!(matches!(evaluate(&[
+            Value::Text(input), Value::Text("(a+)".into()),
+            Value::Text(replacement),
+        ]), Err(Error::Execution(message)) if message.contains("budget")));
+        assert_eq!(evaluate(&[
+            Value::Text("ab12".into()), Value::Text(r"(?P<letters>[a-z]+)([0-9]+)".into()),
+            Value::Text("${letters}:$2:$$: $missing".into()),
+        ]).unwrap(), Value::Text("ab:12:$: ".into()));
     }
 }
 

@@ -139,14 +139,12 @@ macro_rules! decode_text_dictionary {
     }};
 }
 
-pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
-    let mut fields = Vec::new();
-    let mut columns = Vec::new();
-    // A small Arrow dictionary may expand into gigabytes of native strings.
-    // Share the budget across every decoded TEXT column in this record batch.
-    let mut remaining_text_bytes = MAX_ARROW_DECODED_TEXT_BYTES;
-    for (index, field) in input.schema().fields().iter().enumerate() {
-        let array = input.column(index);
+
+    // Type metadata is known before any data pages are decoded.
+    // Share the exact Arrow->native type contract with the row decoder.
+pub fn schema_from_arrow(input: &ArrowSchema) -> Result<Schema> {
+    let mut fields = Vec::with_capacity(input.fields().len());
+    for field in input.fields() {
         let data_type = match field.data_type() {
             ArrowType::Boolean => DataType::Boolean,
             ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
@@ -163,6 +161,18 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
             other => return Err(Error::Unsupported(format!("unsupported Arrow type: {other}"))),
         };
         fields.push(Field::new(field.name(), data_type, field.is_nullable()));
+    }
+    Schema::new(fields)
+}
+
+pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
+    let native_schema = schema_from_arrow(input.schema().as_ref())?;
+    let mut columns = Vec::with_capacity(native_schema.len());
+    // A small Arrow dictionary may expand into gigabytes of native strings.
+    // Share the budget across every decoded TEXT column in this record batch.
+    let mut remaining_text_bytes = MAX_ARROW_DECODED_TEXT_BYTES;
+    for (index, field) in input.schema().fields().iter().enumerate() {
+        let array = input.column(index);
         // Decode common arrays with a single downcast per column rather than per row.
         let common: Option<Vec<Value>> = match field.data_type() {
             ArrowType::Boolean => {
@@ -356,7 +366,7 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
     }
     // Every decoded scalar was matched against its Arrow field type and
     // requiredness. Skip rechecking each cell in a second full column scan.
-    Batch::from_validated_columns(Schema::new(fields)?, columns, input.num_rows())
+    Batch::from_validated_columns(native_schema, columns, input.num_rows())
 }
 
 #[cfg(test)]
@@ -701,5 +711,29 @@ mod arrow_text_offset_width_regressions {
         let encoded = to_arrow(&source).unwrap();
         assert_eq!(encoded.schema().field(0).data_type(), &ArrowType::Utf8);
         assert_eq!(from_arrow(&encoded).unwrap(), source);
+    }
+}
+
+#[cfg(test)]
+mod direct_arrow_metadata_contract_tests {
+    use super::*;
+
+    #[test]
+    fn native_schema_matches_empty_decoder_for_nullable_and_dictionary_fields() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("flag", ArrowType::Boolean, true),
+            ArrowField::new("count", ArrowType::UInt64, false),
+            ArrowField::new("name", ArrowType::LargeUtf8, true),
+            ArrowField::new("dict", ArrowType::Dictionary(
+                Box::new(ArrowType::Int16), Box::new(ArrowType::Utf8)), true),
+        ]));
+        let from_metadata = schema_from_arrow(schema.as_ref()).unwrap();
+        let record = RecordBatch::new_empty(schema);
+        assert_eq!(from_metadata, from_arrow(&record).unwrap().schema().clone());
+        assert_eq!(from_metadata.fields()[3].data_type, DataType::Text);
+        let unsupported = ArrowSchema::new(vec![
+            ArrowField::new("bytes", ArrowType::Binary, true),
+        ]);
+        assert!(schema_from_arrow(&unsupported).is_err());
     }
 }
