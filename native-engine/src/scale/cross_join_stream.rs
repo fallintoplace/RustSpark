@@ -21,6 +21,15 @@ fn cloned_row_lower_bound(columns: &[&[Value]], row: usize) -> usize {
     })
 }
 
+
+fn empty_output_columns(width: usize) -> Result<Vec<Vec<Value>>> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(width)
+        .map_err(|_| Error::Execution("cross join output schema allocation failed".into()))?;
+    output.resize_with(width, Vec::new);
+    Ok(output)
+}
+
 pub struct CrossJoinStream {
     left: BatchStream,
     left_schema: Schema,
@@ -109,8 +118,10 @@ impl CrossJoinStream {
         let capacity = self.batch_rows.min(256).min(
             (MAX_OUTPUT_BATCH_BYTES / std::mem::size_of::<Value>().max(1) / width.max(1)).max(1)
         );
-        let mut output: Vec<Vec<Value>> = (0..width)
-            .map(|_| Vec::with_capacity(capacity)).collect();
+        // Empty left streams should not allocate a full output batch.
+        // Only allocate the column headers until the first joined row passes
+        // cancellation, schema, and byte-budget admission.
+        let mut output = empty_output_columns(width)?;
         let mut output_rows = 0usize;
         let mut output_bytes = 0usize;
         while output_rows < self.batch_rows {
@@ -167,6 +178,16 @@ impl CrossJoinStream {
             }
             if output_rows != 0 && output_bytes.saturating_add(next_bytes) > MAX_OUTPUT_BATCH_BYTES {
                 break;
+            }
+            if output_rows == 0 {
+                // Reserve all columns before moving/cloning any row payload.
+                // Huge schemas and memory pressure must return execution errors
+                // instead of panicking in Vec::with_capacity.
+                for column in &mut output {
+                    column.try_reserve_exact(capacity).map_err(|_| {
+                        Error::Execution("cross join output allocation failed".into())
+                    })?;
+                }
             }
             output_bytes += next_bytes;
             // The left row and schema were validated when the current input
@@ -597,5 +618,48 @@ mod columnar_cross_join_append_regressions {
         let rows = joined.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
         assert_eq!(rows, expected);
         assert_eq!(rows.len(), 51);
+    }
+}
+
+#[cfg(test)]
+mod lazy_cross_join_output_reservation_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn zero_output_and_valid_joined_rows_preserve_stream_contract() {
+        let schema = Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+            Field::new("number", DataType::Integer, false),
+        ]).unwrap();
+        let right = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("🙂".repeat(1000)), Value::Integer(9)],
+        ]).unwrap();
+        let empty = Batch::empty(schema.clone());
+        let none = CrossJoinStream::new(
+            Box::new([Ok(empty)].into_iter()),
+            Box::new([Ok(right.clone())].into_iter()),
+            schema.clone(), schema.clone(), 65_536, QueryControl::default(),
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert!(none.is_empty());
+
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Text("abc".into()), Value::Integer(2)],
+        ]).unwrap();
+        let expected = join::cross_join(&left, &right).unwrap();
+        let actual = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()),
+            Box::new([Ok(right)].into_iter()),
+            schema.clone(), schema, 1, QueryControl::default(),
+        ).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(actual.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>(), expected.rows().unwrap());
+    }
+
+    #[test]
+    fn impossible_column_headers_are_a_typed_error() {
+        assert!(matches!(empty_output_columns(usize::MAX), Err(Error::Execution(_))));
+        assert!(empty_output_columns(0).unwrap().is_empty());
     }
 }
