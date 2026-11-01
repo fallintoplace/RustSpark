@@ -77,8 +77,10 @@ impl CrossJoinStream {
                     .ok_or_else(|| Error::Execution("stream cross join build byte budget exceeded".into()))?;
                 let values = columns.iter_mut().map(|column| column.next()
                     .expect("one cell per remaining column row")).collect::<Vec<_>>();
+                // Output rows clone this right-hand key. Their TEXT buffers
+                // retain the cloned length, not the larger source capacity.
+                right_bytes.push(super::row_footprint::minimum_cloned_footprint(values.iter()));
                 right_rows.push(values);
-                right_bytes.push(footprint);
             }
         }
         Ok(Self {
@@ -509,5 +511,50 @@ mod owned_cross_join_build_tests {
         assert!(cross.right_rows.iter().all(Vec::is_empty));
         assert_eq!(cross.collect::<Result<Vec<_>>>().unwrap()
             .into_iter().map(|batch| batch.num_rows()).sum::<usize>(), 6);
+    }
+}
+
+#[cfg(test)]
+mod cross_join_output_clone_accounting_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn overallocated_build_text_does_not_reject_a_tiny_output_clone() {
+        let left_schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let right_schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let mut sparse = String::with_capacity(MAX_OUTPUT_BATCH_BYTES + 1024);
+        sparse.push_str("tiny");
+        let left = Batch::new_with_row_count(
+            left_schema.clone(), vec![vec![Value::Integer(1)]], 1,
+        ).unwrap();
+        let right = Batch::new_with_row_count(
+            right_schema.clone(), vec![vec![Value::Text(sparse)]], 1,
+        ).unwrap();
+        let mut output = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            left_schema, right_schema, 4, QueryControl::default(),
+        ).unwrap();
+        let rows = output.next().unwrap().unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(1), Value::Text("tiny".into())]]);
+        assert!(output.next().is_none());
+    }
+
+    #[test]
+    fn genuinely_large_cloned_output_text_still_fails() {
+        let left_schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let right_schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let left = Batch::new_with_row_count(
+            left_schema.clone(), vec![vec![Value::Integer(1)]], 1,
+        ).unwrap();
+        let right = Batch::new_with_row_count(
+            right_schema.clone(), vec![vec![Value::Text("x".repeat(MAX_OUTPUT_BATCH_BYTES))]], 1,
+        ).unwrap();
+        let mut output = CrossJoinStream::new(
+            Box::new([Ok(left)].into_iter()), Box::new([Ok(right)].into_iter()),
+            left_schema, right_schema, 4, QueryControl::default(),
+        ).unwrap();
+        assert!(output.next().unwrap().is_err());
+        assert!(output.next().is_none());
     }
 }
