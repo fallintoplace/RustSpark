@@ -1,5 +1,7 @@
 use crate::{batch::Batch, expr::Expr, scalar::Value, schema::DataType, Error, Result};
 
+const INITIAL_SELECTION_ROWS: usize = 4_096;
+
 /// WHERE keeps only rows for which the predicate evaluates to SQL TRUE.
 pub fn filter(batch: &Batch, predicate: &Expr) -> Result<Batch> {
     predicate.validate_budget()?;
@@ -103,7 +105,7 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
     if let Some((name, wanted)) = direct_column {
         let index = batch.schema().column(name)?;
         let column = batch.column(index)?;
-        let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
+        let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()).min(INITIAL_SELECTION_ROWS));
         for (row, value) in column.iter().enumerate() {
             if matches!(value, Value::Boolean(actual) if *actual == wanted) {
                 keep.push(row);
@@ -112,7 +114,7 @@ pub fn filter_first(batch: &Batch, predicate: &Expr, max_rows: usize) -> Result<
         }
         return batch.take(&keep);
     }
-    let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
+    let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()).min(INITIAL_SELECTION_ROWS));
     for row in 0..batch.num_rows() {
         if keep.len() == max_rows { break; }
         if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) {
@@ -143,7 +145,7 @@ pub fn filter_first_owned(batch: Batch, predicate: &Expr, max_rows: usize) -> Re
     if max_rows >= batch.num_rows() {
         return filter_owned(batch, predicate);
     }
-    let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()));
+    let mut keep = Vec::with_capacity(max_rows.min(batch.num_rows()).min(INITIAL_SELECTION_ROWS));
     let direct = match predicate {
         Expr::Column(name) => Some((name.as_str(), true)),
         Expr::Not(inner) => match inner.as_ref() {
@@ -527,5 +529,32 @@ mod direct_filter_expression_admission_regressions {
         assert!(filter_owned(input.clone(), &predicate).unwrap_err().to_string().contains("complexity budget"));
         assert!(filter_first(&input, &predicate, 0).unwrap_err().to_string().contains("complexity budget"));
         assert!(filter_first_owned(input, &predicate, 0).unwrap_err().to_string().contains("complexity budget"));
+    }
+}
+
+#[cfg(test)]
+mod sparse_bounded_filter_memory_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn large_limits_keep_only_rare_matches_in_both_ownership_modes() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..12_000)
+            .map(|n| vec![Value::Integer(n), Value::Text(format!("row-{n}"))])
+            .collect()).unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(11_995)),
+        );
+        let borrowed = filter_first(&batch, &predicate, 10_000).unwrap();
+        let owned = filter_first_owned(batch, &predicate, 10_000).unwrap();
+        assert_eq!(borrowed, owned);
+        assert_eq!(owned.num_rows(), 4);
+        assert_eq!(owned.value(0, 0).unwrap(), &Value::Integer(11_996));
+        assert_eq!(owned.value(3, 0).unwrap(), &Value::Integer(11_999));
     }
 }
