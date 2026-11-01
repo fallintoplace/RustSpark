@@ -64,6 +64,19 @@ fn split_part(args: &[Value]) -> Result<Value> {
                 else { None };
             return bounded_split_field(selected.unwrap_or(""));
         }
+        if from_end <= 256 {
+            // Keep a bounded ring of borrowed fields for larger negative
+            // offsets. One forward pass preserves nonoverlapping split order.
+            let mut recent = vec![None; from_end];
+            let mut seen = 0usize;
+            for field in text.split(delimiter) {
+                recent[seen % from_end] = Some(field);
+                seen += 1;
+            }
+            let selected = if seen >= from_end { recent[seen % from_end] }
+                else { None };
+            return bounded_split_field(selected.unwrap_or(""));
+        }
     }
     let result = if index > 0 {
         usize::try_from(index - 1).ok()
@@ -397,5 +410,32 @@ mod split_part_result_limit_regressions {
         assert_eq!(split_part(&args(3)).unwrap(), Value::Text(String::new()));
         assert_eq!(split_part(&[Value::Null, Value::Text(",".into()),
             Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod medium_tail_split_part_ring_tests {
+    use super::*;
+
+    #[test]
+    fn negative_offsets_match_forward_split_for_overlapping_and_unicode_delimiters() {
+        for (source, delimiter) in [
+            ("abaX".repeat(350), "aba"),
+            ("🙂a".repeat(350), "🙂a"),
+            ("aaaaa".repeat(180), "aa"),
+        ] {
+            let fields = source.split(delimiter).collect::<Vec<_>>();
+            for from_end in [17_usize, 32, 64, 128, 256, 257] {
+                let expected = fields.len().checked_sub(from_end)
+                    .and_then(|index| fields.get(index)).copied().unwrap_or("");
+                let result = split_part(&[
+                    Value::Text(source.clone()),
+                    Value::Text(delimiter.into()),
+                    Value::Integer(-(from_end as i64)),
+                ]).unwrap();
+                assert_eq!(result, Value::Text(expected.into()),
+                    "delimiter={delimiter:?} from_end={from_end}");
+            }
+        }
     }
 }

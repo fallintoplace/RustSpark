@@ -183,6 +183,7 @@ fn top_two_column_indices(column: &[Value], descending: bool, nulls_first: bool)
 
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
+        key.expression.validate_budget()?;
         key.expression.output_type(batch.schema())?;
     }
     if k == 0 { return batch.take(&[]); }
@@ -279,6 +280,7 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
 /// deep-copying TEXT. Other key shapes retain the borrowed implementation.
 pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
+        key.expression.validate_budget()?;
         key.expression.output_type(batch.schema())?;
     }
     if k == 0 { return batch.take_unique_owned(&[]); }
@@ -423,6 +425,7 @@ mod tests {
 pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize) -> Result<Batch> {
     if count == 0 {
         for key in keys {
+            key.expression.validate_budget()?;
             key.expression.output_type(batch.schema())?;
         }
         return batch.take(&[]);
@@ -434,6 +437,7 @@ pub fn top_k_offset(batch: &Batch, keys: &[SortKey], offset: usize, count: usize
     if offset >= batch.num_rows() &&
         keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         for key in keys {
+            key.expression.validate_budget()?;
             key.expression.output_type(batch.schema())?;
         }
         return batch.take(&[]);
@@ -1060,6 +1064,28 @@ mod direct_column_top_two_regressions {
                 assert_eq!(top_k(&input, &keys, 2).unwrap().rows().unwrap(), expected);
                 assert_eq!(top_k_owned(input.clone(), &keys, 2).unwrap().rows().unwrap(), expected);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_topk_expression_budget_tests {
+    use super::*;
+    use crate::schema::Schema;
+
+    #[test]
+    fn oversized_keys_fail_even_for_empty_and_zero_limit_inputs() {
+        let empty = Batch::empty(Schema::new(vec![]).unwrap());
+        let mut expression = Expr::Literal(Value::Boolean(true));
+        for _ in 0..80 { expression = Expr::Not(Box::new(expression)); }
+        let keys = [SortKey::ascending(expression)];
+        for result in [
+            top_k(&empty, &keys, 0),
+            top_k_owned(empty.clone(), &keys, 0),
+            top_k_offset(&empty, &keys, 0, 0),
+            top_k_offset(&empty, &keys, 4, 1),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("complexity budget"));
         }
     }
 }
