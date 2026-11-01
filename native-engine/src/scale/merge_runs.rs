@@ -657,7 +657,7 @@ mod composite_integer_heap_fast_path_tests {
             let runs = write_sorted_runs([Ok(input.clone())], schema.clone(), &keys,
                 &dir, 5, &QueryControl::default()).unwrap();
             let actual = RunMerger::new(runs.files(), schema.clone(), &keys, 3, 8,
-                QueryControl::default()).unwrap().collect::<Result<Vec<_>>().unwrap()
+                QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap()
                 .iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
             assert_eq!(actual, expected);
             drop(runs);
