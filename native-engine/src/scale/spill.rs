@@ -110,6 +110,57 @@ impl<W: Write> SpillWriter<W> {
         self.write_batch_range(batch, 0, batch.num_rows())
     }
 
+    /// Write a large validated batch as individually admissible wire windows.
+    /// This preserves source row order and avoids allocating gathered batches.
+    pub fn write_batch_bounded(&mut self, batch: &Batch, max_rows: usize) -> Result<()> {
+        self.write_batch_bounded_with_budget(batch, max_rows, MAX_BATCH_BYTES)
+    }
+
+    fn write_batch_bounded_with_budget(
+        &mut self, batch: &Batch, max_rows: usize, max_bytes: usize,
+    ) -> Result<()> {
+        if batch.schema() != &self.schema {
+            return Err(Error::Schema("spill batch schema mismatch".into()));
+        }
+        if max_rows == 0 || max_bytes < 4 || max_bytes > MAX_BATCH_BYTES {
+            return Err(Error::Execution("invalid spill batch window limits".into()));
+        }
+        let rows_per_window = max_rows.min(MAX_CELLS / self.schema.len().max(1));
+        let columns = (0..self.schema.len())
+            .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
+        let mut start = 0;
+        while start < batch.num_rows() {
+            let mut end = start;
+            let mut bytes = 4usize;
+            while end < batch.num_rows() && end - start < rows_per_window {
+                let mut row_bytes = self.schema.len();
+                for column in &columns {
+                    let additional = match &column[end] {
+                        Value::Integer(_) | Value::Float(_) => 8,
+                        Value::Text(text) => {
+                            if text.len() > MAX_TEXT_BYTES {
+                                return Err(Error::Execution("spill text value too long".into()));
+                            }
+                            text.len() + 4
+                        }
+                        Value::Null | Value::Boolean(_) => 0,
+                    };
+                    row_bytes = row_bytes.checked_add(additional)
+                        .ok_or_else(|| Error::Execution("spill batch byte overflow".into()))?;
+                }
+                if row_bytes > max_bytes - 4 {
+                    return Err(Error::Execution("spill row exceeds byte limit".into()));
+                }
+                if row_bytes > max_bytes - bytes { break; }
+                bytes += row_bytes;
+                end += 1;
+            }
+            self.write_batch_range(batch, start, end)?;
+            start = end;
+        }
+        Ok(())
+    }
+
     pub fn write_batch_range(&mut self, batch: &Batch, start: usize, end: usize) -> Result<()> {
         if start > end || end > batch.num_rows() {
             return Err(Error::Execution("invalid spill batch row range".into()));
@@ -945,5 +996,50 @@ mod buffered_spill_input_regressions {
         assert_eq!(reader.next_batch().unwrap(), Some(batch));
         assert!(reader.next_batch().unwrap().is_none());
         assert!(calls.get() < 30, "buffered reader used {} source calls", calls.get());
+    }
+}
+
+#[cfg(test)]
+mod bounded_wire_batch_windows_regressions {
+    use super::*;
+
+    #[test]
+    fn splits_by_bytes_without_losing_order_and_null_values() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let values = vec![
+            Value::Text("1234567".into()), Value::Text("abcdefg".into()),
+            Value::Text("7654321".into()), Value::Text("hijklmn".into()), Value::Null,
+        ];
+        let batch = Batch::from_rows(schema.clone(), values.iter()
+            .cloned().map(|value| vec![value]).collect()).unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = SpillWriter::new(&mut bytes, schema.clone()).unwrap();
+        writer.write_batch_bounded_with_budget(&batch, 10, 28).unwrap();
+        writer.finish().unwrap();
+        let mut reader = SpillReader::new(bytes.as_slice(), 10).unwrap();
+        let mut all = Vec::new();
+        let mut counts = Vec::new();
+        while let Some(batch) = reader.next_batch().unwrap() {
+            counts.push(batch.num_rows());
+            all.extend(batch.column(0).unwrap().iter().cloned());
+        }
+        assert_eq!(counts, vec![2, 2, 1]);
+        assert_eq!(all, values);
+    }
+
+    #[test]
+    fn respects_cell_counts_and_rejects_oversized_single_rows() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("short".into())],
+            vec![Value::Text("x".repeat(100))],
+        ]).unwrap();
+        let mut output = Vec::new();
+        let mut writer = SpillWriter::new(&mut output, schema).unwrap();
+        assert!(writer.write_batch_bounded_with_budget(&batch, 8, 32).is_err());
+        writer.finish().unwrap();
+        let mut reader = SpillReader::new(output.as_slice(), 8).unwrap();
+        // The invalid row is rejected before this batch's header is emitted.
+        assert!(reader.next_batch().unwrap().is_none());
     }
 }
