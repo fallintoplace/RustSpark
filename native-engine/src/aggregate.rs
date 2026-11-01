@@ -471,14 +471,15 @@ pub fn aggregate_with_limits(
                 let owned_key = key.drain(..).map(std::borrow::Cow::into_owned)
                     .collect::<Vec<_>>();
                 let bytes = group_key_state_bytes(&owned_key, items.len())?;
-                let next = retained_group_bytes.checked_add(bytes)
-                    .and_then(|size| size.checked_add(retained_distinct_bytes))
+                let next_group_bytes = retained_group_bytes.checked_add(bytes)
+                    .ok_or_else(|| Error::Execution("GROUP BY key state byte budget exceeded".into()))?;
+                next_group_bytes.checked_add(retained_distinct_bytes)
                     .filter(|&size| size <= max_key_state_bytes)
                     .ok_or_else(|| Error::Execution("GROUP BY key state byte budget exceeded".into()))?;
                 let index = groups.len();
                 groups.push((owned_key, items.iter().map(|item| State::new(&item.op)).collect()));
                 group_indices.entry(fingerprint).or_default().push(index);
-                retained_group_bytes += bytes;
+                retained_group_bytes = next_group_bytes;
                 index
             }
         };
