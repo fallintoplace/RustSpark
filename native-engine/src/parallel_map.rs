@@ -42,7 +42,7 @@ where
     let failed = AtomicBool::new(false);
     // Each task has a unique index, so results can be published without a
     // contended global output mutex.
-    let output: Vec<OnceLock<Result<Batch>>> =
+    let mut output: Vec<OnceLock<Result<Batch>>> =
         std::iter::repeat_with(OnceLock::new).take(count).collect();
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -73,9 +73,14 @@ where
     });
     // A cancelled task may precede the failed task in input order.
     // Return the actual operator error instead of a missing-result error.
-    if let Some(error) = output.iter().filter_map(OnceLock::get)
-        .find_map(|result| result.as_ref().err()) {
-        return Err(error.clone());
+    if let Some(index) = output.iter()
+        .position(|slot| slot.get().is_some_and(Result::is_err)) {
+        // Workers are joined. Move out the original error instead of
+        // cloning its (possibly large) diagnostics under error fan-out.
+        let Err(error) = output[index].take().expect("failed result is published") else {
+            unreachable!("selected a failed result");
+        };
+        return Err(error);
     }
     output.into_iter()
         .map(|slot| slot.into_inner().unwrap_or_else(|| Err(Error::Execution("missing partition result".into()))))
@@ -340,5 +345,29 @@ mod fixed_claim_array_tests {
                 assert_eq!(batch.value(0, 0).unwrap(), &Value::Integer(index as i64));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod owned_parallel_error_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn preserves_actual_error_after_skipping_unstarted_partitions() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let input = (0..64).map(|n| Batch::from_rows(
+            schema.clone(), vec![vec![Value::Integer(n)]],
+        ).unwrap()).collect();
+        let expected = "operator failed: ".to_string() + &"x".repeat(8192);
+        let result = map_partitions(input, 8, |batch| {
+            if batch.value(0, 0)? == &Value::Integer(0) {
+                return Err(Error::Execution(expected.clone()));
+            }
+            Ok(batch)
+        });
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("operator failed: "));
+        assert!(error.contains(&"x".repeat(8192)));
     }
 }

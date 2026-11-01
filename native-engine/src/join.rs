@@ -19,6 +19,7 @@ pub enum JoinKind {
 }
 
 const MAX_JOIN_ROWS: usize = 1_000_000;
+const MAX_MATERIALIZED_JOIN_BYTES: usize = 256 * 1024 * 1024;
 
 fn joinable(key: &Value) -> bool {
     !key.is_null()
@@ -54,6 +55,27 @@ pub fn cross_join_with_max_rows(
     let schema = Schema::new(fields)?;
     if count == 0 {
         return Ok(Batch::empty(schema));
+    }
+    // Row-count limits alone permit huge allocations when both sides have
+    // wide TEXT values. Preflight the retained output before cloning cells.
+    let fixed_width = schema.len().checked_mul(std::mem::size_of::<Value>())
+        .ok_or_else(|| Error::Execution("CROSS JOIN output byte estimate overflow".into()))?;
+    let mut output_bytes = count.checked_mul(fixed_width)
+        .filter(|bytes| *bytes <= MAX_MATERIALIZED_JOIN_BYTES)
+        .ok_or_else(|| Error::Execution("CROSS JOIN output exceeds byte limit".into()))?;
+    for (source, repeats) in [(left, right.num_rows()), (right, left.num_rows())] {
+        for (column, field) in source.schema().fields().iter().enumerate() {
+            if field.data_type != crate::schema::DataType::Text { continue; }
+            for value in source.column(column)? {
+                if let Value::Text(text) = value {
+                    let bytes = text.len().checked_mul(repeats)
+                        .ok_or_else(|| Error::Execution("CROSS JOIN output byte estimate overflow".into()))?;
+                    output_bytes = output_bytes.checked_add(bytes)
+                        .filter(|total| *total <= MAX_MATERIALIZED_JOIN_BYTES)
+                        .ok_or_else(|| Error::Execution("CROSS JOIN output exceeds byte limit".into()))?;
+                }
+            }
+        }
     }
     let mut columns = Vec::with_capacity(schema.len());
     for index in 0..left.schema().len() {
@@ -822,5 +844,41 @@ mod validated_join_output_tests {
         assert_eq!(result.row(1).unwrap(),
             vec![Value::Null, Value::Null, Value::Null, Value::Null]);
         assert_eq!(result, hash_join(&left, &right, "k", "k", JoinKind::Left).unwrap());
+    }
+}
+
+
+#[cfg(test)]
+mod materialized_cross_join_byte_budget_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn refuses_wide_text_cartesian_product_before_allocating_output() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap(), vec![vec![Value::Text("x".repeat(1024 * 1024))]]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), (0..400).map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let error = cross_join(&left, &right).unwrap_err();
+        assert!(error.to_string().contains("byte limit"));
+    }
+
+    #[test]
+    fn modest_wide_text_and_nulls_still_keep_exact_cartesian_rows() {
+        let left = Batch::from_rows(Schema::new(vec![
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Text("🙂".repeat(256))], vec![Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap(), vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]).unwrap();
+        let output = cross_join(&left, &right).unwrap();
+        assert_eq!(output.num_rows(), 4);
+        assert_eq!(output.value(0, 0).unwrap(), left.value(0, 0).unwrap());
+        assert_eq!(output.value(3, 0).unwrap(), &Value::Null);
+        assert_eq!(output.value(3, 1).unwrap(), &Value::Integer(2));
     }
 }

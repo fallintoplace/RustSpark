@@ -107,6 +107,35 @@ impl<R: BufRead> CsvRows<R> {
                     continue;
                 }
             }
+            // A quoted field can contain delimiters and newlines. Only a
+            // quote changes its state, so copy the entire buffered byte run.
+            if state == QuoteState::Quoted {
+                let plain = available.iter().position(|&byte| byte == b'"')
+                    .unwrap_or(available.len());
+                if plain != 0 {
+                    if bytes.len().saturating_add(plain) > self.max_record_bytes {
+                        return Err(Error::Execution("CSV record exceeds byte limit".into()));
+                    }
+                    bytes.extend_from_slice(&available[..plain]);
+                    self.reader.consume(plain);
+                    continue;
+                }
+            }
+            if state == QuoteState::Quoted {
+                // Commas and line breaks inside a quoted value are data.
+                // Copy the span up to the next quote without dispatching a
+                // CSV state transition for every byte of a wide text field.
+                let plain = available.iter().position(|&byte| byte == b'"')
+                    .unwrap_or(available.len());
+                if plain > 0 {
+                    if bytes.len().saturating_add(plain) > self.max_record_bytes {
+                        return Err(Error::Execution("CSV record exceeds byte limit".into()));
+                    }
+                    bytes.extend_from_slice(&available[..plain]);
+                    self.reader.consume(plain);
+                    continue;
+                }
+            }
             let mut consumed = 0;
             let mut complete = false;
             for &byte in available {
@@ -467,5 +496,77 @@ mod bulk_plain_csv_scan_regressions {
         assert_eq!(rows, vec![vec![Value::Text("a".into())]]);
         let mut rows = CsvRows::new(Cursor::new("x\nabc\n"), schema, 2).unwrap();
         assert!(matches!(rows.next(), Some(Err(Error::Execution(_)))));
+    }
+}
+
+
+#[cfg(test)]
+mod wide_quoted_record_bulk_scan_regressions {
+    use super::*;
+    use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn quoted_multiline_and_doubled_quotes_survive_tiny_buffer_boundaries() {
+        let schema = Schema::new(vec![Field::new("note", DataType::Text, false)]).unwrap();
+        let wide = "abc,\r\n".repeat(512);
+        let source = format!("note\r\n\"{wide}\"\"\"\r\n\"second\"\r\n");
+        let reader = BufReader::with_capacity(3, Cursor::new(source));
+        let rows = CsvRows::new(reader, schema, 32_768).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Text(format!("{wide}\""))],
+            vec![Value::Text("second".into())],
+        ]);
+    }
+
+    #[test]
+    fn wide_quoted_payload_still_respects_record_budget() {
+        let schema = Schema::new(vec![Field::new("note", DataType::Text, false)]).unwrap();
+        let source = format!("note\n\"{}\"\n", "x".repeat(2048));
+        let mut rows = CsvRows::new(
+            BufReader::with_capacity(11, Cursor::new(source)),
+            schema, 1024,
+        ).unwrap();
+        assert!(matches!(rows.next(), Some(Err(Error::Execution(_)))));
+        assert!(rows.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod quoted_scale_csv_buffered_run_tests {
+    use super::*;
+    use std::io::{BufReader, Cursor};
+    use crate::schema::{DataType, Field, Schema};
+
+    fn schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("text", DataType::Text, false),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn copies_long_multiline_quoted_unicode_fields_without_losing_escapes() {
+        let prefix = "é🙂".repeat(1500);
+        let suffix = "東京".repeat(1100);
+        let text = format!("{prefix},\r\n\"{suffix}");
+        let source = format!("id,text\r\n1,\"{prefix},\r\n\"\"{suffix}\"\r\n2,done\n");
+        let reader = BufReader::with_capacity(13, Cursor::new(source.into_bytes()));
+        let rows = CsvRows::new(reader, schema(), 32 * 1024)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(1), Value::Text(text)],
+            vec![Value::Integer(2), Value::Text("done".into())],
+        ]);
+    }
+
+    #[test]
+    fn long_quoted_field_cannot_bypass_raw_record_budget() {
+        let payload = "x".repeat(10_000);
+        let input = format!("id,text\n1,\"{payload}\"\n");
+        let reader = BufReader::with_capacity(17, Cursor::new(input));
+        let mut rows = CsvRows::new(reader, schema(), 8192).unwrap();
+        assert!(matches!(rows.next(), Some(Err(Error::Execution(_)))));
+        assert!(rows.next().is_none());
     }
 }
