@@ -168,5 +168,40 @@ class PolarsArrowDiskBudgetTests(unittest.TestCase):
                                            diagnostics, 2, output, 128), 0)
 
 
+
+class NamedSQLParameterTests(unittest.TestCase):
+    def test_typed_params_have_stable_order_and_bounded_utf8_values(self):
+        build = lambda params: build_command("SELECT $a", Path("result.arrow"), named_params=params)
+        command = build({"z": "int64:9", "a": "utf8:hello world"})
+        pairs = [command[i+1] for i, arg in enumerate(command[:-1]) if arg == "--named-param"]
+        self.assertEqual(pairs, ["a=utf8:hello world", "z=int64:9"])
+        self.assertIn("a=utf8:hello world", command)
+        self.assertIn("p=" + "utf8:" + "é" * 4093 + "a",
+                      build({"p": "utf8:" + "é" * 4093 + "a"}))
+        for invalid in (
+            {"bad-name": "int64:1"},
+            {"x": "untyped"},
+            {"x": 123},
+            {"x": "utf8:" + "é" * 4093 + "aa"},
+            {str(i): "int64:1" for i in range(65)},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                build(invalid)
+
+    def test_lazy_export_forwards_named_parameters(self):
+        captured = []
+        def launch(args, **kwargs):
+            captured.extend(args)
+            return SimpleNamespace(wait=lambda timeout=None: 0, poll=lambda: 0)
+        fake_polars = SimpleNamespace(scan_ipc=lambda path: "frame")
+        with patch.dict(sys.modules, {"polars": fake_polars}), patch(
+            "query_lazy.subprocess.Popen", side_effect=launch
+        ):
+            with rustspark_lazy_frame("SELECT $p",
+                                     named_params={"p": "int64:7"}) as frame:
+                self.assertEqual(frame, "frame")
+        self.assertIn("p=int64:7", captured)
+
+
 if __name__ == "__main__":
     unittest.main()
