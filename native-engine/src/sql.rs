@@ -94,6 +94,7 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
         AggregateOp::AvgDistinct(expr) => AggregateOp::AvgDistinct(filtered(expr)),
         AggregateOp::Min(expr) => AggregateOp::Min(filtered(expr)),
         AggregateOp::Max(expr) => AggregateOp::Max(filtered(expr)),
+        AggregateOp::BitXor(expr) => AggregateOp::BitXor(filtered(expr)),
         AggregateOp::BitOr(expr) => AggregateOp::BitOr(filtered(expr)),
         AggregateOp::BitAnd(expr) => AggregateOp::BitAnd(filtered(expr)),
     }
@@ -591,7 +592,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR"]
+                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR", "BIT_XOR"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -623,6 +624,7 @@ impl Parser {
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(expr)),
                     "MIN" => AggregateOp::Min(expr),
                     "MAX" => AggregateOp::Max(expr),
+                    "BIT_XOR" => AggregateOp::BitXor(expr),
                     "BIT_OR" => AggregateOp::BitOr(expr),
                     "BIT_AND" => AggregateOp::BitAnd(expr),
                     _ => unreachable!(),
@@ -1201,7 +1203,7 @@ fn rewrite_having(
             Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
         }
         Expr::Call { name, args } if
-            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR"]
+            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR", "BIT_XOR"]
                 .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
         {
             let op = if name.eq_ignore_ascii_case("__spark_count_star") {
@@ -1220,6 +1222,7 @@ fn rewrite_having(
                     "BOOL_OR" | "ANY" | "SOME" => AggregateOp::Max(boolean_aggregate_expr(argument)),
                     "MIN" => AggregateOp::Min(argument),
                     "MAX" => AggregateOp::Max(argument),
+                    "BIT_XOR" => AggregateOp::BitXor(argument),
                     "BIT_OR" => AggregateOp::BitOr(argument),
                     "BIT_AND" => AggregateOp::BitAnd(argument),
                     _ => unreachable!(),

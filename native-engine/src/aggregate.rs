@@ -20,6 +20,7 @@ pub enum AggregateOp {
     AvgDistinct(Expr),
     Min(Expr),
     Max(Expr),
+    BitXor(Expr),
     BitOr(Expr),
     BitAnd(Expr),
 }
@@ -36,7 +37,8 @@ fn validate_aggregate_items(items: &[AggregateItem]) -> Result<()> {
             | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
             | AggregateOp::Min(expr) | AggregateOp::Max(expr) 
             | AggregateOp::BitAnd(expr) 
-            | AggregateOp::BitOr(expr) => expr.validate_budget()?,
+            | AggregateOp::BitOr(expr) 
+            | AggregateOp::BitXor(expr) => expr.validate_budget()?,
         }
     }
     Ok(())
@@ -95,6 +97,15 @@ impl AggregateItem {
                 if kind == DataType::Integer { Ok(DataType::Integer) }
                 else { Err(Error::Type("BIT_OR requires integer input".into())) }
             },
+            AggregateOp::BitXor(expr) => {
+                let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                    DataType::Integer
+                } else {
+                    expr.output_type(schema)?
+                };
+                if kind == DataType::Integer { Ok(DataType::Integer) }
+                else { Err(Error::Type("BIT_XOR requires integer input".into())) }
+            },
         }
     }
 }
@@ -109,6 +120,7 @@ enum State {
     AvgDistinct { seen: HashSet<Value>, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
+    BitXor(Option<i64>),
     BitOr(Option<i64>),
     BitAnd(Option<i64>),
 }
@@ -125,6 +137,7 @@ impl State {
                 Self::AvgDistinct { seen: HashSet::new(), sum: 0.0, compensation: 0.0, count: 0 },
             AggregateOp::Min(_) => Self::Min(None),
             AggregateOp::Max(_) => Self::Max(None),
+            AggregateOp::BitXor(_) => Self::BitXor(None),
             AggregateOp::BitOr(_) => Self::BitOr(None),
             AggregateOp::BitAnd(_) => Self::BitAnd(None),
         }
@@ -148,7 +161,8 @@ impl State {
             | AggregateOp::Min(expr)
             | AggregateOp::Max(expr) 
             | AggregateOp::BitAnd(expr) 
-            | AggregateOp::BitOr(expr) => match expr {
+            | AggregateOp::BitOr(expr) 
+            | AggregateOp::BitXor(expr) => match expr {
                 Expr::Column(name) =>
                     Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
                 _ => Cow::Owned(expr.evaluate(batch, row)?),
@@ -220,6 +234,13 @@ impl State {
                 },
                 _ => return Err(Error::Type("BIT_OR requires integer input".into())),
             },
+            Self::BitXor(aggregate) => match value.as_ref() {
+                Value::Null => {},
+                Value::Integer(number) => {
+                    *aggregate = Some((*aggregate).map_or(*number, |prior| prior ^ *number));
+                },
+                _ => return Err(Error::Type("BIT_XOR requires integer input".into())),
+            },
         }
         Ok(())
     }
@@ -238,6 +259,7 @@ impl State {
             Self::SumDistinct { total, .. } => total.unwrap_or(Value::Null),
             Self::BitAnd(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::BitOr(value) => value.map(Value::Integer).unwrap_or(Value::Null),
+            Self::BitXor(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::Sum(value) | Self::Min(value) | Self::Max(value) => {
                 value.unwrap_or(Value::Null)
             }
