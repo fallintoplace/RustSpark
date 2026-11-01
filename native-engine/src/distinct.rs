@@ -74,8 +74,12 @@ fn distinct_indices(batch: &Batch, max_keys: usize, max_bytes: usize) -> Result<
     let mut seen = HashMap::<BorrowedRow<'_>, ()>::new();
     let mut used = 0usize;
     let mut indices = Vec::new();
+    let mut previous = None;
     for row in 0..batch.num_rows() {
         let key = BorrowedRow { columns: &columns, row };
+        // Adjacent equal rows cannot introduce a new key or consume budget.
+        if previous == Some(key) { continue; }
+        previous = Some(key);
         let at_limit = seen.len() >= max_keys;
         match seen.entry(key) {
             Entry::Occupied(_) => {}
@@ -541,5 +545,34 @@ mod adjacent_distinct_on_runs {
         assert_eq!(result.column(2).unwrap(), &[
             Value::Integer(0), Value::Integer(2), Value::Integer(4),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod clustered_full_row_distinct_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+    use std::collections::HashSet;
+
+    #[test]
+    fn consecutive_wide_nullable_rows_use_first_occurrence() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let wide = "東京é".repeat(300);
+        let rows = (0..800).map(|i| {
+            if i % 80 < 65 { vec![Value::Integer((i / 80) as i64), Value::Text(wide.clone())] }
+            else if i % 80 < 75 { vec![Value::Null, Value::Null] }
+            else { vec![Value::Integer(50), Value::Text("other".into())] }
+        }).collect::<Vec<_>>();
+        let mut unique = HashSet::new();
+        let expected = rows.iter().filter(|row| unique.insert((*row).clone())).cloned().collect::<Vec<_>>();
+        let input = Batch::from_rows(schema, rows).unwrap();
+        let borrowed = distinct_with_budget(&input, 12, usize::MAX).unwrap();
+        let owned = distinct_owned_with_budget(input.clone(), 12, usize::MAX).unwrap();
+        assert_eq!(borrowed.rows().unwrap(), expected);
+        assert_eq!(owned.rows().unwrap(), expected);
+        assert!(distinct_with_limit(&input, 11).is_err());
     }
 }
