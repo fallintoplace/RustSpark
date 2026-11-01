@@ -59,6 +59,54 @@ fn borrowed_like_operand<'a>(
 }
 
 impl Expr {
+    /// Reject hostile expression trees before recursive inference, cloning or
+    /// execution. SQL left-associative chains can be deep without nested parentheses.
+    pub(crate) fn validate_budget(&self) -> Result<()> {
+        const MAX_DEPTH: usize = 64;
+        const MAX_NODES: usize = 4096;
+        let mut pending = vec![(self, 0usize)];
+        let mut visited = 0usize;
+        while let Some((node, depth)) = pending.pop() {
+            visited += 1;
+            if visited > MAX_NODES || depth >= MAX_DEPTH {
+                return Err(Error::Execution("native SQL expression exceeds complexity budget".into()));
+            }
+            let next = depth + 1;
+            match node {
+                Self::Column(_) | Self::Literal(_) => {}
+                Self::Not(inner) | Self::IsNull(inner)
+                | Self::Cast { expression: inner, .. }
+                | Self::TryCast { expression: inner, .. } =>
+                    pending.push((inner, next)),
+                Self::Binary { left, right, .. }
+                | Self::IsDistinctFrom { left, right, .. } => {
+                    pending.push((left, next));
+                    pending.push((right, next));
+                }
+                Self::Like { value, pattern, escape } => {
+                    pending.push((value, next));
+                    pending.push((pattern, next));
+                    if let Some(escape) = escape { pending.push((escape, next)); }
+                }
+                Self::Case { branches, else_expr } => {
+                    for (condition, value) in branches {
+                        pending.push((condition, next));
+                        pending.push((value, next));
+                    }
+                    if let Some(value) = else_expr { pending.push((value, next)); }
+                }
+                Self::Call { args, .. } => {
+                    for arg in args { pending.push((arg, next)); }
+                }
+                Self::InList { needle, choices, .. } => {
+                    pending.push((needle, next));
+                    for choice in choices { pending.push((choice, next)); }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn binary(left: Self, op: BinaryOp, right: Self) -> Self {
         Self::Binary {
             left: Box::new(left),
