@@ -36,25 +36,11 @@ impl DictionaryColumn {
                 }
                 Value::Text(text) => {
                     let key = text.as_str();
-                    let id = if let Some((last, code)) = previous {
-                        if last == key {
-                            code
-                        } else if let Some(&code) = seen.get(key) {
-                            code
-                        } else {
-                            if dictionary.len() >= max_distinct {
-                                return Err(Error::Execution("dictionary cardinality limit exceeded".into()));
-                            }
-                            bytes = bytes.checked_add(text.len())
-                                .filter(|total| *total <= max_dictionary_bytes)
-                                .ok_or_else(|| Error::Execution("dictionary byte limit exceeded".into()))?;
-                            let code = u32::try_from(dictionary.len())
-                                .map_err(|_| Error::Execution("dictionary ID overflow".into()))?;
-                            dictionary.push(text.clone());
-                            seen.insert(key, code);
-                            code
-                        }
-                    } else if let Some(&code) = seen.get(key) {
+                    // Reuse a clustered key's code without probing the table.
+                    // All other keys take one lookup and one admission path.
+                    let cached = previous.and_then(|(last, code)|
+                        (last == key).then_some(code));
+                    let id = if let Some(code) = cached.or_else(|| seen.get(key).copied()) {
                         code
                     } else {
                         if dictionary.len() >= max_distinct {
@@ -741,5 +727,32 @@ mod shared_dictionary_decode_fast_path_tests {
         assert_eq!(shared.clone().into_decoded_with_budget(budget).unwrap(), values);
         assert!(shared.into_decoded_with_budget(budget - 1).is_err());
         assert_eq!(encoded.decode_with_budget(budget).unwrap(), values);
+    }
+}
+
+#[cfg(test)]
+mod clustered_dictionary_encoding_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn consecutive_and_nonadjacent_utf8_keys_share_codes_with_null_boundaries() {
+        let schema = Schema::new(vec![Field::new("s", DataType::Text, true)]).unwrap();
+        let wide = "🦀".repeat(1024);
+        let mut values = Vec::new();
+        values.extend(std::iter::repeat_n(Value::Text(wide.clone()), 1024));
+        values.push(Value::Null);
+        values.extend(std::iter::repeat_n(Value::Text("small".into()), 129));
+        values.extend(std::iter::repeat_n(Value::Text(wide.clone()), 64));
+        values.push(Value::Null);
+        let batch = Batch::from_rows(schema, values.iter().cloned()
+            .map(|value| vec![value]).collect()).unwrap();
+        let bytes = wide.len() + "small".len();
+        let encoded = DictionaryColumn::from_batch(&batch, "s", 2, bytes, values.len()).unwrap();
+        assert_eq!(encoded.distinct_count(), 2);
+        assert_eq!(encoded.encoded_string_bytes(), bytes);
+        assert_eq!(encoded.decode_with_budget(8 * 1024 * 1024).unwrap(), values);
+        assert!(DictionaryColumn::from_batch(&batch, "s", 1, bytes, batch.num_rows()).is_err());
+        assert!(DictionaryColumn::from_batch(&batch, "s", 2, bytes - 1, batch.num_rows()).is_err());
     }
 }

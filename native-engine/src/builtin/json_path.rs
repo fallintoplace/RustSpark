@@ -19,6 +19,10 @@ impl std::io::Write for JsonOutput {
         if chunk.len() > self.limit.saturating_sub(self.bytes.len()) {
             return Err(std::io::Error::other("native JSON output exceeds byte budget"));
         }
+        // The byte ceiling also needs a fallible allocation. A legal
+        // serialized size is not a guarantee that the host can reserve it.
+        self.bytes.try_reserve(chunk.len())
+            .map_err(|_| std::io::Error::other("native JSON output allocation failed"))?;
         self.bytes.extend_from_slice(chunk);
         Ok(chunk.len())
     }
@@ -215,5 +219,21 @@ mod json_path_escaped_unicode_key_tests {
         assert!(lookup(Some(&doc), r#"$.root["bad\q"]"#).is_err());
         assert!(lookup(Some(&doc), r#"$.root["\uD83D"]"#).is_err());
         assert!(lookup(Some(&doc), r#"$.root["a\u002eb""#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_json_writer_admission_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn failed_byte_admission_does_not_mutate_previous_output() {
+        let mut writer = JsonOutput { bytes: Vec::new(), limit: 6 };
+        writer.write_all(b"abc").unwrap();
+        assert!(writer.write_all(b"defg").is_err());
+        assert_eq!(writer.bytes, b"abc");
+        writer.write_all(b"def").unwrap();
+        assert_eq!(writer.bytes, b"abcdef");
     }
 }

@@ -42,6 +42,10 @@ impl std::io::Write for KeyOutput {
         if chunk.len() > self.limit.saturating_sub(self.bytes.len()) {
             return Err(std::io::Error::other("JSON_OBJECT_KEYS output exceeds byte budget"));
         }
+        // The byte ceiling also needs a fallible allocation. A legal
+        // serialized size is not a guarantee that the host can reserve it.
+        self.bytes.try_reserve(chunk.len())
+            .map_err(|_| std::io::Error::other("JSON_OBJECT_KEYS output allocation failed"))?;
         self.bytes.extend_from_slice(chunk);
         Ok(chunk.len())
     }
