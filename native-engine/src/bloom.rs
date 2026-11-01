@@ -48,7 +48,16 @@ impl BloomFilter {
             return Err(Error::Execution("Bloom filter target exceeds hash probe budget".into()));
         }
         let hashes = optimal_hashes.round().clamp(1.0, 16.0) as u32;
-        Self::new(bits, hashes)
+        // The optimal continuous hash count was rounded to an integer.
+        // Recompute the minimum size for that actual probe count so the
+        // theoretical FPR does not drift above the caller's target.
+        let probes = f64::from(hashes);
+        let needed = -(probes * expected_items as f64)
+            / (-target_fpr.powf(1.0 / probes)).ln_1p();
+        if !needed.is_finite() || needed > (1usize << 29) as f64 {
+            return Err(Error::Execution("Bloom filter target exceeds bitset budget".into()));
+        }
+        Self::new(bits.max(needed.ceil() as usize), hashes)
     }
 
     pub fn new(bits: usize, hashes: u32) -> Result<Self> {
@@ -841,6 +850,24 @@ mod fallible_bloom_admission_regressions {
                 assert!(filter.might_contain(&Value::Integer(value)));
             }
             assert!(filter.bits_set() <= bits);
+        }
+    }
+}
+
+#[cfg(test)]
+mod rounded_bloom_fpr_budget_tests {
+    use super::*;
+
+    #[test]
+    fn rounded_hash_counts_do_not_exceed_theoretical_target_rate() {
+        for (items, target) in [(1000, 0.01), (1000, 0.1),
+            (10000, 0.01), (100, 0.0001)] {
+            let filter = BloomFilter::for_expected_items(items, target).unwrap();
+            let probes = f64::from(filter.hashes);
+            let rate = (1.0 - (-(probes * items as f64) /
+                filter.bits as f64).exp()).powf(probes);
+            assert!(rate <= target * (1.0 + 1e-12),
+                "items={items}, target={target}, estimated={rate}");
         }
     }
 }
