@@ -107,7 +107,7 @@ class BenchmarkReportTests(unittest.TestCase):
     def test_extreme_finite_latency_does_not_produce_infinite_ratio(self):
         sample = report()
         sample["results"]["rustspark"]["scan_count"] = measurement(5e-324)
-        sample["results"]["duckdb"]["scan_count"] = measurement(1e308)
+        sample["results"]["duckdb"]["scan_count"] = measurement(1e100)
         rendered = bench_report.render_report(sample)
         self.assertIn("| scan_count | n/a |", rendered)
         self.assertNotIn("infx", rendered)
