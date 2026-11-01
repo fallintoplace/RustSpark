@@ -183,6 +183,40 @@ class StreamDeadlineTests(unittest.TestCase):
             if os.name == "posix":
                 kill_group.assert_called()
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
+    def test_deadline_kills_descendants_after_parent_exits(self):
+        class ExitedParent:
+            pid = 123457
+            stdout = io.BytesIO()
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        class ImmediateTimer:
+            def __init__(self, _timeout, callback):
+                self.callback = callback
+                self.daemon = False
+
+            def start(self):
+                self.callback()
+
+            def cancel(self):
+                pass
+
+        arrow = SimpleNamespace(ipc=SimpleNamespace(open_stream=lambda _stream: nullcontext([])))
+        with patch.dict(sys.modules, {"pyarrow": arrow}), patch(
+            "stream.subprocess.Popen", return_value=ExitedParent()
+        ), patch("stream.threading.Timer", ImmediateTimer), patch(
+            "stream.os.killpg"
+        ) as kill_group:
+            with self.assertRaisesRegex(TimeoutError, "process timeout"):
+                list(iter_arrow_batches("SELECT 1", process_timeout=0.01))
+            kill_group.assert_called_with(ExitedParent.pid, signal.SIGKILL)
+
+
 class ArrowIPCByteBudgetTests(unittest.TestCase):
     def test_small_reads_and_exact_budget_eof(self):
         stream = _BudgetedIPCStream(io.BytesIO(b"abcdef"), 6)

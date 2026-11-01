@@ -177,7 +177,9 @@ def iter_arrow_batches(
                 process.kill()
 
         def on_deadline():
-            if not finished.is_set() and process.poll() is None:
+            # A child can exit while descendants still hold Arrow stdout open.
+            # Kill the process group until decoding has fully completed.
+            if not finished.is_set():
                 deadline_reached.set()
                 terminate_group()
 
