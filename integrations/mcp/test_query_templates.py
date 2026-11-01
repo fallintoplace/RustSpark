@@ -176,5 +176,32 @@ class PinnedTemplateTests(unittest.TestCase):
                 self.assertEqual(copy.read_text(encoding="utf-8"), "SELECT 1")
                 self.assertEqual(copy.stat().st_mode & 0o077, 0)
 
+class BackendInterruptCleanupTests(unittest.TestCase):
+    @unittest.skipUnless(__import__("os").name == "posix", "process groups require POSIX")
+    def test_interrupt_during_reader_setup_reaps_backend(self):
+        import subprocess
+        import sys
+        from unittest.mock import patch
+        import bounded_backend
+
+        original = subprocess.Popen
+        started = []
+
+        def tracked(*args, **kwargs):
+            child = original(*args, **kwargs)
+            started.append(child)
+            return child
+
+        with patch("bounded_backend.subprocess.Popen", side_effect=tracked):
+            with patch("bounded_backend.threading.Thread", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    bounded_backend.run_bounded(
+                        [sys.executable, "-c", "import time; time.sleep(30)"],
+                        timeout=5, max_bytes=1024,
+                    )
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll(), "interrupted process must be reaped")
+
+
 if __name__ == "__main__":
     unittest.main()
