@@ -86,6 +86,49 @@ impl<'de> serde::Deserialize<'de> for RootScalar {
     }
 }
 
+// Select only one scalar root member while validating and discarding all
+// unrelated values. Later duplicate members replace earlier ones.
+struct RootMemberScalar<'a>(&'a str);
+
+impl<'de> serde::de::DeserializeSeed<'de> for RootMemberScalar<'_> {
+    type Value = Option<RootScalar>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self, deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        struct Selector<'a>(&'a str);
+        impl<'de> serde::de::Visitor<'de> for Selector<'_> {
+            type Value = Option<RootScalar>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self, mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut selected = None;
+                while let Some(name) = map.next_key::<String>()? {
+                    if name == self.0 {
+                        selected = Some(map.next_value::<RootScalar>()?);
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(selected)
+            }
+        }
+        deserializer.deserialize_map(Selector(self.0))
+    }
+}
+
+fn direct_member(path: &str) -> Option<&str> {
+    let member = path.strip_prefix("$.")?;
+    (path.len() <= 4096 && !member.is_empty() &&
+        member.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_'))
+        .then_some(member)
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(path) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -106,6 +149,26 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             RootScalar::Container => Err(Error::Type(
                 "JSON_VALUE requires a scalar JSON node".into()
             )),
+        };
+    }
+    if let Some(name) = direct_member(path)
+        && text.trim_start().starts_with('{')
+    {
+        use serde::de::DeserializeSeed;
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let selected = RootMemberScalar(name).deserialize(&mut deserializer)
+            .and_then(|selected| deserializer.end().map(|()| selected))
+            .map_err(|error| Error::Execution(format!(
+                "invalid native JSON input: {error}"
+            )))?;
+        return match selected {
+            None | Some(RootScalar::Null) => Ok(Value::Null),
+            Some(RootScalar::Text(value)) => Ok(Value::Text(value)),
+            Some(RootScalar::Container) =>
+                Err(Error::Type("JSON_VALUE requires a scalar JSON node".into())),
         };
     }
     let document = json_path::parse(text)?;
@@ -302,5 +365,53 @@ mod root_json_value_streaming_tests {
         assert_eq!(evaluate(&[
             Value::Text(r#"{"a":"yes"}"#.into()), Value::Text("$.a".into()),
         ]).unwrap(), Value::Text("yes".into()));
+    }
+}
+
+#[cfg(test)]
+mod stream_direct_root_member_scalar_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_selection_matches_materialized_json_for_all_types_and_duplicates() {
+        for (document, expected) in [
+            (r#"{"target":null,"skip":[1,2,3]}"#, Value::Null),
+            (r#"{"target":true}"#, Value::Text("true".into())),
+            (r#"{"target":false}"#, Value::Text("false".into())),
+            (r#"{"target":12345}"#, Value::Text("12345".into())),
+            (r#"{"target":"é🙂"}"#, Value::Text("é🙂".into())),
+            (r#"{"target":5,"target":"last"}"#, Value::Text("last".into())),
+            (r#"{"t\u0061rget":"escaped"}"#, Value::Text("escaped".into())),
+            (r#"{"other":1}"#, Value::Null),
+        ] {
+            assert_eq!(evaluate(&[
+                Value::Text(document.into()), Value::Text("$.target".into()),
+            ]).unwrap(), expected, "{document}");
+        }
+        for document in [
+            r#"{"target":[1,2,3]}"#,
+            r#"{"target":{"x":1}}"#,
+            r#"{"target":42,"target":[]}"#,
+        ] {
+            assert!(evaluate(&[
+                Value::Text(document.into()), Value::Text("$.target".into()),
+            ]).is_err(), "{document}");
+        }
+    }
+
+    #[test]
+    fn validates_all_unused_values_and_keeps_complex_path_fallback() {
+        for malformed in [
+            r#"{"target":"ok","other":[1,,2]}"#,
+            r#"{"target":"ok"} trailing"#,
+        ] {
+            assert!(evaluate(&[
+                Value::Text(malformed.into()), Value::Text("$.target".into()),
+            ]).is_err());
+        }
+        assert_eq!(evaluate(&[
+            Value::Text(r#"{"target":{"child":"ok"}}"#.into()),
+            Value::Text("$.target.child".into()),
+        ]).unwrap(), Value::Text("ok".into()));
     }
 }

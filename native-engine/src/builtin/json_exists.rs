@@ -1,6 +1,6 @@
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
-use serde::de::{DeserializeSeed, IgnoredAny, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::fmt;
 
 // Deserialize one root array element at a time instead of holding the entire
@@ -39,6 +39,46 @@ impl<'de> DeserializeSeed<'de> for ContainsSeed<'_> {
     }
 }
 
+// A direct $.name lookup only needs the root keys. Scan and validate all
+// values, including the tail after a match, without building a JSON tree.
+struct RootMemberExists<'a>(&'a str);
+
+impl<'de> DeserializeSeed<'de> for RootMemberExists<'_> {
+    type Value = bool;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self, deserializer: D,
+    ) -> std::result::Result<bool, D::Error> {
+        struct RootVisitor<'a>(&'a str);
+        impl<'de> Visitor<'de> for RootVisitor<'_> {
+            type Value = bool;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(
+                self, mut map: A,
+            ) -> std::result::Result<bool, A::Error> {
+                let mut found = false;
+                while let Some(name) = map.next_key::<String>()? {
+                    found |= name == self.0;
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(found)
+            }
+        }
+        deserializer.deserialize_map(RootVisitor(self.0))
+    }
+}
+
+fn simple_root_member(path: &str) -> Option<&str> {
+    let member = path.strip_prefix("$.")?;
+    (path.len() <= 4096 && !member.is_empty() &&
+        member.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_'))
+        .then_some(member)
+}
+
 fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Boolean)
@@ -56,6 +96,20 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         serde_json::from_str::<IgnoredAny>(text)
             .map_err(|error| Error::Execution(format!("invalid native JSON input: {error}")))?;
         return Ok(Value::Boolean(true));
+    }
+    if let Some(member) = simple_root_member(path)
+        && text.trim_start().starts_with('{')
+    {
+        if text.len() > 16 * 1024 * 1024 {
+            return Err(Error::Execution("native JSON input exceeds 16 MiB".into()));
+        }
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let exists = RootMemberExists(member).deserialize(&mut deserializer)
+            .and_then(|exists| deserializer.end().map(|()| exists))
+            .map_err(|error| Error::Execution(format!(
+                "invalid native JSON input: {error}"
+            )))?;
+        return Ok(Value::Boolean(exists));
     }
     let doc = json_path::parse(text)?;
     Ok(Value::Boolean(json_path::lookup(Some(&doc), path)?.is_some()))
@@ -187,5 +241,44 @@ mod streaming_root_json_exists_tests {
         }
         assert!(matches!(evaluate(&[Value::Text("a".repeat(16 * 1024 * 1024 + 1)),
             Value::Text("$".into())]), Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod streaming_direct_json_member_exists_tests {
+    use super::*;
+
+    #[test]
+    fn direct_root_lookup_matches_dom_with_duplicate_and_escaped_keys() {
+        for (doc, path) in [
+            (r#"{"target":null,"skip":{"wide":[1,2,3]}}"#, "$.target"),
+            (r#"{"skip":[{},1,2],"target":false}"#, "$.target"),
+            (r#"{"target":1,"target":null}"#, "$.target"),
+            (r#"{"t\\u0061rget":true}"#, "$.target"),
+            (r#"{"missing":1}"#, "$.target"),
+            (r#"{"target":{"nested":[null,1]}}"#, "$.target"),
+            (r#"{"a":{"nested":null}}"#, "$.a.nested"),
+        ] {
+            let expected = json_path::lookup(Some(&json_path::parse(doc).unwrap()), path)
+                .unwrap().is_some();
+            let result = evaluate(&[
+                Value::Text(doc.into()), Value::Text(path.into()),
+            ]).unwrap();
+            assert_eq!(result, Value::Boolean(expected), "{doc} {path}");
+        }
+    }
+
+    #[test]
+    fn validates_document_tail_even_after_a_member_was_found() {
+        for invalid in [r#"{"target":true,"tail":[1,,2]}"#,
+                        r#"{"target":1} garbage"#,
+                        r#"{"target":1,"tail":"oops}"#] {
+            assert!(evaluate(&[
+                Value::Text(invalid.into()), Value::Text("$.target".into()),
+            ]).is_err(), "{invalid}");
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("null".into()), Value::Text("$.target".into()),
+        ]).unwrap(), Value::Boolean(false));
     }
 }

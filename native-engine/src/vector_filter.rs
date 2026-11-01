@@ -97,6 +97,40 @@ fn fast_float_predicate<'a>(
     Ok(None)
 }
 
+// Match native SQL ordering for floats, including the engine's NaN-high
+// semantics and signed-zero equivalence.
+fn float_comparison(op: BinaryOp, left: f64, right: f64) -> Option<bool> {
+    use std::cmp::Ordering;
+    let order = match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).expect("non-NaN floats are ordered"),
+    };
+    Some(match op {
+        BinaryOp::Equal => order.is_eq(),
+        BinaryOp::NotEqual => !order.is_eq(),
+        BinaryOp::Less => order.is_lt(),
+        BinaryOp::LessEqual => !order.is_gt(),
+        BinaryOp::Greater => order.is_gt(),
+        BinaryOp::GreaterEqual => !order.is_lt(),
+        _ => return None,
+    })
+}
+
+fn fast_float_pair<'a>(
+    batch: &'a Batch, predicate: &'a Expr, boolean_op: BinaryOp,
+) -> Result<Option<(&'a [Value], (BinaryOp, f64), (BinaryOp, f64))>> {
+    let Expr::Binary { left, op, right } = predicate else { return Ok(None); };
+    if *op != boolean_op { return Ok(None); }
+    let Some((first, first_op, first_rhs)) =
+        fast_float_predicate(batch, left)? else { return Ok(None) };
+    let Some((second, second_op, second_rhs)) =
+        fast_float_predicate(batch, right)? else { return Ok(None) };
+    if !std::ptr::eq(first, second) { return Ok(None); }
+    Ok(Some((first, (first_op, first_rhs), (second_op, second_rhs))))
+}
+
 fn fast_integer_predicate<'a>(
     batch: &'a Batch,
     predicate: &'a Expr,
@@ -259,6 +293,48 @@ fn fast_float_in_list<'a>(
     Ok(Some((batch.column(index)?, keys, *negated, has_null)))
 }
 
+/// A BOOLEAN domain has only two non-NULL values. Replace repeated
+/// literal comparisons with two membership flags for the whole batch.
+fn fast_boolean_in_list<'a>(
+    batch: &'a Batch, predicate: &Expr,
+) -> Result<Option<(&'a [Value], [bool; 2], bool, bool)>> {
+    let Expr::InList { needle, choices, negated } = predicate else {
+        return Ok(None);
+    };
+    let Expr::Column(name) = needle.as_ref() else { return Ok(None); };
+    let index = batch.schema().column(name)?;
+    if batch.schema().field(index)?.data_type != DataType::Boolean {
+        return Ok(None);
+    }
+    let mut matched = [false; 2];
+    let mut has_null = false;
+    for choice in choices {
+        match choice {
+            Expr::Literal(Value::Boolean(value)) => matched[usize::from(*value)] = true,
+            Expr::Literal(Value::Null) => has_null = true,
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((batch.column(index)?, matched, *negated, has_null)))
+}
+
+/// Evaluate null-safe literal comparisons against a borrowed native column.
+/// Unlike scalar row evaluation this never clones the source TEXT payload.
+fn fast_distinct_literal<'a>(
+    batch: &'a Batch, predicate: &'a Expr,
+) -> Result<Option<(&'a [Value], &'a Value, bool)>> {
+    let Expr::IsDistinctFrom { left, right, negated } = predicate else {
+        return Ok(None);
+    };
+    let (name, literal) = match (left.as_ref(), right.as_ref()) {
+        (Expr::Column(name), Expr::Literal(literal)) |
+        (Expr::Literal(literal), Expr::Column(name)) => (name, literal),
+        _ => return Ok(None),
+    };
+    let index = batch.schema().column(name)?;
+    Ok(Some((batch.column(index)?, literal, *negated)))
+}
+
 /// Return matching row offsets; NULL predicates are not included.
 pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
     let kind = predicate.output_type(batch.schema())?;
@@ -271,7 +347,18 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         _ => {}
     }
     let mut selected = Vec::new();
-    if let Some((column, keys, negated, has_null)) =
+    if let Some((column, matched, negated, has_null)) =
+        fast_boolean_in_list(batch, predicate)? {
+        if negated && has_null { return Ok(selected); }
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Boolean(value) = value {
+                let member = matched[usize::from(*value)];
+                if if negated { !member } else { member } {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, keys, negated, has_null)) =
         fast_float_in_list(batch, predicate)? {
         if (negated && has_null) || (!negated && keys.is_empty()) {
             return Ok(selected);
@@ -330,6 +417,26 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
             if let Value::Integer(lhs) = value {
                 if integer_comparison(first_op, *lhs, first_rhs) == Some(true)
                     || integer_comparison(second_op, *lhs, second_rhs) == Some(true) {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, (first_op, first_rhs), (second_op, second_rhs))) =
+        fast_float_pair(batch, predicate, BinaryOp::And)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Float(lhs) = value {
+                if float_comparison(first_op, *lhs, first_rhs) == Some(true)
+                    && float_comparison(second_op, *lhs, second_rhs) == Some(true) {
+                    selected.push(row);
+                }
+            }
+        }
+    } else if let Some((column, (first_op, first_rhs), (second_op, second_rhs))) =
+        fast_float_pair(batch, predicate, BinaryOp::Or)? {
+        for (row, value) in column.iter().enumerate() {
+            if let Value::Float(lhs) = value {
+                if float_comparison(first_op, *lhs, first_rhs) == Some(true)
+                    || float_comparison(second_op, *lhs, second_rhs) == Some(true) {
                     selected.push(row);
                 }
             }
@@ -404,6 +511,19 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
         for row in 0..batch.num_rows() {
             if predicate.evaluate(batch, row)?.as_boolean()? == Some(true) { selected.push(row); }
+        }
+    } else if let Some((column, literal, negated)) =
+        fast_distinct_literal(batch, predicate)? {
+        for (row, value) in column.iter().enumerate() {
+            let distinct = match (value.is_null(), literal.is_null()) {
+                (true, true) => false,
+                (true, false) | (false, true) => true,
+                (false, false) => value.sql_equal(literal)?.map(|equal| !equal)
+                    .unwrap_or_else(|| value != literal),
+            };
+            if if negated { !distinct } else { distinct } {
+                selected.push(row);
+            }
         }
     } else if let Some((column, op, rhs)) = fast_text_comparison(batch, predicate)? {
         for (row, value) in column.iter().enumerate() {
@@ -1066,3 +1186,162 @@ mod borrowed_text_ordering_vector_regressions {
         }
     }
 }
+#[cfg(test)]
+mod boolean_in_list_vector_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn all_boolean_choice_combinations_match_scalar_sql() {
+        let input = Batch::from_rows(
+            Schema::new(vec![Field::new("flag", DataType::Boolean, true)]).unwrap(),
+            vec![vec![Value::Null], vec![Value::Boolean(true)],
+                 vec![Value::Boolean(false)], vec![Value::Boolean(true)]],
+        ).unwrap();
+        for choices in [
+            vec![], vec![Value::Null],
+            vec![Value::Boolean(false)],
+            vec![Value::Boolean(true), Value::Boolean(true)],
+            vec![Value::Boolean(false), Value::Boolean(true)],
+            vec![Value::Boolean(true), Value::Null],
+        ] {
+            for negated in [false, true] {
+                let predicate = Expr::InList {
+                    needle: Box::new(Expr::Column("flag".into())),
+                    choices: choices.iter().cloned().map(Expr::Literal).collect(),
+                    negated,
+                };
+                let expected = (0..input.num_rows()).filter(|&row|
+                    predicate.evaluate(&input, row).unwrap()
+                        .as_boolean().unwrap() == Some(true)
+                ).collect::<Vec<_>>();
+                assert_eq!(select_indices(&input, &predicate).unwrap(),
+                    expected, "choices={choices:?}, negated={negated}");
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod literal_distinct_vector_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn check(kind: DataType, values: Vec<Value>, literals: Vec<Value>) {
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("key", kind, true)]).unwrap(),
+            values.into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        for literal in literals {
+            for negated in [true, false] {
+                for reversed in [true, false] {
+                    let (left, right) = if reversed {
+                        (Expr::Literal(literal.clone()), Expr::Column("key".into()))
+                    } else {
+                        (Expr::Column("key".into()), Expr::Literal(literal.clone()))
+                    };
+                    let predicate = Expr::IsDistinctFrom {
+                        left: Box::new(left), right: Box::new(right), negated,
+                    };
+                    let expected = (0..batch.num_rows()).filter(|&row|
+                        predicate.evaluate(&batch, row).unwrap()
+                            .as_boolean().unwrap() == Some(true)
+                    ).collect::<Vec<_>>();
+                    assert_eq!(select_indices(&batch, &predicate).unwrap(), expected,
+                        "{predicate:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn null_safe_text_comparisons_match_scalar_with_unicode_and_long_strings() {
+        let large = "東京🙂".repeat(4096);
+        check(DataType::Text, vec![
+            Value::Null, Value::Text("".into()), Value::Text(large.clone()),
+            Value::Text(large.clone()), Value::Text("é".into()),
+        ], vec![Value::Null, Value::Text(large), Value::Text("missing".into())]);
+    }
+
+    #[test]
+    fn float_nan_and_zero_and_cross_type_numeric_comparisons_match_scalar() {
+        check(DataType::Float, vec![
+            Value::Null, Value::Float(f64::NAN), Value::Float(-f64::NAN),
+            Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(1.25), Value::Float(f64::INFINITY),
+            Value::Float(9_007_199_254_740_992.0),
+        ], vec![Value::Null, Value::Float(f64::NAN), Value::Float(0.0),
+                Value::Integer(9_007_199_254_740_993)]);
+    }
+
+    #[test]
+    fn integer_and_boolean_domains_match_scalar_for_null_safe_comparisons() {
+        check(DataType::Integer, vec![
+            Value::Null, Value::Integer(-3), Value::Integer(0), Value::Integer(5),
+        ], vec![Value::Null, Value::Integer(0), Value::Integer(999)]);
+        check(DataType::Boolean, vec![
+            Value::Null, Value::Boolean(true), Value::Boolean(false),
+        ], vec![Value::Null, Value::Boolean(true)]);
+    }
+}
+#[cfg(test)]
+mod fused_float_comparison_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn predicate(op: BinaryOp, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::binary(lhs, op, rhs)
+    }
+
+    #[test]
+    fn fused_float_ranges_match_scalar_for_nan_null_and_infinities() {
+        let values = vec![
+            Value::Null, Value::Float(f64::NEG_INFINITY),
+            Value::Float(-5.0), Value::Float(-0.0), Value::Float(0.0),
+            Value::Float(1.5), Value::Float(f64::INFINITY),
+            Value::Float(f64::NAN), Value::Float(-f64::NAN),
+        ];
+        let batch = Batch::from_rows(
+            Schema::new(vec![Field::new("metric", DataType::Float, true)]).unwrap(),
+            values.into_iter().map(|value| vec![value]).collect(),
+        ).unwrap();
+        let column = || Expr::Column("metric".into());
+        let between = predicate(BinaryOp::And,
+            predicate(BinaryOp::GreaterEqual, column(),
+                Expr::Literal(Value::Float(-0.0))),
+            predicate(BinaryOp::Less, column(),
+                Expr::Literal(Value::Float(f64::NAN))));
+        let outside = predicate(BinaryOp::Or,
+            predicate(BinaryOp::Less, Expr::Literal(Value::Float(0.0)), column()),
+            predicate(BinaryOp::Equal, column(),
+                Expr::Literal(Value::Float(f64::NAN))));
+        for expr in [between, outside] {
+            assert!(fast_float_pair(&batch, &expr, BinaryOp::And).unwrap().is_some()
+                || fast_float_pair(&batch, &expr, BinaryOp::Or).unwrap().is_some());
+            let expected = (0..batch.num_rows())
+                .filter(|&row| expr.evaluate(&batch, row).unwrap()
+                    .as_boolean().unwrap() == Some(true))
+                .collect::<Vec<_>>();
+            assert_eq!(select_indices(&batch, &expr).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn fused_float_falls_back_for_different_columns() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("left", DataType::Float, true),
+            Field::new("right", DataType::Float, true),
+        ]).unwrap(), vec![
+            vec![Value::Float(1.0), Value::Float(4.0)],
+            vec![Value::Null, Value::Float(2.0)],
+            vec![Value::Float(5.0), Value::Float(5.0)],
+        ]).unwrap();
+        let expr = predicate(BinaryOp::And,
+            predicate(BinaryOp::Greater, Expr::Column("left".into()),
+                Expr::Literal(Value::Float(2.0))),
+            predicate(BinaryOp::Less, Expr::Column("right".into()),
+                Expr::Literal(Value::Float(5.0))));
+        assert!(fast_float_pair(&batch, &expr, BinaryOp::And).unwrap().is_none());
+        assert_eq!(select_indices(&batch, &expr).unwrap(), Vec::<usize>::new());
+    }
+}
+

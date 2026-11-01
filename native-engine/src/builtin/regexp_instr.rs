@@ -20,7 +20,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Ok(Value::Integer(if text.starts_with(prefix) { 1 } else { 0 }));
         }
     }
-    if pattern == "." {
+    if pattern == "." || pattern == ".+" {
         // Unlike a byte position, the SQL result counts Unicode scalars.
         let position = text.chars().position(|ch| ch != '\n')
             .map_or(0, |index| index + 1);
@@ -155,5 +155,30 @@ mod zero_width_regexp_instr_regressions {
             }
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text(".*".into())]).unwrap(), Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod greedy_dot_plus_instr_differential_tests {
+    use super::*;
+
+    #[test]
+    fn returns_unicode_character_position_of_first_nonempty_run() {
+        let regex = regex_support::compile(".+").unwrap();
+        for text in ["", "\n", "\n\n", "\nabc", "é🙂\n東京", "\r\nA", "\n\n🙂é"] {
+            let expected = regex.find(text).map_or(0, |matched|
+                text[..matched.start()].chars().count() + 1);
+            assert_eq!(evaluate(&[
+                Value::Text(text.into()), Value::Text(".+".into()),
+            ]).unwrap(), Value::Integer(expected as i64), "{text:?}");
+        }
+        let large = format!("{}é🙂", "\n".repeat(100_000));
+        assert_eq!(evaluate(&[
+            Value::Text(large), Value::Text(".+".into()),
+        ]).unwrap(), Value::Integer(100_001));
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text(".+".into()),
+        ]).unwrap(), Value::Null);
     }
 }

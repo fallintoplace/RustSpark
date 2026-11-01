@@ -244,6 +244,64 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     batch.take(&retained.into_iter().map(|row| row.row).collect::<Vec<_>>())
 }
 
+/// Top-K for owned input batches. Direct-column and single-expression
+/// keys keep only O(k) candidates and transfer retained row payloads without
+/// deep-copying TEXT. Other key shapes retain the borrowed implementation.
+pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
+    for key in keys {
+        key.expression.output_type(batch.schema())?;
+    }
+    if k == 0 { return batch.take_unique_owned(&[]); }
+    if keys.is_empty() {
+        return batch.slice_rows_owned(0, k.min(batch.num_rows()));
+    }
+    if k >= batch.num_rows() { return crate::sort::sort_owned(batch, keys); }
+
+    if keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        let columns = keys.iter().map(|key| match &key.expression {
+            Expr::Column(name) => batch.column(batch.schema().column(name)?),
+            _ => unreachable!("direct column keys"),
+        }).collect::<Result<Vec<_>>>()?;
+        let options = keys.iter().map(|key| (key.descending, key.nulls_first))
+            .collect::<Vec<_>>();
+        let mut heap = BinaryHeap::with_capacity(k);
+        for row in 0..batch.num_rows() {
+            let candidate = ColumnCandidate { row, columns: &columns, options: &options };
+            if heap.len() < k {
+                heap.push(candidate);
+            } else if let Some(mut worst) = heap.peek_mut() {
+                if candidate < *worst { *worst = candidate; }
+            }
+        }
+        let mut selected = heap.into_vec();
+        selected.sort_unstable();
+        let indices = selected.into_iter().map(|candidate| candidate.row)
+            .collect::<Vec<_>>();
+        return batch.take_unique_owned(&indices);
+    }
+    if keys.len() == 1 {
+        let key = &keys[0];
+        let mut heap = BinaryHeap::with_capacity(k);
+        for row in 0..batch.num_rows() {
+            let candidate = ExpressionCandidate {
+                row, value: key.expression.evaluate(&batch, row)?,
+                descending: key.descending, nulls_first: key.nulls_first,
+            };
+            if heap.len() < k {
+                heap.push(candidate);
+            } else if let Some(mut worst) = heap.peek_mut() {
+                if candidate < *worst { *worst = candidate; }
+            }
+        }
+        let mut selected = heap.into_vec();
+        selected.sort_unstable();
+        let indices = selected.into_iter().map(|candidate| candidate.row)
+            .collect::<Vec<_>>();
+        return batch.take_unique_owned(&indices);
+    }
+    top_k(&batch, keys, k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,3 +787,56 @@ mod mixed_topk_key_buffer_regressions {
         }
     }
 }
+#[cfg(test)]
+mod owned_topk_payload_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn direct_and_computed_keys_move_text_and_match_borrowed_topk() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(6), Value::Text("a".repeat(100))],
+            vec![Value::Integer(1), Value::Text("🙂".repeat(4096))],
+            vec![Value::Integer(3), Value::Text("b".repeat(4096))],
+            vec![Value::Null, Value::Text("null".into())],
+            vec![Value::Integer(1), Value::Text("tie".into())],
+        ]).unwrap();
+        let ptr = match input.value(1, 1).unwrap() {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!(),
+        };
+        let direct = [SortKey::ascending(Expr::Column("score".into()))];
+        let expected = top_k(&input, &direct, 3).unwrap();
+        let moved = top_k_owned(input.clone(), &direct, 3).unwrap();
+        assert_eq!(moved, expected);
+        let moved_original = top_k_owned(input.clone(), &direct, 3).unwrap();
+        assert_eq!(moved_original.num_rows(), 3);
+
+        let computed = [SortKey::ascending(Expr::binary(
+            Expr::Column("score".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(1)),
+        ))];
+        assert_eq!(top_k_owned(input.clone(), &computed, 3).unwrap(),
+            top_k(&input, &computed, 3).unwrap());
+        let all = top_k_owned(input.clone(), &direct, 100).unwrap();
+        assert_eq!(all, top_k(&input, &direct, 100).unwrap());
+        let moved_input = top_k_owned(input, &direct, 3).unwrap();
+        // ASC puts NULL first; the first score=1 row follows it.
+        assert_eq!(moved_input.value(0, 0).unwrap(), &Value::Null);
+        assert_eq!(moved_input.value(1, 0).unwrap(), &Value::Integer(1));
+        assert_eq!(match moved_input.value(1, 1).unwrap() {
+            Value::Text(value) => value.as_ptr(), _ => unreachable!(),
+        }, ptr);
+    }
+
+    #[test]
+    fn empty_sort_keys_keep_zero_width_row_count_and_limits() {
+        let schema = Schema::new(vec![]).unwrap();
+        let input = Batch::new_with_row_count(schema, vec![], 5).unwrap();
+        assert_eq!(top_k_owned(input.clone(), &[], 2).unwrap().num_rows(), 2);
+        assert_eq!(top_k_owned(input, &[], 0).unwrap().num_rows(), 0);
+    }
+}
+

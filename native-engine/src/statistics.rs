@@ -253,6 +253,39 @@ impl ColumnStatistics {
                     max: max.map(Value::Integer),
                 });
             }
+            if first.schema().field(index)?.data_type == DataType::Boolean {
+                let mut rows = 0u64;
+                let mut nulls = 0u64;
+                let mut seen_false = false;
+                let mut seen_true = false;
+                for batch in batches {
+                    let column = batch.schema().column(name)?;
+                    if batch.schema().field(column)?.data_type != DataType::Boolean {
+                        return Err(Error::Type("statistics batches disagree on column type".into()));
+                    }
+                    rows = rows.checked_add(u64::try_from(batch.num_rows())
+                        .map_err(|_| Error::Execution("statistics row count overflow".into()))?)
+                        .ok_or_else(|| Error::Execution("statistics row count overflow".into()))?;
+                    for value in batch.column(column)? {
+                        match value {
+                            Value::Null => {
+                                nulls = nulls.checked_add(1)
+                                    .ok_or_else(|| Error::Execution("statistics NULL count overflow".into()))?;
+                            }
+                            Value::Boolean(false) => seen_false = true,
+                            Value::Boolean(true) => seen_true = true,
+                            _ => unreachable!("native batch schema was validated"),
+                        }
+                    }
+                }
+                return Ok(Self {
+                    rows, nulls,
+                    min: if seen_false { Some(Value::Boolean(false)) }
+                        else if seen_true { Some(Value::Boolean(true)) } else { None },
+                    max: if seen_true { Some(Value::Boolean(true)) }
+                        else if seen_false { Some(Value::Boolean(false)) } else { None },
+                });
+            }
             if first.schema().field(index)?.data_type == DataType::Float {
                 let mut rows = 0u64;
                 let mut nulls = 0u64;
@@ -669,6 +702,52 @@ mod direct_multibatch_integer_stats_regressions {
 
 
 #[cfg(test)]
+mod direct_boolean_multibatch_stats_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn matches_merge_with_nullable_and_empty_boolean_batches() {
+        let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, true)]).unwrap();
+        let batches = vec![
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Null], vec![Value::Boolean(true)],
+            ]).unwrap(),
+            Batch::empty(schema.clone()),
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Boolean(false)], vec![Value::Boolean(true)],
+            ]).unwrap(),
+            Batch::from_rows(schema.clone(), vec![vec![Value::Null]]).unwrap(),
+        ];
+        let mut expected = ColumnStatistics::default();
+        for batch in &batches {
+            expected.merge(&ColumnStatistics::from_batch(batch, "flag").unwrap()).unwrap();
+        }
+        let actual = ColumnStatistics::from_batches(&batches, "flag").unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!((actual.rows, actual.nulls), (5, 2));
+        assert_eq!(actual.min, Some(Value::Boolean(false)));
+        assert_eq!(actual.max, Some(Value::Boolean(true)));
+
+        let null_only = Batch::from_rows(schema, vec![
+            vec![Value::Null], vec![Value::Null],
+        ]).unwrap();
+        let summary = ColumnStatistics::from_batches(&[null_only], "flag").unwrap();
+        assert_eq!((summary.min, summary.max), (None, None));
+    }
+
+    #[test]
+    fn rejects_mixed_types_without_returning_partial_results() {
+        let bools = Batch::empty(Schema::new(vec![
+            Field::new("flag", DataType::Boolean, true),
+        ]).unwrap());
+        let numbers = Batch::empty(Schema::new(vec![
+            Field::new("flag", DataType::Integer, true),
+        ]).unwrap());
+        assert!(ColumnStatistics::from_batches(&[bools, numbers], "flag").is_err());
+    }
+}
+#[cfg(test)]
 mod direct_float_multibatch_stats_regressions {
     use super::*;
     use crate::schema::{DataType, Field, Schema};
@@ -711,3 +790,4 @@ mod direct_float_multibatch_stats_regressions {
         assert!(ColumnStatistics::from_batches(&[floats, texts], "n").is_err());
     }
 }
+

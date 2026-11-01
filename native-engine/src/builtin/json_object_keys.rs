@@ -1,9 +1,9 @@
 use super::{Function, json_path};
 use crate::{scalar::Value, schema::DataType, Error, Result};
 use serde::{Deserialize, de::{IgnoredAny, MapAccess, Visitor}};
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
-struct RootObjectKeys(Vec<String>);
+struct RootObjectKeys(BTreeSet<String>);
 
 impl<'de> Deserialize<'de> for RootObjectKeys {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
@@ -18,9 +18,9 @@ impl<'de> Deserialize<'de> for RootObjectKeys {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A)
                 -> std::result::Result<Self::Value, A::Error>
             {
-                let mut keys = Vec::new();
+                let mut keys = BTreeSet::new();
                 while let Some((key, _)) = map.next_entry::<String, IgnoredAny>()? {
-                    keys.push(key);
+                    keys.insert(key);
                 }
                 Ok(RootObjectKeys(keys))
             }
@@ -77,11 +77,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let mut deserializer = serde_json::Deserializer::from_str(text);
         let keys = RootObjectKeys::deserialize(&mut deserializer)
             .and_then(|result| deserializer.end().map(|()| result.0));
-        let Ok(mut keys) = keys else { return Ok(Value::Null); };
-        // serde_json::Map uses sorted unique keys by default. Preserve its
-        // duplicate-key and output-order semantics for the streaming path.
-        keys.sort_unstable();
-        keys.dedup();
+        let Ok(keys) = keys else { return Ok(Value::Null); };
+        // Deduplicate during parsing, keeping only distinct sorted keys.
+        // This matches the serde_json::Map output and bounds retained keys.
         let mut output = KeyOutput { bytes: Vec::new(), limit: 16 * 1024 * 1024 };
         serde_json::to_writer(&mut output, &keys)
             .map_err(|error| Error::Execution(format!(
@@ -285,5 +283,30 @@ mod streaming_root_object_keys_tests {
             Value::Text("$.outer".into())]).unwrap(),
             Value::Text(r#"["a","b"]"#.into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod streamed_json_keys_duplicate_regressions {
+    use super::*;
+
+    #[test]
+    fn root_duplicate_keys_match_tree_semantics_and_lexical_order() {
+        let input = r#"{"z":[{"big":"ignored"}],"a":0,"z":2,"é":3,"a":4}"#;
+        let expected = Value::Text(r#"["a","z","é"]"#.into());
+        assert_eq!(evaluate(&[Value::Text(input.into())]).unwrap(), expected);
+        let tree = json_path::parse(input).unwrap();
+        let serde_json::Value::Object(map) = tree else { panic!("object expected") };
+        assert_eq!(evaluate(&[Value::Text(input.into())]).unwrap(),
+            Value::Text(serialize_keys(&map, 16 * 1024 * 1024).unwrap()));
+    }
+
+    #[test]
+    fn high_duplicate_counts_use_one_key_and_validate_all_values() {
+        let source = format!("{{{}}}", vec![r#""name":{"nested":[1,2,3]}"#; 20_000].join(","));
+        assert_eq!(evaluate(&[Value::Text(source)]).unwrap(),
+            Value::Text(r#"["name"]"#.into()));
+        assert_eq!(evaluate(&[Value::Text(r#"{"a":1,"a": "#.into())]).unwrap(), Value::Null);
+        assert_eq!(evaluate(&[Value::Text("[]".into())]).unwrap(), Value::Null);
     }
 }

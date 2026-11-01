@@ -1,7 +1,7 @@
 //! Crash-safe metadata snapshots for the native file-backed catalog.
 //! Source CSV and Parquet files are external data, not copied by this module.
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -143,6 +143,13 @@ impl Drop for TempFile {
     fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
 }
 
+// Install cleanup only after exclusive creation succeeds. A collision must
+// never unlink someone else's preexisting file when the guard is dropped.
+fn create_temporary(path: &Path) -> Result<(TempFile, File)> {
+    let file = super::private_files::create_private(path)?;
+    Ok((TempFile(path.to_path_buf()), file))
+}
+
 /// Atomically replace the catalog metadata after syncing its content.
 /// This is a single-writer API; it does not provide concurrent transactions.
 pub fn save_atomic(catalog: &FileCatalog, destination: &Path) -> Result<()> {
@@ -152,10 +159,10 @@ pub fn save_atomic(catalog: &FileCatalog, destination: &Path) -> Result<()> {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(|err| Error::Io(err.to_string()))?.as_nanos();
     let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    let temp = TempFile(parent.join(format!(
+    let temp_path = parent.join(format!(
         ".rustspark-catalog-{}-{timestamp}-{id}.tmp", std::process::id()
-    )));
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&temp.0)?;
+    ));
+    let (temp, mut file) = create_temporary(&temp_path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
@@ -308,5 +315,49 @@ mod snapshot_schema_bounds_regressions {
             .collect()).unwrap();
         assert_eq!(encode_fields(&schema).unwrap().len(), MAX_COLUMNS);
         assert!(encode_fields(&Schema::new(vec![]).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod private_manifest_snapshot_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn failed_exclusive_create_preserves_existing_scratch_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-catalog-collision-{}-{}",
+            std::process::id(), TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("existing.tmp");
+        fs::write(&path, b"do not delete").unwrap();
+        assert!(create_temporary(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"do not delete");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_catalog_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-catalog-private-{}-{}",
+            std::process::id(), TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("data.csv");
+        let manifest = dir.join("catalog.json");
+        fs::write(&source, b"id\n1\n").unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv(
+            "data", &source,
+            Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap(),
+            1024,
+        ).unwrap();
+        save_atomic(&catalog, &manifest).unwrap();
+        assert_eq!(fs::metadata(&manifest).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load(&manifest).unwrap().list(), ["data"]);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
