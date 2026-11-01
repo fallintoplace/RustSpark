@@ -270,7 +270,7 @@ class NamedSQLParameterTests(unittest.TestCase):
             {"x": "untyped"},
             {"x": 123},
             {"x": "utf8:" + "é" * 4093 + "aa"},
-            {str(i): "int64:1" for i in range(65)},
+            {"p" + str(i): "int64:1" for i in range(65)},
         ):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 build(invalid)
