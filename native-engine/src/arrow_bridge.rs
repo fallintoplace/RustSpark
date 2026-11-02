@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
+    Array, ArrayRef, BooleanArray, Date32Array, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
     builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
@@ -18,6 +18,26 @@ use crate::{
 };
 
 const MAX_ARROW_DECODED_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
+// Convert days since 1970-01-01 using proleptic Gregorian arithmetic.
+// Keep the native engine\'s current text-backed date representation canonical.
+fn date32_as_iso_text(days: i32) -> Result<String> {
+    let z = i64::from(days) + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1_460
+        + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_offset = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_offset + 2) / 5 + 1;
+    let month = month_offset + if month_offset < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    if !(1..=9_999).contains(&year) {
+        return Err(Error::Type("Arrow Date32 year is outside native ISO date range".into()));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
 
 fn needs_large_utf8(payload_bytes: usize) -> bool {
     payload_bytes > i32::MAX as usize
@@ -151,7 +171,7 @@ pub fn schema_from_arrow(input: &ArrowSchema) -> Result<Schema> {
             ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 |
             ArrowType::UInt64 => DataType::Integer,
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
-            ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
+            ArrowType::Utf8 | ArrowType::LargeUtf8 | ArrowType::Date32 => DataType::Text,
             ArrowType::Dictionary(key, value)
                 if matches!(key.as_ref(),
                     ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
@@ -175,6 +195,16 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
         let array = input.column(index);
         // Decode common arrays with a single downcast per column rather than per row.
         let common: Option<Vec<Value>> = match field.data_type() {
+            ArrowType::Date32 => {
+                let values = array.as_any().downcast_ref::<Date32Array>()
+                    .ok_or_else(|| Error::Type("invalid Date32 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { return Ok(Value::Null); }
+                    remaining_text_bytes = remaining_text_bytes.checked_sub(10)
+                        .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                    Ok(Value::Text(date32_as_iso_text(values.value(row))?))
+                }).collect::<Result<Vec<_>>>()?)
+            }
             ArrowType::Boolean => {
                 let values = array.as_any().downcast_ref::<BooleanArray>()
                     .ok_or_else(|| Error::Type("invalid Boolean Arrow array".into()))?;
