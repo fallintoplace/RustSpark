@@ -88,12 +88,8 @@ fn try_unhex_utf8(args: &[Value]) -> Result<Value> {
     }
 }
 
-fn from_base32_utf8(args: &[Value]) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    if text.len() > MAX_INPUT_BYTES * 2 {
-        return Err(Error::Execution("FROM_BASE32_UTF8 input exceeds byte budget".into()));
-    }
-    let input = text.as_bytes();
+// Validate complete encoded blocks and canonical terminal padding.
+fn base32_unpadded_len(input: &[u8]) -> Result<usize> {
     if input.len() % 8 != 0 {
         return Err(Error::Parse("FROM_BASE32_UTF8 length must be a multiple of eight".into()));
     }
@@ -104,6 +100,16 @@ fn from_base32_utf8(args: &[Value]) -> Result<Value> {
         (padding != 0 && unpadded % 8 != 8 - padding) {
         return Err(Error::Parse("invalid FROM_BASE32_UTF8 padding".into()));
     }
+    Ok(unpadded)
+}
+
+fn from_base32_utf8(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.len() > MAX_INPUT_BYTES * 2 {
+        return Err(Error::Execution("FROM_BASE32_UTF8 input exceeds byte budget".into()));
+    }
+    let input = text.as_bytes();
+    let unpadded = base32_unpadded_len(input)?;
     let max_decoded = unpadded.checked_mul(5).map(|n| n / 8)
         .filter(|&n| n <= MAX_INPUT_BYTES)
         .ok_or_else(|| Error::Execution("FROM_BASE32_UTF8 output exceeds byte budget".into()))?;
@@ -348,5 +354,19 @@ mod fallible_hex_reservation_tests {
             assert_eq!(unhex_utf8(&[encoded]).unwrap(), input);
         }
         assert_eq!(try_unhex_utf8(&[Value::Text("ZZ".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod base32_padding_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn validates_complete_blocks_and_terminal_padding() {
+        assert_eq!(base32_unpadded_len(b"").unwrap(), 0);
+        assert_eq!(base32_unpadded_len(b"MY======").unwrap(), 2);
+        assert_eq!(base32_unpadded_len(b"MZXW6===").unwrap(), 5);
+        assert!(base32_unpadded_len(b"MY=====").is_err());
+        assert!(base32_unpadded_len(b"MY====A=").is_err());
     }
 }
