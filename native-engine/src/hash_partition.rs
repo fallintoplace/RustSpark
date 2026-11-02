@@ -112,6 +112,20 @@ mod tests {
 }
 
  
+// Clone payloads fallibly. A legal TEXT cell can still exhaust worker memory.
+fn clone_partition_value(value: &crate::scalar::Value) -> Result<crate::scalar::Value> {
+    match value {
+        crate::scalar::Value::Text(text) => {
+            let mut copy = String::new();
+            copy.try_reserve_exact(text.len())
+                .map_err(|_| Error::Execution("shuffle TEXT allocation failed".into()))?;
+            copy.push_str(text);
+            Ok(crate::scalar::Value::Text(copy))
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
 /// Partition successive batches using identical hash keys and concatenate each bucket.
 pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> Result<Vec<Batch>> {
     if partitions == 0 || partitions > 4096 || keys.is_empty() {
@@ -132,11 +146,20 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
             rows.checked_add(batch.num_rows())
                 .ok_or_else(|| Error::Execution("partition row count overflow".into()))
         })?;
-        let mut columns = (0..schema.len()).map(|_| Vec::with_capacity(total))
-            .collect::<Vec<_>>();
+        let mut columns = Vec::new();
+        columns.try_reserve_exact(schema.len())
+            .map_err(|_| Error::Execution("shuffle column allocation failed".into()))?;
+        for _ in 0..schema.len() {
+            let mut column = Vec::new();
+            column.try_reserve_exact(total)
+                .map_err(|_| Error::Execution("shuffle output allocation failed".into()))?;
+            columns.push(column);
+        }
         for batch in input {
             for (index, target) in columns.iter_mut().enumerate() {
-                target.extend_from_slice(batch.column(index)?);
+                for value in batch.column(index)? {
+                    target.push(clone_partition_value(value)?);
+                }
             }
         }
         return Ok(vec![Batch::from_validated_columns(schema.clone(), columns, total)?]);
@@ -179,13 +202,25 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
             };
             previous_bucket = bucket;
             previous_key = Some((batch_index, row));
-            let columns = buckets[bucket].get_or_insert_with(|| {
-                (0..schema.len()).map(|_| Vec::new()).collect::<Vec<_>>()
-            });
-            for (destination, source) in columns.iter_mut().zip(bound) {
-                destination.push(source[row].clone());
+            if buckets[bucket].is_none() {
+                let mut columns = Vec::new();
+                columns.try_reserve_exact(schema.len())
+                    .map_err(|_| Error::Execution("shuffle bucket allocation failed".into()))?;
+                columns.extend((0..schema.len()).map(|_| Vec::new()));
+                buckets[bucket] = Some(columns);
             }
-            row_counts[bucket] += 1;
+            let columns = buckets[bucket].as_mut().expect("bucket initialized");
+            // Reserve every column before appending a row. No individual push
+            // may grow its buffer after earlier columns have been mutated.
+            for destination in columns.iter_mut() {
+                destination.try_reserve(1)
+                    .map_err(|_| Error::Execution("shuffle bucket growth failed".into()))?;
+            }
+            for (destination, source) in columns.iter_mut().zip(bound) {
+                destination.push(clone_partition_value(&source[row])?);
+            }
+            row_counts[bucket] = row_counts[bucket].checked_add(1)
+                .ok_or_else(|| Error::Execution("shuffle bucket row count overflow".into()))?;
         }
     }
     buckets.into_iter().zip(row_counts).map(|(columns, rows)| {
@@ -808,5 +843,31 @@ mod cross_batch_clustered_partition_regressions {
             assert_eq!(partition_batches(&parts, &["key"], fanout).unwrap(), expected);
             assert_eq!(partition_batches_owned(parts.clone(), &["key"], fanout).unwrap(), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod fallible_borrowed_shuffle_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn both_fast_and_multi_bucket_paths_preserve_values_and_input() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batches = (0..11).map(|group| Batch::from_rows(schema.clone(),
+            (0..17).map(|index| vec![
+                if index % 5 == 0 { Value::Null }
+                else { Value::Integer((group + index) % 19) },
+                if index % 7 == 0 { Value::Null }
+                else { Value::Text(format!("{group}-{index}-{}", "é🙂".repeat(128))) },
+            ]).collect()).unwrap()).collect::<Vec<_>>();
+        for shards in [1, 2, 17, 128] {
+            assert_eq!(partition_batches(&batches, &["id"], shards).unwrap(),
+                       partition_batches_owned(batches.clone(), &["id"], shards).unwrap());
+        }
+        assert_eq!(batches[0].num_rows(), 17);
     }
 }
