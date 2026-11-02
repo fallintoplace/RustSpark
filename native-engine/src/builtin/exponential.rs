@@ -1,11 +1,7 @@
 use super::{float_type, Function};
 use crate::{scalar::Value, Result};
-fn apply(args: &[Value], f: fn(f64) -> f64) -> Result<Value> {
-    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null) };
-    super::finite(f(value))
-}
-fn exp(args: &[Value]) -> Result<Value> { apply(args, f64::exp) }
-fn expm1(args: &[Value]) -> Result<Value> { apply(args, f64::exp_m1) }
+fn exp(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::exp) }
+fn expm1(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::exp_m1) }
 
 fn sigmoid(args: &[Value]) -> Result<Value> {
     let Some(value) = super::number(&args[0])? else { return Ok(Value::Null); };
