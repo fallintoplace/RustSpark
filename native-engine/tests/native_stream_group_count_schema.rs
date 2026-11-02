@@ -27,7 +27,10 @@ fn grouped_count_schema_survives_external_sort_and_topk() {
     };
     let sorted = Plan::Sort {
         input: Box::new(aggregate),
-        keys: vec![SortKey::descending(Expr::Column("n".into()))],
+        keys: vec![SortKey {
+            expression: Expr::Column("n".into()),
+            descending: true, nulls_first: false,
+        }],
     };
     let options = StreamOptions {
         batch_rows: 2, sort_run_rows: 2, merge_fan_in: 2,
