@@ -782,6 +782,14 @@ impl Parser {
                 return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
             }
             let right_key = self.identifier()?;
+            let residual = if self.take_word("AND") {
+                if kind != JoinKind::Inner {
+                    return Err(Error::Unsupported(
+                        "residual JOIN ON predicates require INNER JOIN".into()
+                    ));
+                }
+                Some(self.expression(2)?)
+            } else { None };
             plan = Plan::Join {
                 left: Box::new(plan),
                 right: Box::new(right),
@@ -789,6 +797,9 @@ impl Parser {
                 right_key,
                 kind,
             };
+            if let Some(predicate) = residual {
+                plan = plan.filter(predicate);
+            }
         }
         if self.take_word("WHERE") {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
