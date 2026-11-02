@@ -18,6 +18,9 @@ struct Accumulator {
     count: usize,
     integer_sum: i128,
     float_sum: f64,
+    nan_count: usize,
+    positive_infinity_count: usize,
+    negative_infinity_count: usize,
 }
 
 impl Accumulator {
@@ -31,14 +34,38 @@ impl Accumulator {
                 else { self.integer_sum -= i128::from(*value); }
             }
             (Value::Float(value), DataType::Float) => {
-                if add { self.float_sum += *value; }
-                else { self.float_sum -= *value; }
+                let count = if value.is_nan() {
+                    &mut self.nan_count
+                } else if *value == f64::INFINITY {
+                    &mut self.positive_infinity_count
+                } else if *value == f64::NEG_INFINITY {
+                    &mut self.negative_infinity_count
+                } else {
+                    if add { self.float_sum += *value; }
+                    else { self.float_sum -= *value; }
+                    return Ok(());
+                };
+                if add { *count += 1; }
+                else { *count -= 1; }
             }
             // COUNT can operate on nonnumeric values. The caller rejects
             // nonnumeric types for SUM and AVG before execution.
             _ => {}
         }
         Ok(())
+    }
+
+    fn float_result(&self) -> f64 {
+        if self.nan_count > 0 ||
+            (self.positive_infinity_count > 0 && self.negative_infinity_count > 0) {
+            f64::NAN
+        } else if self.positive_infinity_count > 0 {
+            f64::INFINITY
+        } else if self.negative_infinity_count > 0 {
+            f64::NEG_INFINITY
+        } else {
+            self.float_sum
+        }
     }
 
     fn result(&self, data_type: DataType, aggregate: FrameAggregate) -> Result<Value> {
@@ -55,13 +82,13 @@ impl Accumulator {
                     i64::try_from(self.integer_sum)
                         .map_err(|_| Error::Execution("window integer sum overflow".into()))?
                 )),
-                DataType::Float => Ok(Value::Float(self.float_sum)),
+                DataType::Float => Ok(Value::Float(self.float_result())),
                 _ => unreachable!("numeric SUM was validated"),
             },
             FrameAggregate::Average => {
                 let sum = match data_type {
                     DataType::Integer => self.integer_sum as f64,
-                    DataType::Float => self.float_sum,
+                    DataType::Float => self.float_result(),
                     _ => unreachable!("numeric AVG was validated"),
                 };
                 Ok(Value::Float(sum / self.count as f64))
