@@ -259,7 +259,7 @@ mod streaming_direct_json_member_exists_tests {
             (r#"{"target":null,"skip":{"wide":[1,2,3]}}"#, "$.target"),
             (r#"{"skip":[{},1,2],"target":false}"#, "$.target"),
             (r#"{"target":1,"target":null}"#, "$.target"),
-            (r#"{"t\\u0061rget":true}"#, "$.target"),
+            (r#"{"t\u0061rget":true}"#, "$.target"),
             (r#"{"missing":1}"#, "$.target"),
             (r#"{"target":{"nested":[null,1]}}"#, "$.target"),
             (r#"{"a":{"nested":null}}"#, "$.a.nested"),
