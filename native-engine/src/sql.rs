@@ -453,6 +453,34 @@ impl Parser {
                 left = Expr::Call { name: "concat".into(), args: vec![left, right] };
                 continue;
             }
+            // TPC-H uses date +/- INTERVAL 'N' DAY. Preserve the SQL
+            // expression on the left and lower the day offset to native date
+            // arithmetic, rather than interpreting INTERVAL as a column.
+            let interval_sign = match (self.peek(), self.tokens.get(self.index + 1)) {
+                (Some(Token::Operator(op)), Some(Token::Word(word)))
+                    if (op == "+" || op == "-") && word.eq_ignore_ascii_case("INTERVAL") =>
+                    Some(op == "+"),
+                _ => None,
+            };
+            if let Some(add) = interval_sign {
+                if min_precedence > 8 { break; }
+                self.next();
+                self.expect_word("INTERVAL")?;
+                let duration = match self.next() {
+                    Some(Token::Text(value)) | Some(Token::Number(value)) =>
+                        value.parse::<i64>()
+                            .map_err(|_| Error::Parse("INTERVAL requires integer days".into()))?,
+                    _ => return Err(Error::Parse("INTERVAL requires integer days".into())),
+                };
+                if !self.take_word("DAY") && !self.take_word("DAYS") {
+                    return Err(Error::Unsupported("only INTERVAL DAY is supported".into()));
+                }
+                left = Expr::Call {
+                    name: if add { "date_add" } else { "date_sub" }.into(),
+                    args: vec![left, Expr::Literal(Value::Integer(duration))],
+                };
+                continue;
+            }
             // DIV follows Spark's multiplicative operator precedence.
             if self.peek_word("DIV") {
                 if min_precedence > 9 { break; }
