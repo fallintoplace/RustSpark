@@ -24,6 +24,18 @@ fn canonical_float(value: f64) -> u64 {
     }
 }
 
+/// Parse the SQL boolean text spellings accepted by CAST and TRY_CAST.
+pub(crate) fn parse_boolean_text(text: &str) -> Option<bool> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("true") || text == "1" {
+        Some(true)
+    } else if text.eq_ignore_ascii_case("false") || text == "0" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -177,14 +189,9 @@ impl Value {
             (Self::Text(value), DataType::Float) => value.trim().parse::<f64>().ok()
                 .filter(|n| n.is_finite()).map(Self::Float)
                 .ok_or_else(|| Error::Type("invalid DOUBLE cast".into())),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("true") =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("false") =>
-                Ok(Self::Boolean(false)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "1" =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "0" =>
-                Ok(Self::Boolean(false)),
+            (Self::Text(value), DataType::Boolean) => parse_boolean_text(value)
+                .map(Self::Boolean)
+                .ok_or_else(|| Error::Type("unsupported native CAST conversion".into())),
             _ => Err(Error::Type("unsupported native CAST conversion".into())),
         }
     }
@@ -256,5 +263,30 @@ mod consolidated_native_cast_tests {
         assert_eq!(Value::Float(-0.0).cast_to(DataType::Text).unwrap(), Value::Text("-0.0".into()));
         assert_eq!(Value::Float(1.25).cast_to(DataType::Text).unwrap(), Value::Text("1.25".into()));
         assert_eq!(Value::Integer(1).cast_to(DataType::Text).unwrap(), Value::Text("1".into()));
+    }
+}
+
+#[cfg(test)]
+mod shared_boolean_cast_parser_refactor_tests {
+    use super::*;
+    use crate::schema::DataType;
+
+    #[test]
+    fn strict_and_try_cast_share_text_spelling_rules() {
+        for (text, expected) in [
+            (" TRUE ", Some(true)),
+            ("False", Some(false)),
+            (" 1 ", Some(true)),
+            ("0", Some(false)),
+            ("yes", None),
+            ("", None),
+        ] {
+            assert_eq!(parse_boolean_text(text), expected);
+            let source = Value::Text(text.into());
+            assert_eq!(source.cast_to(DataType::Boolean).ok(),
+                expected.map(Value::Boolean));
+            assert_eq!(crate::try_cast::convert(source, DataType::Boolean),
+                expected.map(Value::Boolean).unwrap_or(Value::Null));
+        }
     }
 }

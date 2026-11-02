@@ -1,5 +1,5 @@
 //! Non-throwing conversions for SQL TRY_CAST. Invalid values produce NULL.
-use crate::{scalar::Value, schema::DataType};
+use crate::{scalar::{parse_boolean_text, Value}, schema::DataType};
 
 pub fn convert(value: Value, target: DataType) -> Value {
     if value.is_null() { return Value::Null; }
@@ -42,16 +42,8 @@ pub fn convert(value: Value, target: DataType) -> Value {
             Value::Boolean(n) => Value::Boolean(n),
             Value::Integer(n) => Value::Boolean(n != 0),
             Value::Float(n) if n.is_finite() => Value::Boolean(n != 0.0),
-            Value::Text(n) => {
-                let text = n.trim();
-                if text.eq_ignore_ascii_case("true") || text == "1" {
-                    Value::Boolean(true)
-                } else if text.eq_ignore_ascii_case("false") || text == "0" {
-                    Value::Boolean(false)
-                } else {
-                    Value::Null
-                }
-            },
+            Value::Text(n) => parse_boolean_text(&n)
+                .map(Value::Boolean).unwrap_or(Value::Null),
             _ => Value::Null,
         },
     }
