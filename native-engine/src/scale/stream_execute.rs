@@ -415,6 +415,16 @@ fn infer(
                         _ => return Err(Error::Type("SUM requires numeric input".into())),
                     },
                     AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(&source)?,
+                    AggregateOp::BitAnd(expr) | AggregateOp::BitOr(expr) |
+                    AggregateOp::BitXor(expr) => {
+                        let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                            DataType::Integer
+                        } else { expr.output_type(&source)? };
+                        if kind != DataType::Integer {
+                            return Err(Error::Type("bitwise aggregation requires integer input".into()));
+                        }
+                        DataType::Integer
+                    }
                     _ => return Err(Error::Unsupported(
                         "spilled GROUP BY does not support this aggregate".into())),
                 };
@@ -1549,5 +1559,45 @@ mod streamed_distinct_adjacency_run_regressions {
         assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod stream_bitwise_grouped_aggregates_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    fn in_memory(query: &str) -> Vec<Vec<Value>> {
+        executor::execute(&sql::parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap()
+    }
+    fn in_stream(query: &str) -> Vec<Vec<Value>> {
+        execute(&sql::parse_sql(query).unwrap(), &FileCatalog::new(),
+            &StreamOptions::default(), QueryControl::default()).unwrap()
+            .flat_map(|batch| batch.unwrap().rows().unwrap()).collect()
+    }
+    fn sorted(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        rows
+    }
+
+    #[test]
+    fn bitwise_spill_matches_in_memory_with_nulls_and_negative_values() {
+        let query = "SELECT col1 AS k, BIT_AND(col2) AS a, BIT_OR(col2) AS o, \
+            BIT_XOR(col2) AS x FROM VALUES (1, 7), (1, 3), (1, NULL), \
+            (2, NULL), (2, -1), (2, 6), (3, NULL) GROUP BY col1";
+        assert_eq!(sorted(in_stream(query)), sorted(in_memory(query)));
+    }
+
+    #[test]
+    fn computed_bitwise_values_and_wrong_types_are_checked() {
+        let query = "SELECT col1 AS k, BIT_XOR(col2 + 1) AS x \
+            FROM VALUES (1, 3), (1, 5), (2, 6) GROUP BY col1";
+        assert_eq!(sorted(in_stream(query)), sorted(in_memory(query)));
+        let invalid = sql::parse_sql(
+            "SELECT col1, BIT_AND(col2) FROM VALUES (1, 'wrong') GROUP BY col1"
+        ).unwrap();
+        assert!(output_schema(&invalid, &FileCatalog::new(),
+            &StreamOptions::default()).is_err());
     }
 }
