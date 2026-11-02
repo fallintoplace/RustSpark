@@ -432,6 +432,44 @@ impl Parser {
                 left = Expr::Call { name: "concat".into(), args: vec![left, right] };
                 continue;
             }
+            // TPC-H calendar windows use +/- INTERVAL 'N' MONTH/YEAR.
+            // Keep this separate from day offsets, because month lengths vary.
+            let calendar_interval = match (self.peek(), self.tokens.get(self.index + 1),
+                self.tokens.get(self.index + 3)) {
+                (Some(Token::Operator(op)), Some(Token::Word(keyword)), Some(Token::Word(unit)))
+                    if (op == "+" || op == "-")
+                        && keyword.eq_ignore_ascii_case("INTERVAL")
+                        && ["MONTH", "MONTHS", "YEAR", "YEARS"].iter()
+                            .any(|item| unit.eq_ignore_ascii_case(item)) =>
+                    Some(op == "+"),
+                _ => None,
+            };
+            if let Some(add) = calendar_interval {
+                if min_precedence > 8 { break; }
+                self.next();
+                self.expect_word("INTERVAL")?;
+                let amount = match self.next() {
+                    Some(Token::Text(number)) | Some(Token::Number(number)) =>
+                        number.parse::<i64>()
+                            .map_err(|_| Error::Parse("INTERVAL expects integer calendar units".into()))?,
+                    _ => return Err(Error::Parse("INTERVAL expects integer calendar units".into())),
+                };
+                let unit = self.identifier()?;
+                let months = if unit.eq_ignore_ascii_case("YEAR")
+                    || unit.eq_ignore_ascii_case("YEARS") {
+                    amount.checked_mul(12)
+                        .ok_or_else(|| Error::Parse("INTERVAL years overflow".into()))?
+                } else { amount };
+                let offset = if add { months } else {
+                    months.checked_neg()
+                        .ok_or_else(|| Error::Parse("INTERVAL offset overflow".into()))?
+                };
+                left = Expr::Call {
+                    name: "add_months".into(),
+                    args: vec![left, Expr::Literal(Value::Integer(offset))],
+                };
+                continue;
+            }
             // DIV follows Spark's multiplicative operator precedence.
             if self.peek_word("DIV") {
                 if min_precedence > 9 { break; }
