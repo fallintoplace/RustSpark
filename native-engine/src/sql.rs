@@ -604,6 +604,25 @@ impl Parser {
                     Ok(Expr::Call { name: "locate".into(), args })
                 }
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("SUBSTRING")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let value = self.expression(0)?;
+                let mut args = vec![value];
+                if self.take_word("FROM") {
+                    args.push(self.expression(0)?);
+                    if self.take_word("FOR") {
+                        args.push(self.expression(0)?);
+                    }
+                } else {
+                    while self.take_symbol(',') {
+                        args.push(self.expression(0)?);
+                    }
+                }
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: word, args })
+            }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
                 if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
@@ -1594,6 +1613,19 @@ mod tests {
         ).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Integer(0)], vec![Value::Integer(1)], vec![Value::Null]]);
         assert!(execute(&parse_sql("SELECT amount % 0 FROM sales").unwrap(), &sales()).is_err());
+    }
+
+    #[test]
+    fn ansi_substring_from_for_keeps_existing_comma_forms() {
+        let query = "SELECT SUBSTRING(city FROM 1 FOR 2), SUBSTRING(city FROM 3), SUBSTRING(city, 1, 2) FROM sales";
+        let rows = execute(&parse_sql(query).unwrap(), &sales())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Text("Be".into()), Value::Text("rlin".into()), Value::Text("Be".into())],
+            vec![Value::Text("Be".into()), Value::Text("rlin".into()), Value::Text("Be".into())],
+            vec![Value::Text("Pa".into()), Value::Text("ris".into()), Value::Text("Pa".into())],
+        ]);
+        assert!(parse_sql("SELECT SUBSTRING(city FROM 1 FOR) FROM sales").is_err());
     }
 
     #[test]
