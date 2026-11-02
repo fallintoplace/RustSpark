@@ -220,6 +220,13 @@ impl Batch {
         if let Some(&invalid) = indices.iter().find(|&&row| row >= self.rows) {
             return Err(Error::Execution(format!("row index out of bounds: {invalid}")));
         }
+        // LIMIT/OFFSET and ordered range selections can clone a contiguous
+        // column slice rather than performing one indexed gather per cell.
+        if let Some(&start) = indices.first() {
+            if indices.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+                return self.slice_rows(start, start + indices.len());
+            }
+        }
         let mut columns = Vec::with_capacity(self.columns.len());
         for column in &self.columns {
             let mut selected = Vec::with_capacity(indices.len());
@@ -1248,6 +1255,42 @@ mod fallible_permutation_cycle_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod borrowed_contiguous_gather_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn contiguous_and_noncontiguous_gathers_match_row_reference() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Text("long🙂".repeat(128))],
+            vec![Value::Integer(3), Value::Text("three".into())],
+            vec![Value::Integer(4), Value::Null],
+        ]).unwrap();
+        for indices in [
+            vec![], vec![0], vec![1, 2], vec![0, 1, 2, 3],
+            vec![3, 1, 0], vec![2, 2],
+        ] {
+            let expected = Batch::from_rows(schema.clone(), indices.iter()
+                .map(|&index| batch.row(index).unwrap()).collect()).unwrap();
+            assert_eq!(batch.take(&indices).unwrap(), expected);
+        }
+        assert!(batch.take(&[1, 4]).is_err());
+    }
+
+    #[test]
+    fn empty_schema_keeps_contiguous_row_count() {
+        let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 10).unwrap();
+        assert_eq!(batch.take(&[3, 4, 5]).unwrap().num_rows(), 3);
+        assert_eq!(batch.take(&[]).unwrap().num_rows(), 0);
+    }
+}
 
 #[cfg(test)]
 mod dense_boolean_mask_perf_tests {
