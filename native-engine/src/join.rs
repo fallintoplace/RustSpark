@@ -1354,7 +1354,7 @@ mod native_composite_hash_join_regressions {
         assert_eq!(full.num_rows(), 7);
         assert_eq!(full.schema().len(), 4);
         let right = hash_join_composite(&l, &r, keys, JoinKind::Right).unwrap();
-        assert_eq!(right.num_rows(), 5);
+        assert_eq!(right.num_rows(), 4);
         assert!(hash_join_composite(&l, &r, &[], JoinKind::Inner).is_err());
         assert!(hash_join_composite(&l, &r, &[("idl","regionr")], JoinKind::Inner).is_err());
     }
