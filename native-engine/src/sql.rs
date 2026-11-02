@@ -791,6 +791,43 @@ impl Parser {
             };
         }
         if self.take_word("WHERE") {
+            // Uncorrelated IN with one selected column is a SEMI JOIN for a
+            // WHERE predicate: NULL/UNKNOWN never selects an outer row.
+            // Correlated and NOT IN subqueries need different lowering.
+            let in_subquery = matches!(self.peek(), Some(Token::Word(_)))
+                && matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"))
+                && self.tokens.get(self.index + 2) == Some(&Token::Symbol('('))
+                && matches!(self.tokens.get(self.index + 3),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"));
+            if in_subquery {
+                let outer_key = self.identifier()?;
+                self.expect_word("IN")?;
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("IN subquery nesting limit exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let inner = self.select_with_intersections()?;
+                let inner = self.finish_query(inner)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                let inner_key = match &inner {
+                    Plan::Project { selections, .. } if selections.len() == 1 =>
+                        selections[0].alias.clone(),
+                    _ => return Err(Error::Unsupported(
+                        "IN subquery must select exactly one explicit column".into()
+                    )),
+                };
+                plan = Plan::Join {
+                    left: Box::new(plan), right: Box::new(inner),
+                    left_key: outer_key, right_key: inner_key,
+                    kind: JoinKind::Semi,
+                };
+                if self.take_word("AND") {
+                    plan = plan.filter(self.expression(2)?);
+                }
+            } else {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
             // subquery down to zero columns and at most one row. CROSS JOIN
             // then preserves the outer schema while returning outer rows
@@ -832,6 +869,7 @@ impl Parser {
             } else {
                 if negate { self.index -= 1; }
                 plan = plan.filter(self.expression(0)?);
+            }
             }
         }
 
@@ -2455,5 +2493,42 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_uncorrelated_in_subquery_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn grouped_in_subquery_selects_matching_outer_rows_without_deduping() {
+        let mut c = Catalog::new();
+        c.register("orders", Batch::from_rows(
+            Schema::new(vec![Field::new("o_orderkey", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)],
+                vec![Value::Integer(2)], vec![Value::Integer(3)], vec![Value::Null]],
+        ).unwrap()).unwrap();
+        c.register("lineitem", Batch::from_rows(
+            Schema::new(vec![Field::new("l_orderkey", DataType::Integer, true),
+                Field::new("l_quantity", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1), Value::Integer(3)],
+                vec![Value::Integer(2), Value::Integer(2)],
+                vec![Value::Integer(2), Value::Integer(1)],
+                vec![Value::Integer(3), Value::Integer(1)],
+                vec![Value::Null, Value::Integer(99)]],
+        ).unwrap()).unwrap();
+        let query = "SELECT o_orderkey FROM orders WHERE o_orderkey IN \
+            (SELECT l_orderkey FROM lineitem GROUP BY l_orderkey \
+             HAVING SUM(l_quantity) > 2) ORDER BY o_orderkey";
+        assert_eq!(execute(&parse_sql(query).unwrap(), &c).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1)],
+                vec![Value::Integer(2)], vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn in_subquery_must_select_a_single_column() {
+        assert!(parse_sql("SELECT id FROM a WHERE id IN \
+            (SELECT x, y FROM b)").is_err());
     }
 }
