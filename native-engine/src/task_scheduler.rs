@@ -36,6 +36,14 @@ impl Task {
     }
 }
 
+
+fn allocate_window<T>(count: usize) -> Result<Vec<T>> {
+    let mut window = Vec::new();
+    window.try_reserve_exact(count)
+        .map_err(|_| Error::Execution("task scheduler window allocation failed".into()))?;
+    Ok(window)
+}
+
 pub struct TaskScheduler {
     // Lookup by task ID is on the hot path of leasing, renewal and completion.
     // The separate ordered ready/deadline sets keep deterministic scheduling.
@@ -151,7 +159,8 @@ impl TaskScheduler {
         let active = self.by_worker.get(&worker).map_or(0, HashSet::len);
         let available = max_active_per_worker.saturating_sub(active);
         let count = max_tasks.min(available).min(self.ready.len());
-        let mut leases = Vec::with_capacity(count);
+        // Do not claim any task before response storage is available.
+        let mut leases = allocate_window(count)?;
         for _ in 0..count {
             leases.push(self.lease_ready(worker, until).expect("ready task exists"));
         }
@@ -227,9 +236,12 @@ impl TaskScheduler {
         }
         let deadline = now.checked_add(ttl)
             .ok_or_else(|| Error::Execution("task heartbeat deadline overflow".into()))?;
-        Ok(leases.iter().map(|lease| {
-            self.renew_with_deadline(lease, now, deadline)
-        }).collect())
+        // Reserve every decision before extending even the first deadline.
+        let mut results = allocate_window(leases.len())?;
+        for lease in leases {
+            results.push(self.renew_with_deadline(lease, now, deadline));
+        }
+        Ok(results)
     }
 
     pub fn finish(&mut self, lease: &Lease, success: bool) -> bool {
@@ -945,5 +957,61 @@ mod early_lease_heartbeat_noop_tests {
         assert_eq!(scheduler.deadlines, extended);
         assert_eq!(scheduler.expire_leases(now + Duration::from_secs(6)), 0);
         assert!(scheduler.finish_at(&lease, true, now + Duration::from_secs(13)));
+    }
+}
+
+#[cfg(test)]
+mod atomic_scheduler_response_allocation_tests {
+    use super::*;
+
+    #[test]
+    fn impossible_result_window_returns_error_without_allocating() {
+        assert!(matches!(allocate_window::<Lease>(usize::MAX),
+            Err(Error::Execution(_))));
+        assert!(matches!(allocate_window::<bool>(usize::MAX),
+            Err(Error::Execution(_))));
+        assert!(allocate_window::<Lease>(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn multiple_leases_and_renewals_keep_worker_caps_and_attempts() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([5, 1, 3, 2], 3).unwrap();
+        let first = scheduler.lease_many_capped(
+            7, now, Duration::from_secs(10), 4, 2,
+        ).unwrap();
+        assert_eq!(first.iter().map(|lease| lease.task).collect::<Vec<_>>(),
+            vec![1, 2]);
+        assert_eq!(scheduler.counts().leased, 2);
+        assert!(scheduler.lease_many_capped(
+            7, now, Duration::from_secs(10), 4, 2,
+        ).unwrap().is_empty());
+        let second = scheduler.lease_many_capped(
+            8, now, Duration::from_secs(10), 4, 2,
+        ).unwrap();
+        assert_eq!(second.iter().map(|lease| lease.task).collect::<Vec<_>>(),
+            vec![3, 5]);
+        let mut heartbeat = first.clone();
+        heartbeat.push(Lease { task: 5, worker: 7, attempt: 1 });
+        assert_eq!(scheduler.renew_many(
+            &heartbeat, now + Duration::from_secs(2), Duration::from_secs(20),
+        ).unwrap(), vec![true, true, false]);
+        assert!(scheduler.finish_at(
+            &first[0], true, now + Duration::from_secs(3),
+        ));
+        assert_eq!(scheduler.counts().done, 1);
+        assert_eq!(scheduler.counts().leased, 3);
+    }
+
+    #[test]
+    fn invalid_ttl_does_not_mutate_an_active_attempt() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([42], 2).unwrap();
+        let leases = scheduler.lease_many(
+            3, now, Duration::from_secs(10), 1,
+        ).unwrap();
+        let before = scheduler.status(42).cloned();
+        assert!(scheduler.renew_many(&leases, now, Duration::ZERO).is_err());
+        assert_eq!(scheduler.status(42), before.as_ref());
     }
 }
