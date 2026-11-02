@@ -612,25 +612,74 @@ fn lower(
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
-            for key in keys {
-                let crate::expr::Expr::Column(name) = &key.expression else {
-                    return Err(Error::Unsupported("external sort requires column keys".into()));
-                };
-                schema.column(name)?;
+            if keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+                // Keep the direct-column path free from extra projections.
+                let runs = write_sorted_runs(
+                    child(input)?, schema.clone(), keys, &options.scratch_directory,
+                    options.sort_run_rows, control
+                )?;
+                let files = merge_to_fan_in(
+                    runs, &options.scratch_directory, schema.clone(), keys,
+                    options.merge_fan_in, options.sort_run_rows, control
+                )?;
+                let reader = RunMerger::new(
+                    files.files(), schema, keys,
+                    options.sort_run_rows, options.batch_rows, control.clone()
+                )?;
+                return Ok(Box::new(SortedOutput { reader, _files: files }));
             }
+
+            // Compute every non-column sort expression once per input row.
+            // The external sort and merge then operate only on column keys.
+            // Drop hidden keys after the merge, preserving the source schema.
+            let original = schema.fields().iter().map(|field|
+                Selection::new(Expr::Column(field.name.clone()), field.name.clone())
+            ).collect::<Vec<_>>();
+            let mut projected = original.clone();
+            let mut sort_keys = Vec::new();
+            for (index, key) in keys.iter().enumerate() {
+                if let Expr::Column(_) = &key.expression {
+                    sort_keys.push(key.clone());
+                    continue;
+                }
+                let mut counter = 0_usize;
+                let alias = loop {
+                    let candidate = format!("__rustspark_sort_key_{index}_{counter}");
+                    if !projected.iter().any(|selection|
+                        selection.alias.eq_ignore_ascii_case(&candidate)) {
+                        break candidate;
+                    }
+                    counter = counter.checked_add(1).ok_or_else(||
+                        Error::Execution("temporary sort key name overflow".into()))?;
+                };
+                projected.push(Selection::new(key.expression.clone(), alias.clone()));
+                sort_keys.push(crate::sort::SortKey {
+                    expression: Expr::Column(alias),
+                    descending: key.descending,
+                    nulls_first: key.nulls_first,
+                });
+            }
+            // Infer the temporary schema using the exact projection logic
+            // that processes the stream, including conservative nullability.
+            let extended = crate::project::project(&Batch::empty(schema.clone()), &projected)?
+                .schema().clone();
+            let input_stream = ProjectStream::new(
+                child(input)?, projected, control.clone()
+            );
             let runs = write_sorted_runs(
-                child(input)?, schema.clone(), keys, &options.scratch_directory,
+                input_stream, extended.clone(), &sort_keys, &options.scratch_directory,
                 options.sort_run_rows, control
             )?;
             let files = merge_to_fan_in(
-                runs, &options.scratch_directory, schema.clone(), keys,
+                runs, &options.scratch_directory, extended.clone(), &sort_keys,
                 options.merge_fan_in, options.sort_run_rows, control
             )?;
             let reader = RunMerger::new(
-                files.files(), schema, keys,
+                files.files(), extended, &sort_keys,
                 options.sort_run_rows, options.batch_rows, control.clone()
             )?;
-            Ok(Box::new(SortedOutput { reader, _files: files }))
+            let sorted = SortedOutput { reader, _files: files };
+            Ok(Box::new(ProjectStream::new(sorted, original, control.clone())))
         }
         Plan::Intersect { left, right } |
         Plan::IntersectAll { left, right } |
@@ -1549,5 +1598,78 @@ mod streamed_distinct_adjacency_run_regressions {
         assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod computed_external_sort_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    fn collect(plan: &Plan, options: &StreamOptions) -> Result<Vec<Vec<Value>>> {
+        let source = execute(plan, &FileCatalog::new(), options, QueryControl::default())?;
+        let batches = source.collect::<Result<Vec<_>>>()?;
+        Ok(batches.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn sorts_expression_keys_across_multiple_runs_and_restores_schema() {
+        let query = "SELECT id, score FROM \
+(VALUES (1, 7), (2, 3), (3, 4), (4, 5), (5, 1)) AS t(id, score) \
+ORDER BY score + id DESC, id ASC";
+        let plan = sql::parse_sql(query).unwrap();
+        let options = StreamOptions {
+            sort_run_rows: 2, merge_fan_in: 2, batch_rows: 2,
+            ..StreamOptions::default()
+        };
+        let expected = executor::execute(&plan, &Catalog::new()).unwrap();
+        assert_eq!(collect(&plan, &options).unwrap(), expected.rows().unwrap());
+        assert_eq!(output_schema(&plan, &FileCatalog::new(), &options).unwrap(),
+            expected.schema().clone());
+    }
+
+    #[test]
+    fn temporary_column_names_do_not_clobber_user_fields() {
+        use crate::{expr::BinaryOp, sort::SortKey};
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("__rustspark_sort_key_0_0", DataType::Integer, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(30), Value::Integer(2)],
+            vec![Value::Integer(10), Value::Integer(1)],
+        ]).unwrap();
+        let plan = Plan::Sort {
+            input: Box::new(Plan::Values { batch: input.clone() }),
+            keys: vec![SortKey::ascending(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Multiply,
+                Expr::Literal(Value::Integer(-1)),
+            ))],
+        };
+        let options = StreamOptions { sort_run_rows: 1, merge_fan_in: 2,
+            ..StreamOptions::default() };
+        let actual = collect(&plan, &options).unwrap();
+        assert_eq!(actual, vec![
+            vec![Value::Integer(30), Value::Integer(2)],
+            vec![Value::Integer(10), Value::Integer(1)],
+        ]);
+    }
+
+    #[test]
+    fn computed_key_errors_are_not_swallowed_during_spilling() {
+        use crate::{expr::BinaryOp, sort::SortKey};
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![vec![Value::Integer(0)]]).unwrap();
+        let plan = Plan::Sort {
+            input: Box::new(Plan::Values { batch: input }),
+            keys: vec![SortKey::ascending(Expr::binary(
+                Expr::Literal(Value::Integer(1)), BinaryOp::Divide,
+                Expr::Column("n".into()),
+            ))],
+        };
+        assert!(execute(&plan, &FileCatalog::new(), &StreamOptions::default(),
+            QueryControl::default()).is_err());
     }
 }
