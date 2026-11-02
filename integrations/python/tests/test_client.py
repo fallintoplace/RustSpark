@@ -407,11 +407,6 @@ printf '%s\r\n' '{"a":1}'
                 list(client.iter_rows("SELECT 1", max_row_bytes=7,
                                       max_output_bytes=8))
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class IndependentPipeBudgetTests(unittest.TestCase):
     def test_stdout_and_stderr_are_capped_independently(self):
         script = (
@@ -433,3 +428,6 @@ class IndependentPipeBudgetTests(unittest.TestCase):
                         max_output_bytes=stdout_limit,
                         max_error_bytes=stderr_limit,
                     )
+
+if __name__ == "__main__":
+    unittest.main()
