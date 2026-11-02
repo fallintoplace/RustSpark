@@ -138,6 +138,20 @@ fn row_wire_bytes(batch: &Batch, row: usize) -> Result<usize> {
     Ok(bytes)
 }
 
+// The encoded size of a required numeric/bool row is constant. Avoid walking
+// every column on every row when partitioning a fixed-width schema.
+fn fixed_wire_row_bytes(schema: &Schema) -> Option<usize> {
+    schema.fields().iter().try_fold(0usize, |bytes, field| {
+        if field.nullable { return None; }
+        let cell = match field.data_type {
+            crate::schema::DataType::Boolean => 1,
+            crate::schema::DataType::Integer | crate::schema::DataType::Float => 9,
+            crate::schema::DataType::Text => return None,
+        };
+        bytes.checked_add(cell)
+    })
+}
+
 /// Visit wire-budgeted row windows. Row-index selection and contiguous
 /// ranges share this logic without allocating extra gathered batches.
 fn write_bounded_windows(
@@ -148,12 +162,21 @@ fn write_bounded_windows(
     if max_bytes < 4 || max_rows == 0 {
         return Err(Error::Execution("partition spill batch budget too small".into()));
     }
+    let fixed_bytes = fixed_wire_row_bytes(batch.schema());
     let mut start = 0usize;
     while start < rows {
         let mut end = start;
         let mut bytes = 4usize;
         while end < rows && end - start < max_rows {
-            let next = row_wire_bytes(batch, row_at(end))?;
+            let row = row_at(end);
+            let next = if let Some(bytes) = fixed_bytes {
+                if row >= batch.num_rows() {
+                    return Err(Error::Execution(format!("row index out of bounds: {row}")));
+                }
+                bytes
+            } else {
+                row_wire_bytes(batch, row)?
+            };
             if next > max_bytes - 4 {
                 return Err(Error::Execution("partition spill row exceeds wire byte limit".into()));
             }
@@ -1000,5 +1023,44 @@ mod sparse_partition_finalization_regressions {
         drop(files);
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
         std::fs::remove_dir(&directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod fixed_width_partition_wire_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn budgeted_fixed_width_windows_match_encoded_numeric_rows() {
+        let schema = Schema::new(vec![
+            Field::new("flag", DataType::Boolean, false),
+            Field::new("id", DataType::Integer, false),
+            Field::new("score", DataType::Float, false),
+        ]).unwrap();
+        assert_eq!(fixed_wire_row_bytes(&schema), Some(19));
+        let batch = Batch::from_rows(schema, (0..5).map(|i| vec![
+            Value::Boolean(i % 2 == 0), Value::Integer(i), Value::Float(i as f64 + 0.5),
+        ]).collect()).unwrap();
+        let mut windows = Vec::new();
+        write_bounded_windows(&batch, 5, |i| i, 42, |start, end| {
+            windows.push((start, end));
+            Ok(())
+        }).unwrap();
+        assert_eq!(windows, [(0, 2), (2, 4), (4, 5)]);
+        assert!(write_bounded_windows(&batch, 1, |_| 99, 42, |_, _| Ok(())).is_err());
+    }
+
+    #[test]
+    fn nullable_and_text_schemas_keep_rowwise_accounting() {
+        let nullable = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+        ]).unwrap();
+        assert_eq!(fixed_wire_row_bytes(&nullable), None);
+        let text = Schema::new(vec![
+            Field::new("name", DataType::Text, false),
+        ]).unwrap();
+        assert_eq!(fixed_wire_row_bytes(&text), None);
+        assert_eq!(fixed_wire_row_bytes(&Schema::new(vec![]).unwrap()), Some(0));
     }
 }
