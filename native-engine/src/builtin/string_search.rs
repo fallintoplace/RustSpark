@@ -22,6 +22,19 @@ fn bounded_split_field(value: &str) -> Result<Value> {
     Ok(Value::Text(owned))
 }
 
+fn trailing_split_field<'a>(
+    text: &'a str, delimiter: &str, recent: &mut [Option<&'a str>],
+) -> Option<&'a str> {
+    let from_end = recent.len();
+    debug_assert!(from_end > 0);
+    let mut seen = 0usize;
+    for field in text.split(delimiter) {
+        recent[seen % from_end] = Some(field);
+        seen += 1;
+    }
+    if seen >= from_end { recent[seen % from_end] } else { None }
+}
+
 fn split_part(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -56,33 +69,19 @@ fn split_part(args: &[Value]) -> Result<Value> {
                 .nth(from_end - 1).unwrap_or(""));
         }
         if from_end <= 16 {
-            // Multicharacter delimiters can overlap. Keep forward split
-            // semantics with a bounded stack ring instead of two scans.
             let mut recent: [Option<&str>; 16] = [None; 16];
-            let mut seen = 0usize;
-            for field in text.split(delimiter) {
-                recent[seen % from_end] = Some(field);
-                seen += 1;
-            }
-            let selected = if seen >= from_end { recent[seen % from_end] }
-                else { None };
-            return bounded_split_field(selected.unwrap_or(""));
+            return bounded_split_field(trailing_split_field(
+                text, delimiter, &mut recent[..from_end],
+            ).unwrap_or(""));
         }
         if from_end <= 256 {
-            // Keep a bounded ring of borrowed fields for larger negative
-            // offsets. One forward pass preserves nonoverlapping split order.
             let mut recent = Vec::new();
             recent.try_reserve_exact(from_end)
                 .map_err(|_| Error::Execution("SPLIT_PART ring allocation failed".into()))?;
             recent.resize(from_end, None);
-            let mut seen = 0usize;
-            for field in text.split(delimiter) {
-                recent[seen % from_end] = Some(field);
-                seen += 1;
-            }
-            let selected = if seen >= from_end { recent[seen % from_end] }
-                else { None };
-            return bounded_split_field(selected.unwrap_or(""));
+            return bounded_split_field(trailing_split_field(
+                text, delimiter, &mut recent,
+            ).unwrap_or(""));
         }
     }
     let result = if index > 0 {
@@ -598,5 +597,30 @@ mod fallible_split_part_result_and_reverse_ring_tests {
         assert!(field(&oversize, ",", 1).is_err());
         assert_eq!(split_part(&[Value::Null, Value::Text(",".into()),
             Value::Integer(1)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod shared_split_tail_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn negative_indices_preserve_forward_split_fields() {
+        for (text, delimiter) in [
+            ("a".repeat(610) + "x", "aa"),
+            ("ab".repeat(310) + "x", "ab"),
+        ] {
+            let fields: Vec<_> = text.split(delimiter).collect();
+            for from_end in [2_usize, 15, 16, 17, 255, 256, 257, 301] {
+                let expected = fields.iter().rev().nth(from_end - 1)
+                    .copied().unwrap_or("");
+                let actual = split_part(&[
+                    Value::Text(text.clone()), Value::Text(delimiter.into()),
+                    Value::Integer(-(from_end as i64)),
+                ]).unwrap();
+                assert_eq!(actual, Value::Text(expected.into()),
+                    "delimiter={delimiter:?} from_end={from_end}");
+            }
+        }
     }
 }
