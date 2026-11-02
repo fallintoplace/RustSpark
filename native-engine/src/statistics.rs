@@ -16,6 +16,28 @@ impl Default for ColumnStatistics {
     }
 }
 
+// Copy only the required extrema, and report an allocation failure to the query.
+fn clone_extremum(value: &Value) -> Result<Value> {
+    match value {
+        Value::Text(text) => {
+            let mut copy = String::new();
+            copy.try_reserve_exact(text.len())
+                .map_err(|_| Error::Execution("statistics extrema allocation failed".into()))?;
+            copy.push_str(text);
+            Ok(Value::Text(copy))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+fn copy_text_extremum(value: &str) -> Result<Value> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(value.len())
+        .map_err(|_| Error::Execution("statistics extrema allocation failed".into()))?;
+    copy.push_str(value);
+    Ok(Value::Text(copy))
+}
+
 fn should_replace(
     current: Option<&Value>, candidate: Option<&Value>, direction: Ordering,
 ) -> Result<bool> {
@@ -148,8 +170,8 @@ impl ColumnStatistics {
             }
             return Ok(Self {
                 rows, nulls,
-                min: min.map(|value| Value::Text(value.to_owned())),
-                max: max.map(|value| Value::Text(value.to_owned())),
+                min: min.map(copy_text_extremum).transpose()?,
+                max: max.map(copy_text_extremum).transpose()?,
             });
         }
         let mut stats = Self::default();
@@ -169,14 +191,12 @@ impl ColumnStatistics {
         let candidate = (!value.is_null()).then_some(value);
         let replace_min = should_replace(self.min.as_ref(), candidate, Ordering::Less)?;
         let replace_max = should_replace(self.max.as_ref(), candidate, Ordering::Greater)?;
+        let next_min = replace_min.then(|| clone_extremum(value)).transpose()?;
+        let next_max = replace_max.then(|| clone_extremum(value)).transpose()?;
         self.rows = rows;
         self.nulls = nulls;
-        if replace_min {
-            self.min = Some(value.clone());
-        }
-        if replace_max {
-            self.max = Some(value.clone());
-        }
+        if let Some(value) = next_min { self.min = Some(value); }
+        if let Some(value) = next_max { self.max = Some(value); }
         Ok(())
     }
 
@@ -195,14 +215,14 @@ impl ColumnStatistics {
         // Validate both extrema before committing counters or bounds.
         let replace_min = should_replace(self.min.as_ref(), other.min.as_ref(), Ordering::Less)?;
         let replace_max = should_replace(self.max.as_ref(), other.max.as_ref(), Ordering::Greater)?;
+        let next_min = if replace_min { other.min.as_ref().map(clone_extremum).transpose()? }
+            else { None };
+        let next_max = if replace_max { other.max.as_ref().map(clone_extremum).transpose()? }
+            else { None };
         self.rows = rows;
         self.nulls = nulls;
-        if replace_min {
-            self.min = other.min.clone();
-        }
-        if replace_max {
-            self.max = other.max.clone();
-        }
+        if let Some(value) = next_min { self.min = Some(value); }
+        if let Some(value) = next_max { self.max = Some(value); }
         Ok(())
     }
 }
@@ -373,8 +393,8 @@ impl ColumnStatistics {
                 return Ok(Self {
                     rows,
                     nulls,
-                    min: min.map(|text| Value::Text(text.to_owned())),
-                    max: max.map(|text| Value::Text(text.to_owned())),
+                    min: min.map(copy_text_extremum).transpose()?,
+                    max: max.map(copy_text_extremum).transpose()?,
                 });
             }
         }
@@ -851,5 +871,36 @@ mod invalid_statistics_merge_tests {
         assert_eq!((summary.rows, summary.nulls), (5, 4));
         assert_eq!(summary.min, Some(Value::Integer(-4)));
         assert_eq!(summary.max, Some(Value::Integer(-4)));
+    }
+}
+
+#[cfg(test)]
+mod fallible_statistics_extrema_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn nullable_long_text_bounds_match_across_batches_and_observations() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        let low = "a".repeat(128 * 1024);
+        let high = "z".repeat(128 * 1024);
+        let first = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text(high.clone())], vec![Value::Null]
+        ]).unwrap();
+        let second = Batch::from_rows(schema, vec![
+            vec![Value::Text(low.clone())], vec![Value::Text(high.clone())]
+        ]).unwrap();
+        let expected = ColumnStatistics::from_batches(&[first.clone(), second.clone()],
+            "label").unwrap();
+        let mut observed = ColumnStatistics::default();
+        for batch in [&first, &second] {
+            for value in batch.column(0).unwrap() { observed.observe(value).unwrap(); }
+        }
+        assert_eq!(expected, observed);
+        let mut merged = ColumnStatistics::from_batch(&first, "label").unwrap();
+        merged.merge(&ColumnStatistics::from_batch(&second, "label").unwrap()).unwrap();
+        assert_eq!(expected, merged);
+        assert_eq!(merged.min, Some(Value::Text(low)));
+        assert_eq!(merged.max, Some(Value::Text(high)));
     }
 }
