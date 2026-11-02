@@ -424,12 +424,9 @@ fn infer(
         }
         Plan::Project { input, selections } => {
             let source = child(input)?;
-            let fields = selections.iter().map(|selection: &Selection| {
-                Ok(Field::new(
-                    &selection.alias, selection.expression.output_type(&source)?, true
-                ))
-            }).collect::<Result<Vec<_>>>()?;
-            Schema::new(fields)
+            // Use the projection operator's exact nullability contract.
+            let empty = Batch::empty(source);
+            Ok(crate::project::project(&empty, selections)?.schema().clone())
         }
         Plan::Intersect { left, right } |
         Plan::IntersectAll { left, right } |
@@ -595,8 +592,33 @@ fn lower(
                 control: control.clone(), stopped: false,
             }))
         }
-        Plan::Project { input, selections } =>
-            Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
+        Plan::Project { input, selections } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                if let Some(parquet) = catalog.get_parquet(table)? {
+                    let mut requested: Vec<&str> = Vec::new();
+                    let mut direct = true;
+                    for selection in selections {
+                        let Expr::Column(name) = &selection.expression else {
+                            direct = false;
+                            break;
+                        };
+                        if !requested.iter().any(|existing|
+                            existing.eq_ignore_ascii_case(name)) {
+                            requested.push(name);
+                        }
+                    }
+                    if direct && !requested.is_empty() {
+                        let scan = parquet.open_columns(options.batch_rows, &requested)?;
+                        return Ok(Box::new(ProjectStream::new(
+                            scan, selections.clone(), control.clone(),
+                        )));
+                    }
+                }
+            }
+            Ok(Box::new(ProjectStream::new(
+                child(input)?, selections.clone(), control.clone(),
+            )))
+        },
         Plan::Limit { input, offset, count: Some(count) }
             if matches!(input.as_ref(), Plan::Filter { .. }) => {
             let Plan::Filter { input: source, predicate } = input.as_ref() else {
@@ -1549,5 +1571,50 @@ mod streamed_distinct_adjacency_run_regressions {
         assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod sql_parquet_projection_pushdown_regressions {
+    use super::*;
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn queries_aliased_and_reordered_columns_from_parquet() {
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-sql-pushdown-{}-{}.parquet",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        let schema = Schema::new(vec![
+            Field::new("unused", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let data = Batch::from_rows(schema, vec![
+            vec![Value::Text("x".into()), Value::Integer(2), Value::Text("B".into())],
+            vec![Value::Text("y".into()), Value::Integer(1), Value::Null],
+        ]).unwrap();
+        let arrow = crate::arrow_bridge::to_arrow(&data).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            fs::File::create(&path).unwrap(), arrow.schema(), None).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_parquet("t", &path).unwrap();
+        let plan = crate::sql::parse_sql(
+            "SELECT label AS description, id AS number, id AS duplicate FROM t",
+        ).unwrap();
+        let options = StreamOptions { batch_rows: 1, ..StreamOptions::default() };
+        let expected = output_schema(&plan, &catalog, &options).unwrap();
+        let batches = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert!(batches.iter().all(|batch| batch.schema() == &expected));
+        let rows = batches.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Text("B".into()), Value::Integer(2), Value::Integer(2)],
+            vec![Value::Null, Value::Integer(1), Value::Integer(1)],
+        ]);
+        fs::remove_file(path).unwrap();
     }
 }
