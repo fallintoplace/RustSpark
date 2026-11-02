@@ -171,6 +171,13 @@ fn instr(args: &[Value]) -> Result<Value> {
     if needle.is_empty() { return Ok(Value::Integer(1)); }
     if start == 0 { return Ok(Value::Integer(0)); }
 
+    if start > 0 && occurrence == 1 {
+        // LOCATE already does a substring search from a Unicode scalar
+        // offset. Avoid checking every subsequent character boundary for
+        // the common first-occurrence form of INSTR.
+        return locate_values(&args[1], &args[0], Some(&args[2]));
+    }
+
     let match_position = if start > 0 {
         let first = usize::try_from(start - 1).unwrap_or(usize::MAX);
         text.char_indices().enumerate().find_map(|(index, (byte, _))| {
@@ -622,5 +629,50 @@ mod shared_split_tail_buffer_tests {
                     "delimiter={delimiter:?} from_end={from_end}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod instr_first_positive_occurrence_tests {
+    use super::*;
+
+    #[test]
+    fn matches_locate_for_positive_starts_and_unicode_boundaries() {
+        for (text, needle) in [
+            ("abababa", "aba"), ("é🙂ababa", "aba"),
+            ("é🙂abc", "🙂"), ("aaaa", "aa"), ("", "x"),
+            ("plain text", "missing"),
+        ] {
+            for start in [1, 2, 3, 4, 10, i64::MAX] {
+                let expected = locate(&[
+                    Value::Text(needle.into()), Value::Text(text.into()),
+                    Value::Integer(start),
+                ]).unwrap();
+                let actual = instr(&[
+                    Value::Text(text.into()), Value::Text(needle.into()),
+                    Value::Integer(start), Value::Integer(1),
+                ]).unwrap();
+                assert_eq!(actual, expected, "{text:?} {needle:?} {start}");
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_and_reverse_occurrences_keep_existing_behavior() {
+        assert_eq!(instr(&[
+            Value::Text("ababa".into()), Value::Text("aba".into()),
+            Value::Integer(1), Value::Integer(2),
+        ]).unwrap(), Value::Integer(3));
+        assert_eq!(instr(&[
+            Value::Text("ababa".into()), Value::Text("aba".into()),
+            Value::Integer(-1), Value::Integer(1),
+        ]).unwrap(), Value::Integer(3));
+        assert_eq!(instr(&[
+            Value::Null, Value::Text("x".into()), Value::Integer(1),
+        ]).unwrap(), Value::Null);
+        assert_eq!(instr(&[
+            Value::Text("abc".into()), Value::Text("".into()),
+            Value::Integer(3), Value::Integer(1),
+        ]).unwrap(), Value::Integer(1));
     }
 }
