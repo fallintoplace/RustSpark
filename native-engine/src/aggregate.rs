@@ -120,8 +120,8 @@ impl AggregateItem {
 enum State {
     Count(i64),
     CountDistinct { seen: HashSet<Value>, bytes: usize },
-    Sum(Option<Value>),
-    SumDistinct { seen: HashSet<Value>, total: Option<Value> },
+    Sum { total: Option<Value>, compensation: f64 },
+    SumDistinct { seen: HashSet<Value>, total: Option<Value>, compensation: f64 },
     Avg { sum: f64, compensation: f64, count: i64 },
     AvgDistinct { seen: HashSet<Value>, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
@@ -138,8 +138,8 @@ impl State {
         match op {
             AggregateOp::CountAll | AggregateOp::Count(_) => Self::Count(0),
             AggregateOp::CountDistinct(_) => Self::CountDistinct { seen: HashSet::new(), bytes: 0 },
-            AggregateOp::Sum(_) => Self::Sum(None),
-            AggregateOp::SumDistinct(_) => Self::SumDistinct { seen: HashSet::new(), total: None },
+            AggregateOp::Sum(_) => Self::Sum { total: None, compensation: 0.0 },
+            AggregateOp::SumDistinct(_) => Self::SumDistinct { seen: HashSet::new(), total: None, compensation: 0.0 },
             AggregateOp::Avg(_) => Self::Avg { sum: 0.0, compensation: 0.0, count: 0 },
             AggregateOp::AvgDistinct(_) =>
                 Self::AvgDistinct { seen: HashSet::new(), sum: 0.0, compensation: 0.0, count: 0 },
@@ -206,14 +206,14 @@ impl State {
                     *total_distinct_bytes = next_total;
                 }
             }
-            Self::Sum(total) => add_sum(total, value.as_ref())?,
-            Self::SumDistinct { seen, total } => {
+            Self::Sum { total, compensation } => add_sum(total, compensation, value.as_ref())?,
+            Self::SumDistinct { seen, total, compensation } => {
                 if !value.is_null() && !seen.contains(value.as_ref()) {
                     check_distinct_budget(seen)?;
                     let next_total = charge_distinct_size(
                         *total_distinct_bytes, distinct_key_footprint(value.as_ref())?,
                         available_distinct_bytes)?;
-                    add_sum(total, value.as_ref())?;
+                    add_sum(total, compensation, value.as_ref())?;
                     seen.insert(value.into_owned());
                     *total_distinct_bytes = next_total;
                 }
@@ -279,11 +279,14 @@ impl State {
                 if count == 0 { Value::Null } else { Value::Float((sum + compensation) / count as f64) },
             Self::AvgDistinct { sum, compensation, count, .. } =>
                 if count == 0 { Value::Null } else { Value::Float((sum + compensation) / count as f64) },
-            Self::SumDistinct { total, .. } => total.unwrap_or(Value::Null),
+            Self::SumDistinct { total, compensation, .. } =>
+                finish_compensated_sum(total, compensation),
             Self::BitAnd(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::BitOr(value) => value.map(Value::Integer).unwrap_or(Value::Null),
             Self::BitXor(value) => value.map(Value::Integer).unwrap_or(Value::Null),
-            Self::Sum(value) | Self::Min(value) | Self::Max(value) | Self::First(value) | Self::Last(value) => {
+            Self::Sum { total, compensation } =>
+                finish_compensated_sum(total, compensation),
+            Self::Min(value) | Self::Max(value) | Self::First(value) | Self::Last(value) => {
                 value.unwrap_or(Value::Null)
             }
         })
@@ -351,16 +354,29 @@ fn check_distinct_budget(values: &HashSet<Value>) -> Result<()> {
     }
 }
 
-fn add_sum(total: &mut Option<Value>, value: &Value) -> Result<()> {
+fn finish_compensated_sum(total: Option<Value>, compensation: f64) -> Value {
+    match total {
+        Some(Value::Float(sum)) => Value::Float(sum + compensation),
+        Some(value) => value,
+        None => Value::Null,
+    }
+}
+
+/// Neumaier correction prevents repeated small TPC-H revenues from vanishing
+/// after a large partial sum. Pure integer SUM still uses checked i64 addition.
+fn add_sum(total: &mut Option<Value>, compensation: &mut f64, value: &Value) -> Result<()> {
     if value.is_null() { return Ok(()); }
     let updated = match (total.as_ref(), value) {
         (None, Value::Integer(_) | Value::Float(_)) => value.clone(),
         (Some(Value::Integer(a)), Value::Integer(b)) => Value::Integer(
             a.checked_add(*b).ok_or_else(|| Error::Execution("SUM overflow".into()))?,
         ),
-        (Some(Value::Integer(a)), Value::Float(b)) => Value::Float(*a as f64 + *b),
-        (Some(Value::Float(a)), Value::Integer(b)) => Value::Float(*a + *b as f64),
-        (Some(Value::Float(a)), Value::Float(b)) => Value::Float(*a + *b),
+        (Some(Value::Integer(a)), Value::Float(b)) =>
+            corrected_sum(*a as f64, *b, compensation)?,
+        (Some(Value::Float(a)), Value::Integer(b)) =>
+            corrected_sum(*a, *b as f64, compensation)?,
+        (Some(Value::Float(a)), Value::Float(b)) =>
+            corrected_sum(*a, *b, compensation)?,
         _ => return Err(Error::Type("SUM requires numeric values".into())),
     };
     if matches!(&updated, Value::Float(number) if !number.is_finite()) {
@@ -368,6 +384,21 @@ fn add_sum(total: &mut Option<Value>, value: &Value) -> Result<()> {
     }
     *total = Some(updated);
     Ok(())
+}
+
+fn corrected_sum(left: f64, right: f64, compensation: &mut f64) -> Result<Value> {
+    let sum = left + right;
+    let correction = if left.abs() >= right.abs() {
+        (left - sum) + right
+    } else {
+        (right - sum) + left
+    };
+    let updated = *compensation + correction;
+    if !sum.is_finite() || !updated.is_finite() || !(sum + updated).is_finite() {
+        return Err(Error::Execution("SUM overflow".into()));
+    }
+    *compensation = updated;
+    Ok(Value::Float(sum))
 }
 
 fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value) -> Result<()> {
