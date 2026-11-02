@@ -310,7 +310,8 @@ impl Parser {
                 if self.peek_word("BETWEEN") || negate {
                     if negate { self.next(); }
                     self.expect_word("BETWEEN")?;
-                    let symmetric = self.take_word("SYMMETRIC");
+                    let symmetric = if self.take_word("ASYMMETRIC") { false }
+                        else { self.take_word("SYMMETRIC") };
                     let lower = self.expression(4)?;
                     self.expect_word("AND")?;
                     let upper = self.expression(4)?;
