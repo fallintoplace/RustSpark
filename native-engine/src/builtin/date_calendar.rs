@@ -36,10 +36,13 @@ fn parse_iso_date(value: &Value) -> Result<Option<CalendarDate>> {
     let year = text[..4].parse::<i64>().map_err(|_| invalid())?;
     let month = text[5..7].parse::<i64>().map_err(|_| invalid())?;
     let day = text[8..10].parse::<i64>().map_err(|_| invalid())?;
-    if year == 0 || day == 0 || day > month_length(year, month) {
+    let date = CalendarDate { year, month, day };
+    if date.year == 0 || date.day == 0
+        || date.day > month_length(date.year, date.month)
+    {
         return Err(invalid());
     }
-    Ok(Some(CalendarDate { year, month, day }))
+    Ok(Some(date))
 }
 
 fn date_integer_type(types: &[DataType]) -> Result<DataType> {
