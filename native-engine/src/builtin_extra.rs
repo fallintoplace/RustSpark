@@ -84,6 +84,16 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(first)
         },
+        "DAYOFWEEK" => {
+            if args.len() != 1 {
+                return Err(Error::Parse("DAYOFWEEK expects one date".into()));
+            }
+            if !matches!(&args[0], Expr::Literal(Value::Null))
+                && args[0].output_type(schema)? != DataType::Text {
+                return Err(Error::Type("DAYOFWEEK expects ISO date text".into()));
+            }
+            Ok(DataType::Integer)
+        },
         "DATE_ADD" | "DATE_SUB" => {
             if args.len() != 2 {
                 return Err(Error::Parse(format!("{name} requires date and day offset")));
@@ -346,6 +356,15 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "DAYOFWEEK" => match args {
+            [Value::Null] => Ok(Value::Null),
+            [Value::Text(date)] => {
+                let days = tpch_iso_days(date)?;
+                // The Unix epoch starts on Thursday. Spark numbers Sunday as 1.
+                Ok(Value::Integer((days + 4).rem_euclid(7) + 1))
+            },
+            _ => Err(Error::Type("DAYOFWEEK expects ISO date text".into())),
         },
         "DATE_ADD" | "DATE_SUB" => match args {
             [Value::Text(text), Value::Integer(amount)] => {
