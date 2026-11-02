@@ -41,6 +41,14 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
     Ok(compiled)
 }
 
+// Recognize a start-anchored identifier literal without regex compilation.
+pub(super) fn anchored_identifier(pattern: &str) -> Option<&str> {
+    let prefix = pattern.strip_prefix('^')?;
+    (prefix.len() <= 4095 &&
+        prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_'))
+        .then_some(prefix)
+}
+
 pub(super) fn check_input(text: &str) -> Result<()> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("regex input exceeds native 16 MiB budget".into()));
@@ -79,5 +87,21 @@ mod regex_cache_lru_tests {
             assert!(entries.iter().any(|(key, _)| key == "rustspark-lru-a"));
             assert!(!entries.iter().any(|(key, _)| key == "rustspark-lru-b"));
         });
+    }
+}
+
+#[cfg(test)]
+mod anchored_identifier_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_bounded_start_anchored_identifiers() {
+        for pattern in ["^", "^column_2", "^éclair"] {
+            assert!(anchored_identifier(pattern).is_some(), "{pattern}");
+        }
+        for pattern in ["column", "^a+b", "^a.b", "^a|b", "^ab$", "x^ab"] {
+            assert!(anchored_identifier(pattern).is_none(), "{pattern}");
+        }
+        assert!(anchored_identifier(&format!("^{}", "x".repeat(4096))).is_none());
     }
 }
