@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap};
 
-use crate::{batch::Batch, Error, Result};
+use crate::{batch::Batch, schema::normalized_name, Error, Result};
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
@@ -87,11 +87,7 @@ fn normalize(name: &str) -> Result<Cow<'_, str>> {
     if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
         return Err(Error::Schema("expected a simple nonempty table name".into()));
     }
-    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        Ok(Cow::Owned(name.to_ascii_lowercase()))
-    } else {
-        Ok(Cow::Borrowed(name))
-    }
+    Ok(normalized_name(name))
 }
 
 #[cfg(test)]

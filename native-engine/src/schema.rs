@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
-fn normalized_name(name: &str) -> Cow<'_, str> {
+pub(crate) fn normalized_name(name: &str) -> Cow<'_, str> {
     if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
         Cow::Owned(name.to_ascii_lowercase())
     } else {
