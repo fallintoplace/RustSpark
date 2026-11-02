@@ -2539,7 +2539,7 @@ mod tpch_not_in_subquery_tests {
             Schema::new(vec![Field::new("s_key", DataType::Integer, true)]).unwrap(),
             right.into_iter().map(|v| vec![v]).collect(),
         ).unwrap()).unwrap();
-        execute(&parse_sql("SELECT p_key FROM part WHERE p_key NOT IN (SELECT s_key FROM blocked) ORDER BY p_key").unwrap(), &catalog)
+        execute(&parse_sql("SELECT p_key FROM part WHERE p_key NOT IN (SELECT s_key FROM blocked) ORDER BY p_key NULLS LAST").unwrap(), &catalog)
             .unwrap().rows().unwrap()
     }
 
