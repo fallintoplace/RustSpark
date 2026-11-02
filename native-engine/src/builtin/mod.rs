@@ -89,6 +89,7 @@ mod md5_digest;
 mod parse_url;
 mod sha2_digest;
 mod sha1_digest;
+mod xxh3_hash;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -196,6 +197,7 @@ const MODULES: &[&[Function]] = &[
     &parse_url::FUNCTIONS,
     &sha2_digest::FUNCTIONS,
     &sha1_digest::FUNCTIONS,
+    &xxh3_hash::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
