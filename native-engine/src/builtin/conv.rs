@@ -25,28 +25,29 @@ fn encode(mut value: u64, base: u64, negative: bool) -> String {
     std::str::from_utf8(&digits[cursor..])
         .expect("CONV emits only ASCII digits").to_owned()
 }
+fn decimal_input<'a>(value: i64, decimal: &'a mut [u8; 20]) -> &'a str {
+    let mut magnitude = value.unsigned_abs();
+    let mut start = decimal.len();
+    loop {
+        start -= 1;
+        decimal[start] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 { break; }
+    }
+    if value < 0 {
+        start -= 1;
+        decimal[start] = b'-';
+    }
+    std::str::from_utf8(&decimal[start..]).expect("integer digits are ASCII")
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     // BIGINT inputs must retain their decimal-text parsing semantics even
     // when from_base differs from 10. Store those digits on the stack.
     let mut decimal = [0_u8; 20];
     let source: &str = match &args[0] {
         Value::Text(text) => text,
-        Value::Integer(n) => {
-            let mut magnitude = n.unsigned_abs();
-            let mut start = decimal.len();
-            loop {
-                start -= 1;
-                decimal[start] = b'0' + (magnitude % 10) as u8;
-                magnitude /= 10;
-                if magnitude == 0 { break; }
-            }
-            if *n < 0 {
-                start -= 1;
-                decimal[start] = b'-';
-            }
-            std::str::from_utf8(&decimal[start..])
-                .expect("integer digits are ASCII")
-        }
+        Value::Integer(n) => decimal_input(*n, &mut decimal),
         Value::Null => return Ok(Value::Null),
         _ => return Err(Error::Type("CONV requires text or integer input".into())),
     };
