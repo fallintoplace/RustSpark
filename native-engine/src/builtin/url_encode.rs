@@ -14,20 +14,27 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
     if text.bytes().all(is_url_safe) {
-        return Ok(Value::Text(text.to_owned()));
+        let mut output = String::new();
+        output.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
+        output.push_str(text);
+        return Ok(Value::Text(output));
     }
     // Copy contiguous safe ASCII runs, encode exceptions, and check size
     // before appending. Avoid the two pre-scans and per-byte char pushes.
     let bytes = text.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
+    let mut output = Vec::new();
     let mut start = 0usize;
     for (index, &byte) in bytes.iter().enumerate() {
         if is_url_safe(byte) { continue; }
         let added = if byte == b' ' { 1 } else { 3 };
-        output.len().checked_add(index - start)
-            .and_then(|len| len.checked_add(added))
+        let append = (index - start).checked_add(added)
+            .ok_or_else(|| Error::Execution("URL_ENCODE output size overflow".into()))?;
+        output.len().checked_add(append)
             .filter(|&len| len <= MAX_OUTPUT_BYTES)
             .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
+        output.try_reserve(append)
+            .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
         output.extend_from_slice(&bytes[start..index]);
         if byte == b' ' {
             output.push(b'+');
@@ -39,9 +46,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         }
         start = index + 1;
     }
-    output.len().checked_add(bytes.len() - start)
+    let remaining = bytes.len() - start;
+    output.len().checked_add(remaining)
         .filter(|&len| len <= MAX_OUTPUT_BYTES)
         .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
+    output.try_reserve(remaining)
+        .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
     output.extend_from_slice(&bytes[start..]);
     Ok(Value::Text(String::from_utf8(output)
         .expect("URL_ENCODE produces ASCII-only bytes")))
@@ -134,5 +144,25 @@ mod url_encode_safe_ascii_bypass_tests {
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
         let safe = "a".repeat(100_000);
         assert_eq!(evaluate(&[Value::Text(safe.clone())]).unwrap(), Value::Text(safe));
+    }
+}
+
+#[cfg(test)]
+mod fallible_url_encoding_regressions {
+    use super::*;
+
+    #[test]
+    fn grows_for_mixed_ascii_runs_unicode_and_escaped_bytes() {
+        let run = "A".repeat(65_535);
+        let input = format!("{run}/🙂 +{run}");
+        let expected = format!("{run}%2F%F0%9F%99%82+%2B{run}");
+        assert_eq!(evaluate(&[Value::Text(input)]).unwrap(), Value::Text(expected));
+    }
+
+    #[test]
+    fn rejects_encoded_growth_beyond_limit_but_accepts_safe_boundary() {
+        assert_eq!(evaluate(&[Value::Text("x".repeat(MAX_OUTPUT_BYTES))]).unwrap(),
+            Value::Text("x".repeat(MAX_OUTPUT_BYTES)));
+        assert!(evaluate(&[Value::Text("/".repeat(MAX_OUTPUT_BYTES / 3 + 1))]).is_err());
     }
 }
