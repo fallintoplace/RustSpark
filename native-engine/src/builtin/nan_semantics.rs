@@ -1,9 +1,16 @@
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
+fn numeric_boolean_type(types: &[DataType], message: &str) -> Result<DataType> {
+    if matches!(types[0], DataType::Integer | DataType::Float) {
+        Ok(DataType::Boolean)
+    } else {
+        Err(Error::Type(message.into()))
+    }
+}
+
 fn isnan_type(types: &[DataType]) -> Result<DataType> {
-    if matches!(types[0], DataType::Float | DataType::Integer) { Ok(DataType::Boolean) }
-    else { Err(Error::Type("ISNAN requires a numeric input".into())) }
+    numeric_boolean_type(types, "ISNAN requires a numeric input")
 }
 fn nanvl_type(types: &[DataType]) -> Result<DataType> {
     if types.iter().all(|kind| *kind == DataType::Float) { Ok(DataType::Float) }
@@ -24,11 +31,7 @@ fn nanvl(args: &[Value]) -> Result<Value> {
     }
 }
 fn isfinite_type(types: &[DataType]) -> Result<DataType> {
-    if matches!(types[0], DataType::Integer | DataType::Float) {
-        Ok(DataType::Boolean)
-    } else {
-        Err(Error::Type("ISFINITE requires numeric input".into()))
-    }
+    numeric_boolean_type(types, "ISFINITE requires numeric input")
 }
 fn isfinite(args: &[Value]) -> Result<Value> {
     match &args[0] {
@@ -44,6 +47,21 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "isnan", min_args: 1, max_args: 1, result_type: isnan_type, call: isnan },
     Function { name: "nanvl", min_args: 2, max_args: 2, result_type: nanvl_type, call: nanvl },
 ];
+#[cfg(test)]
+mod shared_numeric_predicate_type_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_numeric_inputs_and_preserves_diagnostics() {
+        for kind in [DataType::Integer, DataType::Float] {
+            assert_eq!(isnan_type(&[kind]).unwrap(), DataType::Boolean);
+            assert_eq!(isfinite_type(&[kind]).unwrap(), DataType::Boolean);
+        }
+        assert!(isnan_type(&[DataType::Text]).unwrap_err().to_string().contains("ISNAN"));
+        assert!(isfinite_type(&[DataType::Text]).unwrap_err().to_string().contains("ISFINITE"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
