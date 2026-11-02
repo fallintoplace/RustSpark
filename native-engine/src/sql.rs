@@ -796,14 +796,22 @@ impl Parser {
             // then preserves the outer schema while returning outer rows
             // exactly once if the witness relation is nonempty.
             let negate = self.take_word("NOT");
-            if !negate && matches!(self.peek(), Some(Token::Word(_)))
-                && matches!(self.tokens.get(self.index + 1),
+            let in_subquery = !negate && matches!(self.peek(), Some(Token::Word(_)))
+                && ((matches!(self.tokens.get(self.index + 1),
                     Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"))
-                && self.tokens.get(self.index + 2) == Some(&Token::Symbol('('))
-                && matches!(self.tokens.get(self.index + 3),
-                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"))
-            {
+                    && self.tokens.get(self.index + 2) == Some(&Token::Symbol('('))
+                    && matches!(self.tokens.get(self.index + 3),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT")))
+                || (matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("NOT"))
+                    && matches!(self.tokens.get(self.index + 2),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"))
+                    && self.tokens.get(self.index + 3) == Some(&Token::Symbol('('))
+                    && matches!(self.tokens.get(self.index + 4),
+                        Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"))));
+            if in_subquery {
                 let outer_key = self.identifier()?;
+                let not_in = self.take_word("NOT");
                 self.expect_word("IN")?;
                 self.expect_symbol('(')?;
                 if self.subquery_depth >= 32 {
@@ -830,13 +838,42 @@ impl Parser {
                     return Err(Error::Parse("IN subquery must return one column".into()));
                 }
                 let right_key = projected[0].alias.clone();
-                plan = Plan::Join {
+                let joined = Plan::Join {
                     left: Box::new(plan),
-                    right: Box::new(subquery),
-                    left_key: outer_key,
-                    right_key,
-                    kind: JoinKind::Semi,
+                    right: Box::new(subquery.clone()),
+                    left_key: outer_key.clone(),
+                    right_key: right_key.clone(),
+                    kind: if not_in { JoinKind::Anti } else { JoinKind::Semi },
                 };
+                plan = if not_in {
+                    // Anti joins alone are not SQL NOT IN. A NULL on the
+                    // right makes NOT IN UNKNOWN for every unmatched key.
+                    let any_right_null = subquery.clone()
+                        .filter(Expr::IsNull(Box::new(Expr::Column(right_key))))
+                        .limit(0, Some(1)).project(Vec::new());
+                    let null_blocked = Plan::CrossJoin {
+                        left: Box::new(joined.clone()),
+                        right: Box::new(any_right_null),
+                    };
+                    let without_right_null = Plan::ExceptAll {
+                        left: Box::new(joined.clone()),
+                        right: Box::new(null_blocked),
+                    };
+                    // NULL NOT IN (empty relation) is TRUE. Only suppress
+                    // NULL left keys if the subquery has at least one row.
+                    let any_right_row = subquery.limit(0, Some(1))
+                        .project(Vec::new());
+                    let null_left = joined.filter(
+                        Expr::IsNull(Box::new(Expr::Column(outer_key))));
+                    let null_left_blocked = Plan::CrossJoin {
+                        left: Box::new(null_left),
+                        right: Box::new(any_right_row),
+                    };
+                    Plan::ExceptAll {
+                        left: Box::new(without_right_null),
+                        right: Box::new(null_left_blocked),
+                    }
+                } else { joined };
                 if self.take_word("AND") {
                     plan = plan.filter(self.expression(2)?);
                 }
