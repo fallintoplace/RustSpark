@@ -876,11 +876,59 @@ impl Parser {
         }
         let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
         let grouped = has_aggregates || has_group_by;
+        let mut having_scalar = None;
         let having = if self.take_word("HAVING") {
             if !grouped {
                 return Err(Error::Unsupported("HAVING requires aggregation or GROUP BY".into()));
             }
-            Some(self.expression(0)?)
+            let start = self.index;
+            let lhs = self.expression(4)?;
+            let comparator = match self.peek() {
+                Some(Token::Operator(op)) => match op.as_str() {
+                    "=" => Some(BinaryOp::Equal),
+                    "!=" | "<>" => Some(BinaryOp::NotEqual),
+                    "<" => Some(BinaryOp::Less),
+                    "<=" => Some(BinaryOp::LessEqual),
+                    ">" => Some(BinaryOp::Greater),
+                    ">=" => Some(BinaryOp::GreaterEqual),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let is_scalar = comparator.is_some()
+                && self.tokens.get(self.index + 1) == Some(&Token::Symbol('('))
+                && matches!(self.tokens.get(self.index + 2),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"));
+            if is_scalar {
+                self.next();
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("HAVING scalar subquery nesting exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let subquery = self.select_with_intersections()?;
+                let subquery = self.finish_query(subquery)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                let Plan::Project { input, selections } = &subquery else {
+                    return Err(Error::Unsupported("HAVING scalar subquery needs a global aggregate".into()));
+                };
+                if selections.len() != 1 || !matches!(input.as_ref(),
+                    Plan::Aggregate { group_by, .. } if group_by.is_empty()) {
+                    return Err(Error::Unsupported(
+                        "HAVING scalar subquery must return a global aggregate".into(),
+                    ));
+                }
+                let hidden = "__rustspark_having_scalar_rhs";
+                let renamed = subquery.project(vec![Selection::new(
+                    Expr::Column(selections[0].alias.clone()), hidden,
+                )]);
+                having_scalar = Some((comparator.expect("checked comparator"), renamed));
+                Some(lhs)
+            } else {
+                self.index = start;
+                Some(self.expression(0)?)
+            }
         } else {
             None
         };
@@ -926,11 +974,18 @@ impl Parser {
             let having = having.map(|predicate|
                 rewrite_having(predicate, &group_by, &selections, &mut aggregates)
             ).transpose()?;
+            let having = if let Some((comparator, _)) = &having_scalar {
+                having.map(|left| Expr::binary(left, *comparator,
+                    Expr::Column("__rustspark_having_scalar_rhs".into())))
+            } else { having };
             plan = Plan::Aggregate {
                 input: Box::new(plan),
                 group_by,
                 aggregates,
             };
+            if let Some((_, rhs)) = having_scalar {
+                plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(rhs) };
+            }
             if let Some(predicate) = having {
                 plan = plan.filter(predicate);
             }
@@ -2455,5 +2510,43 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_having_scalar_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn having_compares_grouped_sum_with_uncorrelated_aggregate() {
+        let mut catalog = Catalog::new();
+        catalog.register("partsupp", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("ps_partkey", DataType::Integer, false),
+                Field::new("ps_availqty", DataType::Integer, false),
+            ]).unwrap(), vec![
+                vec![Value::Integer(1), Value::Integer(10)],
+                vec![Value::Integer(1), Value::Integer(20)],
+                vec![Value::Integer(2), Value::Integer(5)],
+            ],
+        ).unwrap()).unwrap();
+        catalog.register("threshold", Batch::from_rows(
+            Schema::new(vec![Field::new("limit_value", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(20)]],
+        ).unwrap()).unwrap();
+        let query = "SELECT ps_partkey, SUM(ps_availqty) AS stock FROM partsupp GROUP BY ps_partkey HAVING SUM(ps_availqty) > (SELECT MAX(limit_value) FROM threshold) ORDER BY ps_partkey";
+        let rows = execute(&parse_sql(query).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(30)]]);
+    }
+
+    #[test]
+    fn rejects_grouped_or_multicolumn_scalar_queries() {
+        for sql in [
+            "SELECT ps_partkey FROM partsupp GROUP BY ps_partkey HAVING SUM(ps_availqty) > (SELECT MAX(limit_value), MIN(limit_value) FROM threshold)",
+            "SELECT ps_partkey FROM partsupp GROUP BY ps_partkey HAVING SUM(ps_availqty) > (SELECT MAX(limit_value) FROM threshold GROUP BY limit_value)",
+        ] {
+            assert!(parse_sql(sql).is_err(), "{sql}");
+        }
     }
 }
