@@ -1,6 +1,6 @@
 //! Cooperative cancellation and monotonic query deadlines.
 use std::time::{Duration, Instant};
-use crate::{cancel::Cancellation, Error, Result};
+use crate::{cancel::{Cancellation, deadline_expired, deadline_remaining, inherited_deadline}, Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct QueryControl {
@@ -24,7 +24,7 @@ impl QueryControl {
     pub fn child_with_timeout(&self, timeout: Duration) -> Result<Self> {
         let local = Instant::now().checked_add(timeout)
             .ok_or_else(|| Error::Execution("query deadline out of range".into()))?;
-        let deadline = self.deadline.map_or(local, |parent| parent.min(local));
+        let deadline = inherited_deadline(self.deadline, local);
         Ok(Self { cancelled: self.cancelled.clone(), deadline: Some(deadline) })
     }
 
@@ -38,14 +38,14 @@ impl QueryControl {
 
     /// Remaining monotonic time until the query deadline, if configured.
     pub fn remaining_time(&self) -> Option<Duration> {
-        self.deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        deadline_remaining(self.deadline)
     }
 
     pub fn check(&self) -> Result<()> {
         if self.is_cancelled() {
             return Err(Error::Execution("query cancelled".into()));
         }
-        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if deadline_expired(self.deadline) {
             return Err(Error::Execution("query deadline exceeded".into()));
         }
         Ok(())
