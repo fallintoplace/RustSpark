@@ -33,7 +33,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(first) = characters.next() else { return Ok(Value::Text(String::new())); };
     if !first.is_ascii_alphabetic() {
         // Non-letter prefixes return the whole input, not the four-byte code.
-        return Ok(Value::Text(text.to_owned()));
+        let mut preserved = String::new();
+        preserved.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("SOUNDEX output allocation failed".into()))?;
+        preserved.push_str(text);
+        return Ok(Value::Text(preserved));
     }
     let mut result = String::with_capacity(4);
     result.push(first.to_ascii_uppercase());
@@ -144,5 +148,22 @@ mod soundex_input_bound_regressions {
             Err(Error::Execution(_))));
         assert_eq!(evaluate(&[Value::Text("Robert".into())]).unwrap(),
             Value::Text("R163".into()));
+    }
+}
+
+#[cfg(test)]
+mod fallible_soundex_passthrough_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_prefix_passthrough_stays_bounded() {
+        let input = format!("🙂{}", "é".repeat(100_000));
+        assert_eq!(evaluate(&[Value::Text(input.clone())]).unwrap(),
+            Value::Text(input));
+        assert_eq!(evaluate(&[Value::Text("Robert".into())]).unwrap(),
+            Value::Text("R163".into()));
+        let oversized = format!("🙂{}", "a".repeat(16 * 1024 * 1024));
+        assert!(matches!(evaluate(&[Value::Text(oversized)]),
+            Err(Error::Execution(_))));
     }
 }
