@@ -550,7 +550,14 @@ impl Parser {
                 self.expect_symbol('(')?;
                 let expression = self.expression(0)?;
                 self.expect_word("AS")?;
-                let target = match self.identifier()?.to_ascii_uppercase().as_str() {
+                let type_name = self.identifier()?.to_ascii_uppercase();
+                // Until native DATE storage is implemented, preserve TPC-H's
+                // canonical ISO date values as validated text.
+                if type_name == "DATE" {
+                    self.expect_symbol(')')?;
+                    return Ok(Expr::Call { name: "to_date".into(), args: vec![expression] });
+                }
+                let target = match type_name.as_str() {
                     "BIGINT" | "INT" | "INTEGER" => DataType::Integer,
                     "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
                     "BOOLEAN" | "BOOL" => DataType::Boolean,
@@ -574,6 +581,15 @@ impl Parser {
                 };
                 self.expect_symbol(')')?;
                 Ok(Expr::TryCast { expression: Box::new(expression), target })
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("DATE")
+                && matches!(self.peek(), Some(Token::Text(_))) =>
+            {
+                let Some(Token::Text(value)) = self.next() else { unreachable!() };
+                Ok(Expr::Call {
+                    name: "to_date".into(),
+                    args: vec![Expr::Literal(Value::Text(value))],
+                })
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 Ok(Expr::Literal(Value::Null))
