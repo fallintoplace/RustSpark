@@ -52,9 +52,20 @@ fn quarter(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer((date.month - 1) / 3 + 1))
 }
 
+fn dayofyear(args: &[Value]) -> Result<Value> {
+    let Some(date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    let mut ordinal = date.day;
+    for month in 1..date.month {
+        ordinal += month_length(date.year, month);
+    }
+    Ok(Value::Integer(ordinal))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
+    Function { name: "dayofyear", min_args: 1, max_args: 1,
+        result_type: date_integer_type, call: dayofyear },
 ];
 
 #[cfg(test)]
@@ -90,5 +101,19 @@ mod tests {
         assert_eq!(rows, vec![
             vec![Value::Integer(1)], vec![Value::Integer(4)], vec![Value::Null],
         ]);
+    }
+}
+
+
+#[cfg(test)]
+mod dayofyear_tests {
+    use super::*;
+    #[test]
+    fn handles_leap_years_and_date_validation() {
+        assert_eq!(dayofyear(&[Value::Text("2024-02-29".into())]).unwrap(), Value::Integer(60));
+        assert_eq!(dayofyear(&[Value::Text("2024-12-31".into())]).unwrap(), Value::Integer(366));
+        assert_eq!(dayofyear(&[Value::Text("2023-12-31".into())]).unwrap(), Value::Integer(365));
+        assert_eq!(dayofyear(&[Value::Null]).unwrap(), Value::Null);
+        assert!(dayofyear(&[Value::Text("1900-02-29".into())]).is_err());
     }
 }
