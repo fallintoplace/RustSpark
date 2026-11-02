@@ -311,6 +311,7 @@ impl Parser {
                     if negate { self.next(); }
                     self.expect_word("BETWEEN")?;
                     let symmetric = self.take_word("SYMMETRIC");
+                    if !symmetric { self.take_word("ASYMMETRIC"); }
                     let lower = self.expression(4)?;
                     self.expect_word("AND")?;
                     let upper = self.expression(4)?;
