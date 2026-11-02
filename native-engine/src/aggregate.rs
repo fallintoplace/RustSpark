@@ -436,8 +436,7 @@ pub fn global_output_schema(input: &Schema, items: &[AggregateItem]) -> Result<S
 }
 
 /// Update native scalar aggregate states incrementally across input batches.
-/// Exact DISTINCT aggregates retain bounded hash sets shared across batches.
-/// Memory exhaustion fails closed; no unbounded DISTINCT state is admitted.
+/// DISTINCT aggregates need a separate bounded spill path and are rejected here.
 pub fn aggregate_global_stream(
     source: impl Iterator<Item = Result<Batch>>,
     input_schema: &Schema, items: &[AggregateItem],
@@ -446,9 +445,8 @@ pub fn aggregate_global_stream(
     let schema = global_output_schema(input_schema, items)?;
     let mut states = items.iter().map(|item| State::new(&item.op))
         .collect::<Vec<_>>();
-    // The same global distinct memory budget governs all aggregate states.
-    // This prevents COUNT(DISTINCT a), SUM(DISTINCT b) from each retaining
-    // the full budget independently.
+    // All global distinct states share a bounded retained-key budget,
+    // even when batches are streamed from different source files.
     let mut distinct_bytes = 0usize;
     for next in source {
         check()?;
