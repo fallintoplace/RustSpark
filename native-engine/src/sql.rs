@@ -761,7 +761,7 @@ impl Parser {
             let _ = self.next();
             self.expect_symbol('(')?;
             let distinct = self.take_word("DISTINCT");
-            if distinct && !["COUNT", "SUM", "AVG", "MEAN"].contains(&function.as_str()) {
+            if distinct && !["COUNT", "SUM", "AVG", "MEAN", "MIN", "MAX"].contains(&function.as_str()) {
                 return Err(Error::Unsupported("DISTINCT supports COUNT, SUM and AVG".into()));
             }
             let op = if function == "COUNT" && !distinct && self.take_symbol('*') {
