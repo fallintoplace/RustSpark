@@ -1002,8 +1002,9 @@ impl Parser {
         let mut group_exprs = Vec::<Expr>::new();
         if has_group_by {
             self.expect_word("BY")?;
-            if self.take_symbol('(') {
-                self.expect_symbol(')')?;
+            if self.peek() == Some(&Token::Symbol('('))
+                && self.tokens.get(self.index + 1) == Some(&Token::Symbol(')')) {
+                self.index += 2;
             } else if self.take_word("ALL") {
                 for item in &select {
                     if let SelectItem::Scalar(Selection { expression, .. }) = item {

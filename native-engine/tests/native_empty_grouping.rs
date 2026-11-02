@@ -15,3 +15,9 @@ fn empty_grouping_set_matches_global_aggregation() {
 fn invalid_empty_grouping_tail_is_rejected() {
     assert!(parse_sql("SELECT COUNT(*) FROM VALUES (1) GROUP BY (,)").is_err());
 }
+
+#[test]
+fn parenthesized_group_expression_remains_supported() {
+    assert_eq!(rows("SELECT col1 FROM VALUES (1), (2), (1) GROUP BY (col1) ORDER BY col1"),
+        vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+}
