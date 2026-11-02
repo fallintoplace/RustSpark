@@ -782,6 +782,21 @@ impl Parser {
                 return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
             }
             let right_key = self.identifier()?;
+            // Q13 filters the optional orders side before a LEFT JOIN.
+            // Applying this predicate after the join would delete customers
+            // without a matching order, so push it onto the right relation.
+            // Other join kinds and complex ON semantics remain unsupported.
+            let mut right = right;
+            if self.peek_word("AND") {
+                if kind != JoinKind::Left {
+                    return Err(Error::Unsupported(
+                        "compound ON requires a supported LEFT JOIN right-side filter".into(),
+                    ));
+                }
+                while self.take_word("AND") {
+                    right = right.filter(self.expression(3)?);
+                }
+            }
             plan = Plan::Join {
                 left: Box::new(plan),
                 right: Box::new(right),
@@ -2455,5 +2470,42 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_left_join_right_filter_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn right_side_on_filter_preserves_unmatched_customers() {
+        let mut catalog = Catalog::new();
+        catalog.register("customer", Batch::from_rows(
+            Schema::new(vec![Field::new("c_custkey", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+        ).unwrap()).unwrap();
+        catalog.register("orders", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("o_custkey", DataType::Integer, false),
+                Field::new("o_orderkey", DataType::Integer, false),
+                Field::new("o_comment", DataType::Text, false),
+            ]).unwrap(),
+            vec![
+                vec![Value::Integer(1), Value::Integer(10), Value::Text("special requests".into())],
+                vec![Value::Integer(1), Value::Integer(11), Value::Text("normal".into())],
+                vec![Value::Integer(2), Value::Integer(12), Value::Text("special requests".into())],
+            ],
+        ).unwrap()).unwrap();
+        let sql = "SELECT c_custkey, o_orderkey FROM customer LEFT JOIN orders ON c_custkey = o_custkey AND o_comment NOT LIKE '%special%requests%' ORDER BY c_custkey";
+        assert_eq!(execute(&parse_sql(sql).unwrap(), &catalog).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(11)],
+            vec![Value::Integer(2), Value::Null],
+        ]);
+    }
+
+    #[test]
+    fn unsupported_join_kinds_fail_closed() {
+        assert!(parse_sql("SELECT * FROM a FULL JOIN b ON a_key = b_key AND b_flag = 1").is_err());
     }
 }
