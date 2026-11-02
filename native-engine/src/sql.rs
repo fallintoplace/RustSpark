@@ -102,6 +102,84 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
     }
 }
 
+/// Hoist aggregate calls used inside SELECT arithmetic into hidden aggregate
+/// slots, so the final projection can evaluate expressions like Q14's ratio.
+fn hoist_select_aggregates(expr: Expr, aggregates: &mut Vec<AggregateItem>) -> Result<Expr> {
+    let recurse = |expr, out: &mut Vec<AggregateItem>| hoist_select_aggregates(expr, out);
+    match expr {
+        Expr::Call { name, mut args } if
+            ["SUM", "MIN", "MAX", "AVG", "COUNT", "__spark_count_star"]
+                .iter().any(|aggregate| name.eq_ignore_ascii_case(aggregate)) =>
+        {
+            if aggregates.len() >= 128 {
+                return Err(Error::Parse("SELECT has too many nested aggregates".into()));
+            }
+            let op = if name.eq_ignore_ascii_case("__spark_count_star") && args.is_empty() {
+                AggregateOp::CountAll
+            } else {
+                if args.len() != 1 {
+                    return Err(Error::Parse(format!("{name} requires one argument")));
+                }
+                let value = args.remove(0);
+                // Aggregates inside aggregates are invalid, even when buried
+                // under arithmetic. Do not let an inner call reach row evaluation.
+                let mut nested = Vec::new();
+                hoist_select_aggregates(value.clone(), &mut nested)?;
+                if !nested.is_empty() {
+                    return Err(Error::Unsupported("nested aggregate functions are not supported".into()));
+                }
+                match name.to_ascii_uppercase().as_str() {
+                    "SUM" => AggregateOp::Sum(value),
+                    "MIN" => AggregateOp::Min(value),
+                    "MAX" => AggregateOp::Max(value),
+                    "AVG" => AggregateOp::Avg(value),
+                    "COUNT" => AggregateOp::Count(value),
+                    _ => return Err(Error::Parse(format!("{name} requires an argument"))),
+                }
+            };
+            let alias = format!("__rustspark_select_agg_{}", aggregates.len());
+            aggregates.push(AggregateItem::new(op, &alias));
+            Ok(Expr::Column(alias))
+        }
+        Expr::Binary { left, op, right } => Ok(Expr::binary(
+            recurse(*left, aggregates)?, op, recurse(*right, aggregates)?,
+        )),
+        Expr::Not(value) => Ok(Expr::Not(Box::new(recurse(*value, aggregates)?))),
+        Expr::IsNull(value) => Ok(Expr::IsNull(Box::new(recurse(*value, aggregates)?))),
+        Expr::Like { value, pattern, escape } => Ok(Expr::Like {
+            value: Box::new(recurse(*value, aggregates)?),
+            pattern: Box::new(recurse(*pattern, aggregates)?),
+            escape: escape.map(|expr| recurse(*expr, aggregates).map(Box::new)).transpose()?,
+        }),
+        Expr::IsDistinctFrom { left, right, negated } => Ok(Expr::IsDistinctFrom {
+            left: Box::new(recurse(*left, aggregates)?),
+            right: Box::new(recurse(*right, aggregates)?), negated,
+        }),
+        Expr::Case { branches, else_expr } => Ok(Expr::Case {
+            branches: branches.into_iter().map(|(condition, value)| Ok((
+                recurse(condition, aggregates)?, recurse(value, aggregates)?,
+            ))).collect::<Result<Vec<_>>>()?,
+            else_expr: else_expr.map(|expr| recurse(*expr, aggregates).map(Box::new)).transpose()?,
+        }),
+        Expr::Call { name, args } => Ok(Expr::Call {
+            name, args: args.into_iter().map(|expr| recurse(expr, aggregates))
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        Expr::InList { needle, choices, negated } => Ok(Expr::InList {
+            needle: Box::new(recurse(*needle, aggregates)?),
+            choices: choices.into_iter().map(|expr| recurse(expr, aggregates))
+                .collect::<Result<Vec<_>>>()?, negated,
+        }),
+        Expr::Cast { expression, target } => Ok(Expr::Cast {
+            expression: Box::new(recurse(*expression, aggregates)?), target,
+        }),
+        Expr::TryCast { expression, target } => Ok(Expr::TryCast {
+            expression: Box::new(recurse(*expression, aggregates)?), target,
+        }),
+        other => Ok(other),
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -656,7 +734,31 @@ impl Parser {
             }
             _ => None,
         };
-        if let Some(function) = function {
+        // SUM(x) / SUM(y) starts with an aggregate name but is a scalar
+        // expression *containing* aggregates. Let the generic expression
+        // parser handle it, then hoist the calls in select_body.
+        let aggregate_is_expression = function.is_some() && {
+            let mut nesting = 0usize;
+            let mut closing = None;
+            for index in self.index + 1..self.tokens.len() {
+                match &self.tokens[index] {
+                    Token::Symbol('(') => nesting += 1,
+                    Token::Symbol(')') => {
+                        nesting = nesting.saturating_sub(1);
+                        if nesting == 0 { closing = Some(index + 1); break; }
+                    }
+                    _ => {}
+                }
+            }
+            closing.is_some_and(|index| match self.tokens.get(index) {
+                Some(Token::Symbol('*')) => true,
+                Some(Token::Operator(op)) =>
+                    ["+", "-", "/", "%", "||", "=", ">", "<", ">=", "<=", "<>"]
+                        .contains(&op.as_str()),
+                _ => false,
+            })
+        };
+        if let Some(function) = function.filter(|_| !aggregate_is_expression) {
             let _ = self.next();
             self.expect_symbol('(')?;
             let distinct = self.take_word("DISTINCT");
@@ -725,6 +827,19 @@ impl Parser {
             select.push(self.select_item(select.len())?);
             if !self.take_symbol(',') {
                 break;
+            }
+        }
+        let mut hidden_aggregates = Vec::new();
+        let mut computed_aggregate_aliases = std::collections::HashSet::new();
+        for item in &mut select {
+            if let SelectItem::Scalar(selection) = item {
+                let before = hidden_aggregates.len();
+                selection.expression = hoist_select_aggregates(
+                    selection.expression.clone(), &mut hidden_aggregates,
+                )?;
+                if hidden_aggregates.len() > before {
+                    computed_aggregate_aliases.insert(selection.alias.clone());
+                }
             }
         }
         let mut plan = if self.take_word("FROM") {
@@ -843,8 +958,9 @@ impl Parser {
             self.expect_word("BY")?;
             if self.take_word("ALL") {
                 for item in &select {
-                    if let SelectItem::Scalar(Selection { expression, .. }) = item {
-                        if !matches!(expression, Expr::Literal(_))
+                    if let SelectItem::Scalar(Selection { expression, alias }) = item {
+                        if !computed_aggregate_aliases.contains(alias)
+                            && !matches!(expression, Expr::Literal(_))
                             && !group_exprs.contains(expression) {
                             group_exprs.push(expression.clone());
                         }
@@ -874,7 +990,8 @@ impl Parser {
                 }
             }
         }
-        let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
+        let has_aggregates = !hidden_aggregates.is_empty()
+            || select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
         let grouped = has_aggregates || has_group_by;
         let having = if self.take_word("HAVING") {
             if !grouped {
@@ -900,7 +1017,7 @@ impl Parser {
                 }) { alias.push('_'); }
                 (expr, alias)
             }).collect::<Vec<_>>();
-            let mut aggregates = Vec::new();
+            let mut aggregates = hidden_aggregates;
             let mut selections = Vec::new();
             for item in select {
                 match item {
@@ -909,7 +1026,9 @@ impl Parser {
                         aggregates.push(item);
                     }
                     SelectItem::Scalar(item) => {
-                        let expression = if matches!(item.expression, Expr::Literal(_)) {
+                        let expression = if computed_aggregate_aliases.contains(&item.alias) {
+                            item.expression
+                        } else if matches!(item.expression, Expr::Literal(_)) {
                             item.expression
                         } else {
                             let (_, name) = group_by.iter().find(|(expr, _)| *expr == item.expression)
@@ -2455,5 +2574,51 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_nested_select_aggregates_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    fn catalog() -> Catalog {
+        let mut catalog = Catalog::new();
+        catalog.register("lineitem", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("price", DataType::Integer, false),
+                Field::new("promo", DataType::Boolean, false),
+            ]).unwrap(),
+            vec![
+                vec![Value::Integer(10), Value::Boolean(true)],
+                vec![Value::Integer(30), Value::Boolean(false)],
+            ],
+        ).unwrap()).unwrap();
+        catalog
+    }
+
+    #[test]
+    fn sum_aggregate_calls_inside_scalar_arithmetic() {
+        let query = "SELECT 100.0 * SUM(CASE WHEN promo THEN price ELSE 0 END) \
+            / SUM(price) AS promo_percent FROM lineitem";
+        assert_eq!(execute(&parse_sql(query).unwrap(), &catalog())
+            .unwrap().rows().unwrap(), vec![vec![Value::Float(25.0)]]);
+        let query = "SELECT SUM(price) + 1 AS total_plus_one FROM lineitem";
+        assert_eq!(execute(&parse_sql(query).unwrap(), &catalog())
+            .unwrap().rows().unwrap(), vec![vec![Value::Integer(41)]]);
+    }
+
+    #[test]
+    fn nested_aggregate_inside_aggregate_is_rejected() {
+        assert!(parse_sql("SELECT SUM(SUM(price) + 1) FROM lineitem").is_err()
+            || execute(&parse_sql("SELECT SUM(SUM(price) + 1) FROM lineitem").unwrap(),
+                &catalog()).is_err());
+    }
+
+    #[test]
+    fn plain_grouping_and_aggregate_calls_remain_unchanged() {
+        let query = "SELECT promo, SUM(price) AS total FROM lineitem GROUP BY promo";
+        assert_eq!(execute(&parse_sql(query).unwrap(), &catalog())
+            .unwrap().num_rows(), 2);
     }
 }
