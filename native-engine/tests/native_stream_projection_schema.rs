@@ -1,6 +1,7 @@
 use rustspark_native::{
     scale::{cancel::QueryControl, file_catalog::FileCatalog,
         stream_execute::{execute, output_schema, StreamOptions}},
+    expr::Expr, plan::Plan, project::Selection, sort::SortKey,
     scalar::Value, schema::{DataType, Field, Schema}, sql::parse_sql, Result,
 };
 use std::{fs, sync::atomic::{AtomicU64, Ordering}};
@@ -31,6 +32,37 @@ fn non_nullable_projections_can_be_sorted_and_topk_selected() {
         let batches = execute(&plan, &catalog, &options, QueryControl::default())
             .unwrap().collect::<Result<Vec<_>>>().unwrap();
         let rows = batches.iter().flat_map(|batch| {
+            assert_eq!(batch.schema(), &schema);
+            batch.rows().unwrap()
+        }).collect::<Vec<_>>();
+        assert_eq!(rows, expected.into_iter()
+            .map(|value| vec![Value::Integer(value)]).collect::<Vec<_>>());
+    }
+    // SQL commonly places ORDER BY before final projection. Exercise the
+    // other physical shape directly: sorting a non-nullable projected batch.
+    let projected = Plan::Project {
+        input: Box::new(Plan::scan("events")),
+        selections: vec![Selection::new(Expr::Column("id".into()), "id")],
+    };
+    let projected_schema = output_schema(&projected, &catalog, &options).unwrap();
+    assert!(!projected_schema.field(0).unwrap().nullable);
+    let order = SortKey {
+        expression: Expr::Column("id".into()),
+        descending: true, nulls_first: false,
+    };
+    let sorted = Plan::Sort {
+        input: Box::new(projected),
+        keys: vec![order],
+    };
+    for (plan, expected) in [
+        (sorted.clone(), vec![3, 2, 1]),
+        (Plan::Limit { input: Box::new(sorted), offset: 0, count: Some(2) }, vec![3, 2]),
+    ] {
+        let schema = output_schema(&plan, &catalog, &options).unwrap();
+        assert!(!schema.field(0).unwrap().nullable);
+        let result = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.iter().flat_map(|batch| {
             assert_eq!(batch.schema(), &schema);
             batch.rows().unwrap()
         }).collect::<Vec<_>>();
