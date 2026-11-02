@@ -680,9 +680,16 @@ impl Parser {
             Plan::OneRow
         };
         loop {
+            // A comma-separated FROM list has the same Cartesian semantics
+            // as CROSS JOIN. Parse each relation, not only bare table names.
+            if self.take_symbol(',') {
+                let right = self.from_relation()?;
+                plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
+                continue;
+            }
             if self.take_word("CROSS") {
                 self.expect_word("JOIN")?;
-                let right = Plan::scan(self.identifier()?);
+                let right = self.from_relation()?;
                 plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
                 continue;
             }
@@ -2108,5 +2115,42 @@ mod spark_boolean_aggregate_tests {
         nulls.register("n", Batch::from_rows(all_null, vec![vec![Value::Null]]).unwrap()).unwrap();
         assert_eq!(executor::execute(&parse_sql("SELECT EVERY(flag), SOME(flag) FROM n").unwrap(), &nulls)
             .unwrap().rows().unwrap(), vec![vec![Value::Null, Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod derived_cross_join_regressions {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    #[test]
+    fn cross_join_accepts_derived_values_on_both_sides() {
+        let sql = "SELECT x, y FROM (VALUES (1), (2)) AS a(x) CROSS JOIN (VALUES (10), (20)) AS b(y) ORDER BY x, y";
+        let result = executor::execute(&parse_sql(sql).unwrap(), &Catalog::new()).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(1), Value::Integer(20)],
+            vec![Value::Integer(2), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(20)],
+        ]);
+    }
+
+    #[test]
+    fn comma_join_matches_explicit_cross_join_and_obeys_where() {
+        let explicit = "SELECT x, y FROM (VALUES (1), (2)) AS a(x) CROSS JOIN (VALUES (10), (20)) AS b(y) WHERE x = 2";
+        let comma = "SELECT x, y FROM (VALUES (1), (2)) AS a(x), (VALUES (10), (20)) AS b(y) WHERE x = 2";
+        let catalog = Catalog::new();
+        assert_eq!(executor::execute(&parse_sql(explicit).unwrap(), &catalog).unwrap(),
+                   executor::execute(&parse_sql(comma).unwrap(), &catalog).unwrap());
+    }
+
+    #[test]
+    fn rejects_malformed_or_incomplete_cross_relations() {
+        for query in [
+            "SELECT x FROM (VALUES (1)) AS a(x) CROSS JOIN",
+            "SELECT x FROM (VALUES (1)) AS a(x),",
+        ] {
+            assert!(parse_sql(query).is_err(), "{query}");
+        }
     }
 }
