@@ -738,7 +738,43 @@ impl Parser {
             };
         }
         if self.take_word("WHERE") {
-            plan = plan.filter(self.expression(0)?);
+            // An uncorrelated EXISTS is a one-bit relation test. Project the
+            // subquery down to zero columns and at most one row. CROSS JOIN
+            // then preserves the outer schema while returning outer rows
+            // exactly once if the witness relation is nonempty.
+            let negate = self.take_word("NOT");
+            if self.take_word("EXISTS") {
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("EXISTS subquery nesting limit exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let inner = self.select_with_intersections()?;
+                let inner = self.finish_query(inner)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                let witness = Plan::Project {
+                    input: Box::new(inner.limit(0, Some(1))),
+                    selections: Vec::new(),
+                };
+                let matched = Plan::CrossJoin {
+                    left: Box::new(plan.clone()), right: Box::new(witness),
+                };
+                plan = if negate {
+                    // EXCEPT ALL preserves outer duplicates when the witness
+                    // is absent. Ordinary EXCEPT would incorrectly dedupe.
+                    Plan::ExceptAll {
+                        left: Box::new(plan), right: Box::new(matched),
+                    }
+                } else {
+                    matched
+                };
+                // Only a complete top-level EXISTS predicate is supported.
+                // Trailing AND/OR produces an explicit unsupported SQL error.
+            } else {
+                if negate { self.index -= 1; }
+                plan = plan.filter(self.expression(0)?);
+            }
         }
 
         // Spark permits arbitrary grouping expressions, SELECT aliases and 1-based ordinals.
