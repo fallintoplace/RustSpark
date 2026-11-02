@@ -67,12 +67,12 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(first)
         },
-        "YEAR" => {
+        "YEAR" | "MONTH" | "DAY" | "DAYOFMONTH" => {
             if args.len() != 1 {
-                return Err(Error::Parse("YEAR requires one argument".into()));
+                return Err(Error::Parse(format!("{name} requires one argument")));
             }
             if args[0].output_type(schema)? != DataType::Text {
-                return Err(Error::Type("YEAR requires ISO date text".into()));
+                return Err(Error::Type("date extraction requires ISO date text".into()));
             }
             Ok(DataType::Integer)
         },
@@ -328,10 +328,20 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
         },
-        "YEAR" => match args {
-            [Value::Text(value)] => Ok(Value::Integer(iso_date_year(value)?)),
+        "YEAR" | "MONTH" | "DAY" | "DAYOFMONTH" => match args {
+            [Value::Text(value)] => {
+                let year = iso_date_year(value)?;
+                let number = match normalized_uppercase(name).as_ref() {
+                    "YEAR" => year,
+                    "MONTH" => value[5..7].parse()
+                        .map_err(|_| Error::Type("invalid ISO month".into()))?,
+                    _ => value[8..10].parse()
+                        .map_err(|_| Error::Type("invalid ISO day".into()))?,
+                };
+                Ok(Value::Integer(number))
+            },
             [Value::Null] => Ok(Value::Null),
-            _ => Err(Error::Type("YEAR requires ISO date text".into())),
+            _ => Err(Error::Type("date extraction requires ISO date text".into())),
         },
         "ABS" => match args {
             [Value::Integer(value)] => value.checked_abs().map(Value::Integer).ok_or_else(|| Error::Execution("ABS integer overflow".into())),
