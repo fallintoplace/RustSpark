@@ -6,8 +6,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
     else { Err(Error::Type("QUOTE has incompatible SQL argument types".into())) }
 }
 
-fn evaluate(args: &[Value]) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+fn quoted_length(text: &str) -> Result<usize> {
     const MAX_OUTPUT: usize = 16 * 1024 * 1024;
     let base_length = text.len().checked_add(2)
         .ok_or_else(|| Error::Execution("QUOTE output length overflow".into()))?;
@@ -18,9 +17,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     // Count escapes before allocation. Besides making output size exact,
     // this prevents late errors after a near-limit String has been built.
     let escapes = text.bytes().filter(|&byte| byte == b'\'' || byte == b'\\').count();
-    let final_length = base_length.checked_add(escapes)
+    base_length.checked_add(escapes)
         .filter(|&bytes| bytes <= MAX_OUTPUT)
-        .ok_or_else(|| Error::Execution("QUOTE output exceeds native 16 MiB budget".into()))?;
+        .ok_or_else(|| Error::Execution("QUOTE output exceeds native 16 MiB budget".into()))
+}
+
+fn evaluate(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let final_length = quoted_length(text)?;
     let mut output = String::new();
     output.try_reserve_exact(final_length)
         .map_err(|_| Error::Execution("QUOTE output allocation failed".into()))?;
