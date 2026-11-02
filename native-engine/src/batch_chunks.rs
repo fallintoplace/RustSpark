@@ -133,15 +133,11 @@ fn allocate_concatenated_columns(width: usize, rows: usize) -> Result<Vec<Vec<Va
     Ok(columns)
 }
 
-pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
-    let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
-    // A single input is already a valid batch. Avoid allocating fresh
-    // column vectors and revalidating every scalar during reconstruction.
-    if batches.len() == 1 {
-        return Ok(first.clone());
-    }
+fn validated_concatenation_shape(batches: &[Batch]) -> Result<(crate::schema::Schema, usize)> {
+    let first = batches.first()
+        .ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
     let schema = first.schema().clone();
-    let mut total = 0_usize;
+    let mut total = 0usize;
     for batch in batches {
         if batch.schema() != &schema {
             return Err(Error::Schema("batch schemas must match exactly".into()));
@@ -149,6 +145,17 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
         total = total.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
     }
+    Ok((schema, total))
+}
+
+pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
+    let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
+    // A single input is already a valid batch. Avoid allocating fresh
+    // column vectors and revalidating every scalar during reconstruction.
+    if batches.len() == 1 {
+        return Ok(first.clone());
+    }
+    let (schema, total) = validated_concatenation_shape(batches)?;
     let mut columns = allocate_concatenated_columns(schema.len(), total)?;
     for batch in batches {
         for (index, column) in columns.iter_mut().enumerate() {
@@ -167,15 +174,7 @@ pub fn concatenate_owned(batches: Vec<Batch>) -> Result<Batch> {
     if batches.len() == 1 {
         return Ok(batches.into_iter().next().expect("one owned batch"));
     }
-    let schema = first.schema().clone();
-    let mut total = 0usize;
-    for batch in &batches {
-        if batch.schema() != &schema {
-            return Err(Error::Schema("batch schemas must match exactly".into()));
-        }
-        total = total.checked_add(batch.num_rows())
-            .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
-    }
+    let (schema, total) = validated_concatenation_shape(&batches)?;
     // Reuse the first batch's owned column vectors rather than allocating
     // a second full-width set and moving all its cells into it. Reserve once
     // after validating every input, so reallocations cannot grow per chunk.
