@@ -604,6 +604,28 @@ impl Parser {
                     Ok(Expr::Call { name: "locate".into(), args })
                 }
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("SUBSTRING")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let value = self.expression(0)?;
+                let mut args = vec![value];
+                if self.take_word("FROM") {
+                    args.push(self.expression(0)?);
+                    if self.take_word("FOR") {
+                        args.push(self.expression(0)?);
+                    }
+                } else {
+                    while self.take_symbol(',') {
+                        if args.len() == 3 {
+                            return Err(Error::Parse("SUBSTRING accepts at most three arguments".into()));
+                        }
+                        args.push(self.expression(0)?);
+                    }
+                }
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: word, args })
+            }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
                 if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
