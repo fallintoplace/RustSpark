@@ -438,7 +438,10 @@ impl Batch {
         if indices.len() != self.rows {
             return Err(Error::Execution("row permutation has incorrect length".into()));
         }
-        let mut destinations = vec![usize::MAX; self.rows];
+        let mut destinations = Vec::new();
+        destinations.try_reserve_exact(self.rows)
+            .map_err(|_| Error::Execution("row permutation index allocation failed".into()))?;
+        destinations.resize(self.rows, usize::MAX);
         for (position, &source) in indices.iter().enumerate() {
             if source >= self.rows || destinations[source] != usize::MAX {
                 return Err(Error::Execution("row permutation has duplicate or invalid indices".into()));
@@ -449,6 +452,10 @@ impl Batch {
         for position in 0..self.rows {
             while destinations[position] != position {
                 let target = destinations[position];
+                // A large permutation can contain almost one swap per row.
+                // Admit the swap log before changing the index mapping.
+                swaps.try_reserve(1)
+                    .map_err(|_| Error::Execution("row permutation swap allocation failed".into()))?;
                 destinations.swap(position, target);
                 swaps.push((position, target));
             }
@@ -1089,5 +1096,31 @@ mod ordered_owned_gather_no_index_regressions {
             _ => unreachable!(),
         }
         assert!(identity.take_owned(&[1, 2]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_permutation_cycle_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn disjoint_cycles_and_large_reverse_move_text_without_loss() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let input = Batch::from_rows(schema, (0..257).map(|i|
+            vec![if i % 17 == 0 { Value::Null }
+                else { Value::Text(format!("{i}-{}", "🙂".repeat(32))) }]
+        ).collect()).unwrap();
+        for selection in [
+            (0..257).rev().collect::<Vec<_>>(),
+            (0..257).map(|index| (index + 1) % 257).collect(),
+            (0..257).collect(),
+        ] {
+            assert_eq!(input.clone().permute_rows_owned(&selection).unwrap(),
+                input.take(&selection).unwrap());
+        }
+        for invalid in [vec![0; 257], vec![257; 257], vec![0; 256]] {
+            assert!(input.clone().permute_rows_owned(&invalid).is_err());
+        }
     }
 }
