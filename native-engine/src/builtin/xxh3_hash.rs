@@ -29,12 +29,24 @@ fn xxh3_64(args: &[Value]) -> Result<Value> {
     })
 }
 
+// Render sixteen digest bytes directly into a 32-byte lowercase hex buffer.
+// Formatting a u128 invokes the general integer formatting machinery per row.
+fn hex_128(digest: u128) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = [0_u8; 32];
+    for (pair, byte) in output.chunks_exact_mut(2).zip(digest.to_be_bytes()) {
+        pair[0] = DIGITS[(byte >> 4) as usize];
+        pair[1] = DIGITS[(byte & 15) as usize];
+    }
+    String::from_utf8(output.to_vec()).expect("hex output is ASCII")
+}
+
 /// XXH3_128 renders the full 128-bit digest in fixed-width hexadecimal.
 fn xxh3_128(args: &[Value]) -> Result<Value> {
     match input(args)? {
         Some(bytes) => {
             let digest = xxhash_rust::xxh3::xxh3_128(bytes);
-            Ok(Value::Text(format!("{digest:032x}")))
+            Ok(Value::Text(hex_128(digest)))
         }
         None => Ok(Value::Null),
     }
@@ -83,5 +95,25 @@ mod tests {
                 Value::Integer(80997306238743657),
                 Value::Text("7d57dd84c60c86ca1f4e82ab91a12b5e".into()),
             ]]);
+    }
+}
+
+#[cfg(test)]
+mod direct_xxh3_hex_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_width_hex_matches_reference_formatting() {
+        for digest in [0_u128, 1, u128::MAX, u128::MAX >> 4,
+            0x0123_4567_89ab_cdef_fedc_ba98_7654_3210] {
+            assert_eq!(hex_128(digest), format!("{digest:032x}"));
+        }
+        let long = "x".repeat(4096);
+        for text in ["", "Spark", "é🙂", long.as_str()] {
+            let digest = xxhash_rust::xxh3::xxh3_128(text.as_bytes());
+            assert_eq!(xxh3_128(&[Value::Text(text.into())]).unwrap(),
+                Value::Text(format!("{digest:032x}")));
+        }
+        assert_eq!(xxh3_128(&[Value::Null]).unwrap(), Value::Null);
     }
 }
