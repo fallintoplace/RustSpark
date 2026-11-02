@@ -490,12 +490,11 @@ fn infer(
         }
         Plan::Project { input, selections } => {
             let source = child(input)?;
-            let fields = selections.iter().map(|selection: &Selection| {
-                Ok(Field::new(
-                    &selection.alias, selection.expression.output_type(&source)?, true
-                ))
-            }).collect::<Result<Vec<_>>>()?;
-            Schema::new(fields)
+            // The runtime preserves non-nullability for direct columns and
+            // literals. Derive the plan schema from the same projection path
+            // so external sort, Top-K and output writers see identical types.
+            Ok(crate::project::project(&Batch::empty(source), selections)?
+                .schema().clone())
         }
         Plan::Intersect { left, right } |
         Plan::IntersectAll { left, right } |
