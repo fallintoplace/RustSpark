@@ -179,14 +179,11 @@ mod plus_only_url_decode_fast_path_tests {
             ("+", " "), ("++", "  "), ("a+b+c", "a b c"),
             ("é🙂+東京++ok+", "é🙂 東京  ok "),
             ("a%2Bb+c", "a+b c"), ("a+b%20c", "a b c"),
-            ("%2B", "+"), ("a+b%GG", "not used"),
+            ("%2B", "+"),
         ] {
-            if input.contains("%GG") {
-                assert!(decode(input).is_err());
-            } else {
-                assert_eq!(decode(input).unwrap(), expected);
-            }
+            assert_eq!(decode(input).unwrap(), expected);
         }
+        assert!(decode("a+b%GG").is_err());
         let text = format!("{}+{}++", "é🙂".repeat(5000), "東京".repeat(5000));
         assert_eq!(decode(&text).unwrap(), text.replace('+', " "));
         assert_eq!(decode("no special characters").unwrap(),
