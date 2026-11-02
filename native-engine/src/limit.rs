@@ -1,19 +1,17 @@
 use crate::{batch::Batch, Error, Result};
 
-fn validate_window(offset: usize, count: Option<usize>) -> Result<()> {
+fn validated_window(rows: usize, offset: usize, count: Option<usize>) -> Result<(usize, usize)> {
     if let Some(count) = count {
         offset.checked_add(count)
             .ok_or_else(|| Error::Execution("LIMIT + OFFSET overflow".into()))?;
     }
-    Ok(())
+    let start = offset.min(rows);
+    let end = count.map_or(rows, |count| start.saturating_add(count).min(rows));
+    Ok((start, end))
 }
 
 pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
-    validate_window(offset, count)?;
-    let start = offset.min(batch.num_rows());
-    let end = count.map_or(batch.num_rows(), |count| {
-        start.saturating_add(count).min(batch.num_rows())
-    });
+    let (start, end) = validated_window(batch.num_rows(), offset, count)?;
     if start == 0 && end == batch.num_rows() {
         return Ok(batch.clone());
     }
@@ -23,14 +21,10 @@ pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch
 /// Apply LIMIT to an owned native batch, avoiding a deep copy when
 /// the requested window covers all its rows.
 pub fn limit_owned(batch: Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
-    validate_window(offset, count)?;
-    if offset == 0 && count.is_none_or(|count| count >= batch.num_rows()) {
+    let (start, end) = validated_window(batch.num_rows(), offset, count)?;
+    if offset == 0 && end == batch.num_rows() {
         return Ok(batch);
     }
-    let start = offset.min(batch.num_rows());
-    let end = count.map_or(batch.num_rows(), |count| {
-        start.saturating_add(count).min(batch.num_rows())
-    });
     batch.slice_rows_owned(start, end)
 }
 
