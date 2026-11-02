@@ -343,6 +343,59 @@ impl Parser {
                     let insensitive = self.take_word("ILIKE");
                     let regex = self.take_word("RLIKE") || self.take_word("REGEXP");
                     if !insensitive && !regex { self.expect_word("LIKE")?; }
+                    // Spark supports LIKE ANY/SOME/ALL (and ILIKE variants).
+                    // Lower quantified patterns through the existing SQL
+                    // three-valued boolean operators with short-circuiting.
+                    if !regex && (self.peek_word("ANY") ||
+                        self.peek_word("SOME") || self.peek_word("ALL")) {
+                        let all = self.take_word("ALL");
+                        if !all && !self.take_word("ANY") {
+                            self.expect_word("SOME")?;
+                        }
+                        self.expect_symbol('(')?;
+                        if self.take_symbol(')') {
+                            return Err(Error::Parse("quantified LIKE needs a pattern".into()));
+                        }
+                        let mut predicates = Vec::new();
+                        loop {
+                            if predicates.len() >= 128 {
+                                return Err(Error::Parse("quantified LIKE exceeds 128 patterns".into()));
+                            }
+                            let pattern = self.expression(0)?;
+                            let (subject, pattern) = if insensitive {
+                                (
+                                    Expr::Call { name: "lower".into(), args: vec![left.clone()] },
+                                    Expr::Call { name: "lower".into(), args: vec![pattern] },
+                                )
+                            } else { (left.clone(), pattern) };
+                            predicates.push(Expr::Like {
+                                value: Box::new(subject),
+                                pattern: Box::new(pattern),
+                                escape: None,
+                            });
+                            if self.take_symbol(')') { break; }
+                            self.expect_symbol(',')?;
+                        }
+                        let op = if all { BinaryOp::And } else { BinaryOp::Or };
+                        // A left-folded 128-pattern predicate would exceed
+                        // the native expression depth guard. Combine adjacent
+                        // pairs into a balanced tree while keeping the original
+                        // left-to-right short-circuit evaluation order.
+                        while predicates.len() > 1 {
+                            let mut next = Vec::with_capacity(predicates.len().div_ceil(2));
+                            let mut iter = predicates.into_iter();
+                            while let Some(left) = iter.next() {
+                                next.push(match iter.next() {
+                                    Some(right) => Expr::binary(left, op, right),
+                                    None => left,
+                                });
+                            }
+                            predicates = next;
+                        }
+                        let expression = predicates.pop().expect("quantified list not empty");
+                        left = if negate { Expr::Not(Box::new(expression)) } else { expression };
+                        continue;
+                    }
                     let pattern = self.expression(4)?;
                     let escape = if !regex && self.take_word("ESCAPE") {
                         Some(Box::new(self.expression(4)?))
@@ -680,9 +733,16 @@ impl Parser {
             Plan::OneRow
         };
         loop {
+            // A comma-separated FROM list has the same Cartesian semantics
+            // as CROSS JOIN. Parse each relation, not only bare table names.
+            if self.take_symbol(',') {
+                let right = self.from_relation()?;
+                plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
+                continue;
+            }
             if self.take_word("CROSS") {
                 self.expect_word("JOIN")?;
-                let right = Plan::scan(self.identifier()?);
+                let right = self.from_relation()?;
                 plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
                 continue;
             }
@@ -731,7 +791,43 @@ impl Parser {
             };
         }
         if self.take_word("WHERE") {
-            plan = plan.filter(self.expression(0)?);
+            // An uncorrelated EXISTS is a one-bit relation test. Project the
+            // subquery down to zero columns and at most one row. CROSS JOIN
+            // then preserves the outer schema while returning outer rows
+            // exactly once if the witness relation is nonempty.
+            let negate = self.take_word("NOT");
+            if self.take_word("EXISTS") {
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("EXISTS subquery nesting limit exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let inner = self.select_with_intersections()?;
+                let inner = self.finish_query(inner)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                let witness = Plan::Project {
+                    input: Box::new(inner.limit(0, Some(1))),
+                    selections: Vec::new(),
+                };
+                let matched = Plan::CrossJoin {
+                    left: Box::new(plan.clone()), right: Box::new(witness),
+                };
+                plan = if negate {
+                    // EXCEPT ALL preserves outer duplicates when the witness
+                    // is absent. Ordinary EXCEPT would incorrectly dedupe.
+                    Plan::ExceptAll {
+                        left: Box::new(plan), right: Box::new(matched),
+                    }
+                } else {
+                    matched
+                };
+                // Only a complete top-level EXISTS predicate is supported.
+                // Trailing AND/OR produces an explicit unsupported SQL error.
+            } else {
+                if negate { self.index -= 1; }
+                plan = plan.filter(self.expression(0)?);
+            }
         }
 
         // Spark permits arbitrary grouping expressions, SELECT aliases and 1-based ordinals.
@@ -942,7 +1038,18 @@ impl Parser {
             let source = self.identifier()?;
             self.scan_or_cte(source)?
         };
-        if self.take_word("AS") {
+        let explicit_alias = self.take_word("AS");
+        // Spark accepts FROM source alias and FROM (query) alias(columns)
+        // without AS. Never consume a clause or join keyword as an alias.
+        const CLAUSE_KEYWORDS: &[&str] = &[
+            "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH",
+            "UNION", "INTERSECT", "EXCEPT", "MINUS", "JOIN", "INNER", "LEFT",
+            "RIGHT", "FULL", "CROSS", "OUTER", "SEMI", "ANTI", "ON", "USING",
+            "WINDOW", "QUALIFY", "LATERAL", "TABLESAMPLE",
+        ];
+        let implicit_alias = matches!(self.peek(), Some(Token::Word(word))
+            if !CLAUSE_KEYWORDS.iter().any(|reserved| word.eq_ignore_ascii_case(reserved)));
+        if explicit_alias || implicit_alias {
             self.identifier()?;
             if self.take_symbol('(') {
                 let mut names = Vec::new();
@@ -1087,6 +1194,39 @@ impl Parser {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
+            if self.take_word("ALL") {
+                let selected = match &plan {
+                    Plan::Project { selections, .. } => Some(selections.as_slice()),
+                    Plan::Distinct { input } => match input.as_ref() {
+                        Plan::Project { selections, .. } => Some(selections.as_slice()),
+                        _ => None,
+                    },
+                    _ => None,
+                }.ok_or_else(|| Error::Unsupported(
+                    "ORDER BY ALL requires explicit projected columns".into()
+                ))?;
+                let descending = if self.take_word("DESC") {
+                    true
+                } else {
+                    self.take_word("ASC");
+                    false
+                };
+                let nulls_first = if self.take_word("NULLS") {
+                    if self.take_word("FIRST") {
+                        true
+                    } else {
+                        self.expect_word("LAST")?;
+                        false
+                    }
+                } else { !descending };
+                for item in selected {
+                    keys.push(SortKey {
+                        expression: Expr::Column(item.alias.clone()),
+                        descending,
+                        nulls_first,
+                    });
+                }
+            } else {
             loop {
                 let is_ordinal = match self.peek() {
                     Some(Token::Number(number)) if number.chars().all(|ch| ch.is_ascii_digit()) => {
@@ -1142,6 +1282,7 @@ impl Parser {
                 if !self.take_symbol(',') {
                     break;
                 }
+            }
             }
             plan = match plan {
                 Plan::Project { input, selections } => {
@@ -1325,6 +1466,11 @@ fn rewrite_having(
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
+    let explain = parser.take_word("EXPLAIN");
+    let extended = explain && parser.take_word("EXTENDED");
+    if explain && parser.peek_word("ANALYZE") {
+        return Err(Error::Unsupported("EXPLAIN ANALYZE requires execution metrics".into()));
+    }
     parser.parse_ctes()?;
     let mut plan = parser.select_with_intersections()?;
     loop {
@@ -1334,7 +1480,7 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
             let right = parser.select_with_intersections()?;
             plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
             if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
-        } else if parser.take_word("EXCEPT") {
+        } else if parser.take_word("EXCEPT") || parser.take_word("MINUS") {
             let all = parser.take_word("ALL");
             if !all { parser.take_word("DISTINCT"); }
             let right = parser.select_with_intersections()?;
@@ -1354,6 +1500,25 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
             "unsupported SQL syntax near {:?}",
             parser.peek()
         )));
+    }
+    if explain {
+        // Keep EXPLAIN independent of catalog registration and input scans.
+        // It reports the owned native logical plan, not a physical plan or
+        // measured runtime profile.
+        let mut description = format!("Logical plan:\n{plan:#?}");
+        if extended {
+            let optimized = crate::optimizer::optimize(plan.clone());
+            description.push_str(&format!("\nOptimized logical plan:\n{optimized:#?}"));
+        }
+        if description.len() > 1024 * 1024 {
+            return Err(Error::Execution("EXPLAIN output exceeds 1 MiB".into()));
+        }
+        let schema = Schema::new(vec![
+            Field::new("logical_plan", DataType::Text, false),
+        ])?;
+        return Ok(Plan::Values {
+            batch: Batch::from_rows(schema, vec![vec![Value::Text(description)]])?,
+        });
     }
     Ok(plan)
 }
@@ -2108,5 +2273,135 @@ mod spark_boolean_aggregate_tests {
         nulls.register("n", Batch::from_rows(all_null, vec![vec![Value::Null]]).unwrap()).unwrap();
         assert_eq!(executor::execute(&parse_sql("SELECT EVERY(flag), SOME(flag) FROM n").unwrap(), &nulls)
             .unwrap().rows().unwrap(), vec![vec![Value::Null, Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod derived_cross_join_regressions {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    #[test]
+    fn cross_join_accepts_derived_values_on_both_sides() {
+        let sql = "SELECT x, y FROM (VALUES (1), (2)) AS a(x) CROSS JOIN (VALUES (10), (20)) AS b(y) ORDER BY x, y";
+        let result = executor::execute(&parse_sql(sql).unwrap(), &Catalog::new()).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(1), Value::Integer(20)],
+            vec![Value::Integer(2), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(20)],
+        ]);
+    }
+
+    #[test]
+    fn comma_join_matches_explicit_cross_join_and_obeys_where() {
+        let explicit = "SELECT x, y FROM (VALUES (1), (2)) AS a(x) CROSS JOIN (VALUES (10), (20)) AS b(y) WHERE x = 2";
+        let comma = "SELECT x, y FROM (VALUES (1), (2)) AS a(x), (VALUES (10), (20)) AS b(y) WHERE x = 2";
+        let catalog = Catalog::new();
+        assert_eq!(executor::execute(&parse_sql(explicit).unwrap(), &catalog).unwrap(),
+                   executor::execute(&parse_sql(comma).unwrap(), &catalog).unwrap());
+    }
+
+    #[test]
+    fn rejects_malformed_or_incomplete_cross_relations() {
+        for query in [
+            "SELECT x FROM (VALUES (1)) AS a(x) CROSS JOIN",
+            "SELECT x FROM (VALUES (1)) AS a(x),",
+        ] {
+            assert!(parse_sql(query).is_err(), "{query}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod spark_minus_alias_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    fn run(query: &str) -> Vec<Vec<Value>> {
+        executor::execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn minus_matches_except_for_distinct_and_all() {
+        let left = "SELECT col1 FROM VALUES (1), (1), (2), (NULL)";
+        let right = "SELECT col1 FROM VALUES (1), (NULL)";
+        for suffix in ["", " DISTINCT", " ALL"] {
+            let except = format!("{left} EXCEPT{suffix} {right} ORDER BY col1");
+            let minus = format!("{left} MINUS{suffix} {right} ORDER BY col1");
+            assert_eq!(run(&minus), run(&except));
+        }
+        assert_eq!(run("SELECT col1 FROM VALUES (1), (1), (2) MINUS ALL SELECT col1 FROM VALUES (1) ORDER BY col1"),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn minus_respects_intersect_precedence_and_rejects_missing_rhs() {
+        let left = run("SELECT col1 FROM VALUES (1), (2) MINUS SELECT col1 FROM VALUES (2) INTERSECT SELECT col1 FROM VALUES (2)");
+        let right = run("SELECT col1 FROM VALUES (1), (2) EXCEPT SELECT col1 FROM VALUES (2) INTERSECT SELECT col1 FROM VALUES (2)");
+        assert_eq!(left, right);
+        assert!(parse_sql("SELECT 1 MINUS").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod quantified_like_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, scalar::Value};
+
+    fn evaluate_one(query: &str) -> Value {
+        let plan = parse_sql(query).unwrap();
+        executor::execute(&plan, &Catalog::new()).unwrap()
+            .rows().unwrap()[0][0].clone()
+    }
+
+    #[test]
+    fn any_all_some_and_ilike_preserve_three_valued_logic() {
+        for (query, expected) in [
+            ("SELECT 'Spark' LIKE ANY ('no%', 'Spa%')", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE SOME ('%par%', 'no%')", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE ALL ('S%', '%ark')", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE ALL ('S%', 'x%')", Value::Boolean(false)),
+            ("SELECT 'Spark' LIKE ANY ('x%', NULL)", Value::Null),
+            ("SELECT 'Spark' LIKE ALL ('S%', NULL)", Value::Null),
+            ("SELECT 'Spark' LIKE ANY ('S%', NULL)", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE ALL ('x%', NULL)", Value::Boolean(false)),
+            ("SELECT 'Spark' ILIKE ANY ('spa%', 'x%')", Value::Boolean(true)),
+            ("SELECT 'Spark' NOT LIKE ALL ('S%', 'x%')", Value::Boolean(true)),
+        ] {
+            assert_eq!(evaluate_one(query), expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn long_quantified_pattern_lists_stay_within_expression_depth_budget() {
+        let patterns = std::iter::repeat_n("'no%'", 127)
+            .chain(std::iter::once("'Spa%'"))
+            .collect::<Vec<_>>().join(",");
+        let query = format!("SELECT 'Spark' LIKE ANY ({patterns})");
+        assert_eq!(evaluate_one(&query), Value::Boolean(true));
+    }
+
+    #[test]
+    fn quantifier_rejects_empty_and_malformed_lists() {
+        for query in [
+            "SELECT 'x' LIKE ANY ()",
+            "SELECT 'x' LIKE ALL ()",
+            "SELECT 'x' ILIKE ANY ('a',)",
+        ] {
+            assert!(parse_sql(query).is_err(), "{query}");
+        }
+    }
+
+    #[test]
+    fn short_circuit_does_not_evaluate_discarded_pattern() {
+        assert_eq!(evaluate_one(
+            "SELECT 'hello' LIKE ANY ('hello', RAISE_ERROR('late'))"
+        ), Value::Boolean(true));
+        assert_eq!(evaluate_one(
+            "SELECT 'hello' LIKE ALL ('wrong', RAISE_ERROR('late'))"
+        ), Value::Boolean(false));
     }
 }
