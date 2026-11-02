@@ -35,6 +35,28 @@ fn grouped_integer(value: i64, precision: usize) -> String {
     result
 }
 
+// Group the fixed-precision float representation without changing its digits.
+fn grouped_float(formatted: &str, digits: usize) -> String {
+    let (negative, unsigned) = formatted.strip_prefix('-')
+        .map_or(("", formatted), |rest| ("-", rest));
+    let (whole, fractional) = unsigned.split_once('.')
+        .map_or((unsigned, None), |(whole, fractional)| (whole, Some(fractional)));
+    let mut result = String::with_capacity(formatted.len().saturating_add(whole.len() / 3)
+        .saturating_add(digits + 1));
+    result.push_str(negative);
+    for (index, byte) in whole.bytes().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(char::from(byte));
+    }
+    if let Some(fractional) = fractional {
+        result.push('.');
+        result.push_str(fractional);
+    }
+    result
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     if args[0].is_null() { return Ok(Value::Null); }
     if !matches!(args[0], Value::Integer(_) | Value::Float(_)) {
@@ -55,24 +77,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         Value::Float(_) => return Err(Error::Execution("FORMAT_NUMBER requires finite number".into())),
         _ => unreachable!("numeric input already validated"),
     };
-    let (negative, unsigned) = formatted.strip_prefix('-')
-        .map_or(("", formatted.as_str()), |rest| ("-", rest));
-    let (whole, fractional) = unsigned.split_once('.')
-        .map_or((unsigned, None), |(whole, fractional)| (whole, Some(fractional)));
-    let mut result = String::with_capacity(formatted.len().saturating_add(whole.len() / 3)
-        .saturating_add(digits + 1));
-    result.push_str(negative);
-    for (index, byte) in whole.bytes().enumerate() {
-        if index > 0 && (whole.len() - index) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(char::from(byte));
-    }
-    if let Some(fractional) = fractional {
-        result.push('.');
-        result.push_str(fractional);
-    }
-    Ok(Value::Text(result))
+    Ok(Value::Text(grouped_float(&formatted, digits)))
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "format_number", min_args: 2, max_args: 2, result_type: output, call: evaluate,
@@ -182,5 +187,18 @@ mod integer_stack_format_tests {
             evaluate(&[Value::Float(1234.5), Value::Integer(1)]).unwrap(),
             Value::Text("1,234.5".into()),
         );
+    }
+}
+
+#[cfg(test)]
+mod grouped_float_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_sign_separator_positions_and_fixed_precision() {
+        assert_eq!(grouped_float("-1234567.005", 3), "-1,234,567.005");
+        assert_eq!(grouped_float("999", 0), "999");
+        assert_eq!(grouped_float("1000", 0), "1,000");
+        assert_eq!(grouped_float("0.000", 3), "0.000");
     }
 }
