@@ -27,15 +27,50 @@ pub fn set_schema(left: &Schema, right: &Schema) -> Result<Schema> {
     Schema::new(fields)
 }
 
-fn convert_row(batch: &Batch, index: usize, schema: &Schema) -> Result<Vec<Value>> {
-    let mut values = batch.row(index)?;
-    for (value, (input, output)) in values.iter_mut()
-        .zip(batch.schema().fields().iter().zip(schema.fields())) {
-        if input.data_type == DataType::Integer && output.data_type == DataType::Float {
-            if let Value::Integer(number) = value {
-                *value = Value::Float(*number as f64);
-            }
+fn clone_cell(value: &Value) -> Result<Value> {
+    match value {
+        Value::Text(text) => {
+            let mut copy = String::new();
+            copy.try_reserve_exact(text.len())
+                .map_err(|_| Error::Execution("stream set value allocation failed".into()))?;
+            copy.push_str(text);
+            Ok(Value::Text(copy))
         }
+        value => Ok(value.clone()),
+    }
+}
+
+fn clone_key(values: &[Value]) -> Result<Vec<Value>> {
+    let mut key = Vec::new();
+    key.try_reserve_exact(values.len())
+        .map_err(|_| Error::Execution("stream set key allocation failed".into()))?;
+    for value in values {
+        key.push(clone_cell(value)?);
+    }
+    Ok(key)
+}
+
+fn convert_row(batch: &Batch, index: usize, schema: &Schema) -> Result<Vec<Value>> {
+    if index >= batch.num_rows() {
+        return Err(Error::Execution("stream set row index out of bounds".into()));
+    }
+    let mut values = Vec::new();
+    values.try_reserve_exact(schema.len())
+        .map_err(|_| Error::Execution("stream set key allocation failed".into()))?;
+    for (column, (input, output)) in batch.schema().fields().iter()
+        .zip(schema.fields()).enumerate()
+    {
+        let value = batch.value(index, column)?;
+        values.push(if input.data_type == DataType::Integer &&
+            output.data_type == DataType::Float
+        {
+            match value {
+                Value::Integer(number) => Value::Float(*number as f64),
+                _ => clone_cell(value)?,
+            }
+        } else {
+            clone_cell(value)?
+        });
     }
     Ok(values)
 }
@@ -106,6 +141,15 @@ impl SetStream {
                 }
                 let values = convert_row(&batch, row, &output_schema)?;
                 let at_limit = right_counts.len() >= max_keys;
+                // Only new keys may grow the hash table. Existing keys
+                // continue to work even when the table is at capacity.
+                if right_counts.len() == right_counts.capacity()
+                    && !right_counts.contains_key(values.as_slice())
+                {
+                    right_counts.try_reserve(1).map_err(|_| Error::Execution(
+                        "stream set right-key table allocation failed".into()
+                    ))?;
+                }
                 match right_counts.entry(values) {
                     Entry::Occupied(mut entry) => {
                         // DISTINCT modes need membership only. Repeated right-side
@@ -196,13 +240,16 @@ impl SetStream {
                         .is_none_or(|total| total > self.max_bytes) {
                         return Err(Error::Execution("stream set memory budget exceeded".into()));
                     }
-                    let key = row.to_vec();
+                    let key = clone_key(row)?;
                     let bytes = super::row_footprint::footprint(key.iter());
                     let next = self.retained_bytes.checked_add(bytes)
                         .filter(|total| *total <= self.max_bytes)
                         .ok_or_else(|| Error::Execution("stream set memory budget exceeded".into()))?;
-                    self.retained_bytes = next;
+                    self.emitted.try_reserve(1).map_err(|_| Error::Execution(
+                        "stream set emitted-key table allocation failed".into()
+                    ))?;
                     self.emitted.insert(key);
+                    self.retained_bytes = next;
                     true
                 }
             }
@@ -967,5 +1014,44 @@ mod clustered_right_set_build_tests {
             QueryControl::default(), 1, 4096,
         ).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(result.iter().map(Batch::num_rows).sum::<usize>(), 1);
+    }
+}
+
+#[cfg(test)]
+mod fallible_set_key_materialization_tests {
+    use super::*;
+
+    #[test]
+    fn wide_multi_column_key_conversion_preserves_null_and_numeric_widening() {
+        let left = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("tag", DataType::Text, true),
+        ]).unwrap();
+        let right = Schema::new(vec![
+            Field::new("id", DataType::Float, true),
+            Field::new("tag", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(left.clone(), vec![
+            vec![Value::Integer(17), Value::Text("🙂".repeat(2048))],
+            vec![Value::Null, Value::Text("x".into())],
+        ]).unwrap();
+        let target = set_schema(&left, &right).unwrap();
+        assert_eq!(convert_row(&batch, 0, &target).unwrap(), vec![
+            Value::Float(17.0), Value::Text("🙂".repeat(2048))
+        ]);
+        assert_eq!(convert_row(&batch, 1, &target).unwrap(), vec![
+            Value::Null, Value::Text("x".into())
+        ]);
+        assert!(convert_row(&batch, 2, &target).is_err());
+    }
+
+    #[test]
+    fn key_clones_preserve_full_value_types_and_empty_schema() {
+        let values = vec![
+            Value::Null, Value::Boolean(true), Value::Integer(-1),
+            Value::Float(f64::NAN), Value::Text("é🙂".repeat(256))
+        ];
+        assert_eq!(clone_key(&values).unwrap(), values);
+        assert_eq!(clone_key(&[]).unwrap(), Vec::<Value>::new());
     }
 }
