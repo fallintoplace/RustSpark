@@ -555,6 +555,12 @@ impl Parser {
                     "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
                     "BOOLEAN" | "BOOL" => DataType::Boolean,
                     "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
+                    "DATE" => {
+                        self.expect_symbol(')')?;
+                        return Ok(Expr::Call {
+                            name: "to_date".into(), args: vec![expression],
+                        });
+                    }
                     other => return Err(Error::Unsupported(format!("native CAST type: {other}"))),
                 };
                 self.expect_symbol(')')?;
@@ -2455,5 +2461,23 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_cast_date_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor::execute};
+
+    #[test]
+    fn date_cast_reuses_validated_to_date_function() {
+        let sql = "SELECT CAST('1995-03-15' AS DATE), TO_DATE('1995-03-16')";
+        let rows = execute(&parse_sql(sql).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Text("1995-03-15".into()), Value::Text("1995-03-16".into()),
+        ]]);
+        assert!(execute(&parse_sql("SELECT CAST('1995-02-29' AS DATE)").unwrap(),
+            &Catalog::new()).is_err());
     }
 }
