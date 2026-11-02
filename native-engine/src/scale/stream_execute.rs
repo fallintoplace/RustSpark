@@ -1684,6 +1684,54 @@ mod early_stream_drop_cleans_spill_files_tests {
 }
 
 #[cfg(test)]
+mod streaming_computed_sort_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, sort::SortKey};
+    use std::{fs, sync::atomic::{AtomicUsize, Ordering}};
+    static ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn sort_by_computed_expression_spills_and_drops_internal_keys() {
+        let folder = std::env::temp_dir().join(format!(
+            "rustspark-computed-order-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("data.csv");
+        fs::write(&path, "n,t\n9,a\n2,b\n5,c\n1,d\n").unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", &path, Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("t", DataType::Text, false),
+        ]).unwrap(), 1024).unwrap();
+        let key = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Multiply,
+            Expr::Literal(Value::Integer(-2)),
+        );
+        let plan = Plan::Sort {
+            input: Box::new(Plan::scan("t")),
+            keys: vec![SortKey::ascending(key)],
+        };
+        let options = StreamOptions {
+            batch_rows: 2, sort_run_rows: 2, merge_fan_in: 2,
+            scratch_directory: folder.clone(), ..StreamOptions::default()
+        };
+        let batches = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert!(batches.iter().all(|batch| batch.schema().len() == 2));
+        let rows = batches.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(9), Value::Text("a".into())],
+            vec![Value::Integer(5), Value::Text("c".into())],
+            vec![Value::Integer(2), Value::Text("b".into())],
+            vec![Value::Integer(1), Value::Text("d".into())],
+        ]);
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+        fs::remove_dir_all(folder).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod streamed_distinct_adjacency_run_regressions {
     use super::*;
     use crate::schema::{DataType, Field, Schema};
