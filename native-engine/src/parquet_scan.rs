@@ -101,6 +101,66 @@ fn scan_with_expected_file(
     Ok(ParquetScan { inner: reader, finished: false })
 }
 
+/// Push a conservative predicate into Parquet row-group selection.
+/// This only skips groups proven to contain no matches; callers MUST still
+/// apply the predicate to the decoded rows.
+pub(crate) fn scan_checked_open_file_pruned(
+    file: File, batch_size: usize, expected: &crate::schema::Schema,
+    predicate: &crate::expr::Expr,
+) -> Result<ParquetScan> {
+    use crate::{pruning, scalar::Value, statistics::ColumnStatistics};
+    use parquet::file::statistics::Statistics;
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    predicate.validate_budget()?;
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let actual = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
+    if &actual != expected {
+        return Err(Error::Schema(
+            "registered Parquet table schema changed since registration".into()));
+    }
+    let mut selected = Vec::new();
+    selected.try_reserve_exact(builder.metadata().num_row_groups())
+        .map_err(|_| Error::Execution("row group pruning allocation failed".into()))?;
+    for index in 0..builder.metadata().num_row_groups() {
+        let group = builder.metadata().row_group(index);
+        let mut columns = std::collections::HashMap::new();
+        // Only signed INT64 and INT32 flat root columns are interpreted.
+        // Nested and logical unsigned columns need their own sort semantics.
+        for (column, field) in builder.schema().fields().iter().enumerate() {
+            if !matches!(field.data_type(),
+                arrow_schema::DataType::Int64 | arrow_schema::DataType::Int32) ||
+                column >= group.num_columns() {
+                continue;
+            }
+            let Some(stats) = group.column(column).statistics() else { continue; };
+            let (min, max) = match (field.data_type(), stats) {
+                (arrow_schema::DataType::Int64, Statistics::Int64(stats)) =>
+                    (stats.min_opt().copied().map(Value::Integer),
+                     stats.max_opt().copied().map(Value::Integer)),
+                (arrow_schema::DataType::Int32, Statistics::Int32(stats)) =>
+                    (stats.min_opt().copied().map(|n| Value::Integer(n as i64)),
+                     stats.max_opt().copied().map(|n| Value::Integer(n as i64))),
+                _ => continue,
+            };
+            let Some(nulls) = stats.null_count_opt() else { continue; };
+            let Ok(rows) = u64::try_from(group.num_rows()) else { continue; };
+            columns.insert(field.name().to_ascii_lowercase(),
+                ColumnStatistics { rows, nulls, min, max });
+        }
+        if !pruning::can_skip_columns(&columns, predicate) {
+            selected.push(index);
+        }
+    }
+    builder = builder.with_row_groups(selected);
+    let rows = bounded_native_batch_rows(batch_size, builder.schema().fields().len());
+    let inner = builder.with_batch_size(rows)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner, finished: false })
+}
+
 /// Compose Parquet decoder pushdowns without decoding discarded columns,
 /// row groups, or row windows in separate intermediate stages.
 #[derive(Clone, Copy, Debug, Default)]

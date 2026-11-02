@@ -592,8 +592,20 @@ fn lower(
             let batches = RowBatcher::new(reader, source.schema().clone(), options.batch_rows)?;
             Ok(Box::new(batches))
         }
-        Plan::Filter { input, predicate } =>
-            Ok(Box::new(FilterStream::new(child(input)?, predicate.clone(), control.clone()))),
+        Plan::Filter { input, predicate } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                if let Some(parquet) = catalog.get_parquet(table)? {
+                    // Retain the residual row filter after metadata pruning.
+                    let scan = parquet.open_pruned(options.batch_rows, predicate)?;
+                    return Ok(Box::new(FilterStream::new(
+                        scan, predicate.clone(), control.clone(),
+                    )));
+                }
+            }
+            Ok(Box::new(FilterStream::new(
+                child(input)?, predicate.clone(), control.clone(),
+            )))
+        },
         Plan::Distinct { input } if matches!(input.as_ref(), Plan::UnionAll { .. }) => {
             let Plan::UnionAll { left, right } = input.as_ref() else {
                 unreachable!("checked UNION ALL plan");
@@ -1769,5 +1781,43 @@ mod spilled_expression_grouping_tests {
             FROM VALUES ('east', 1, 4), ('east', 1, 6), ('west', 1, 3) \
             GROUP BY col1, col2 + 1";
         assert_eq!(canonical(spill_result(sql)), canonical(memory_result(sql)));
+    }
+}
+
+#[cfg(test)]
+mod sql_parquet_rowgroup_pruning_regressions {
+    use super::*;
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn prunes_impossible_row_groups_but_preserves_residual_filter() {
+        let file = std::env::temp_dir().join(format!(
+            "rustspark-parquet-pruning-{}-{}.parquet",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let data = Batch::from_rows(schema, (1..=6)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let arrow = crate::arrow_bridge::to_arrow(&data).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2)).build();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            fs::File::create(&file).unwrap(), arrow.schema(), Some(props)).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_parquet("t", &file).unwrap();
+        let plan = crate::sql::parse_sql(
+            "SELECT id FROM t WHERE id >= 5",
+        ).unwrap();
+        let options = StreamOptions { batch_rows: 1, ..StreamOptions::default() };
+        let result = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Value::Integer(5)], vec![Value::Integer(6)]]);
+        fs::remove_file(file).unwrap();
     }
 }
