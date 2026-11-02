@@ -380,6 +380,8 @@ impl Batch {
         }
         let selected = mask.iter().filter(|&&keep| keep).count();
         if selected == 0 { return Ok(Self::empty(self.schema.clone())); }
+        // A dense all-true mask needs no per-value mask probes.
+        if selected == self.rows { return Ok(self.clone()); }
         let columns = self.columns.iter().map(|source| {
             let mut output = Vec::with_capacity(selected);
             output.extend(source.iter().zip(mask).filter_map(|(value, &keep)|
@@ -1287,5 +1289,40 @@ mod borrowed_contiguous_gather_tests {
         let batch = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 10).unwrap();
         assert_eq!(batch.take(&[3, 4, 5]).unwrap().num_rows(), 3);
         assert_eq!(batch.take(&[]).unwrap().num_rows(), 0);
+    }
+}
+
+#[cfg(test)]
+mod dense_boolean_mask_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn full_sparse_empty_and_invalid_masks_preserve_values_and_schema() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(1), Value::Text("🙂".repeat(1_024))],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("three".into())],
+        ]).unwrap();
+        assert_eq!(batch.take_mask(&[true, true, true]).unwrap(), batch);
+        assert_eq!(batch.take_mask(&[false, false, false]).unwrap().num_rows(), 0);
+        assert_eq!(batch.take_mask(&[false, true, false]).unwrap(),
+            batch.slice_rows(1, 2).unwrap());
+        assert!(batch.take_mask(&[true]).is_err());
+    }
+
+    #[test]
+    fn zero_width_batches_preserve_logical_row_counts() {
+        let batch = Batch::new_with_row_count(
+            Schema::new(vec![]).unwrap(), vec![], 7,
+        ).unwrap();
+        assert_eq!(batch.take_mask(&[true; 7]).unwrap().num_rows(), 7);
+        assert_eq!(batch.take_mask(&[false; 7]).unwrap().num_rows(), 0);
+        assert_eq!(batch.take_mask(&[true, false, false, true, false, true, false])
+            .unwrap().num_rows(), 3);
     }
 }
