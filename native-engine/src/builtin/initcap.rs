@@ -61,7 +61,7 @@ fn initcap_bounded(text: &str, limit: usize) -> Result<String> {
             push_cased(&mut result, ch, start_of_word, limit)?;
             start_of_word = false;
         }
-     }
+    }
     Ok(result)
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
