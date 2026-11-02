@@ -837,6 +837,7 @@ impl Parser {
     fn select_body(&mut self) -> Result<Plan> {
         self.expect_word("SELECT")?;
         let is_distinct = self.take_word("DISTINCT");
+        if !is_distinct { self.take_word("ALL"); }
         let mut select = Vec::new();
         loop {
             select.push(self.select_item(select.len())?);
