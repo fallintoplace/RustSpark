@@ -80,6 +80,8 @@ pub mod local_workers;
 
 pub mod transport;
 
+pub mod exchange_writer;
+
 pub mod exchange_commit;
 
 pub mod task_scheduler;
