@@ -269,6 +269,20 @@ impl Parser {
 
     fn parse_expression_tail(&mut self, mut left: Expr, min_precedence: u8) -> Result<Expr> {
         loop {
+            // Spark accepts expression::type as a postfix spelling of CAST.
+            // Bind it more tightly than arithmetic and comparisons.
+            if min_precedence <= 10 && self.peek() == Some(&Token::Operator("::".into())) {
+                self.next();
+                let target = match self.identifier()?.to_ascii_uppercase().as_str() {
+                    "BIGINT" | "LONG" | "INT" | "INTEGER" => DataType::Integer,
+                    "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
+                    "BOOLEAN" | "BOOL" => DataType::Boolean,
+                    "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
+                    other => return Err(Error::Unsupported(format!("native CAST type: {other}"))),
+                };
+                left = Expr::Cast { expression: Box::new(left), target };
+                continue;
+            }
             if min_precedence <= 3 && self.peek() == Some(&Token::Operator("<=>".into())) {
                 self.next();
                 left = Expr::IsDistinctFrom {
