@@ -1,16 +1,21 @@
 use super::{float_type, Function};
 use crate::{scalar::Value, Result};
 
+fn integer_power(base: f64, exponent: i64, approximate_exponent: f64) -> f64 {
+    // Float conversion loses parity for integer exponents beyond 2^53.
+    if base == -1.0 { return if exponent & 1 == 0 { 1.0 } else { -1.0 }; }
+    if base == 1.0 { return 1.0; }
+    match i32::try_from(exponent) {
+        Ok(power) => base.powi(power),
+        Err(_) => base.powf(approximate_exponent),
+    }
+}
+
 fn power(args: &[Value]) -> Result<Value> {
     let Some(base) = super::number(&args[0])? else { return Ok(Value::Null) };
     let Some(exponent) = super::number(&args[1])? else { return Ok(Value::Null) };
     let result = match &args[1] {
-        Value::Integer(n) if base == -1.0 => if *n & 1 == 0 { 1.0 } else { -1.0 },
-        Value::Integer(_) if base == 1.0 => 1.0,
-        Value::Integer(n) => match i32::try_from(*n) {
-            Ok(power) => base.powi(power),
-            Err(_) => base.powf(exponent),
-        },
+        Value::Integer(exponent) => integer_power(base, *exponent, exponent as f64),
         _ => base.powf(exponent),
     };
     super::finite(result)
@@ -43,5 +48,27 @@ mod exact_integer_exponent_tests {
         assert_eq!(power(&[Value::Integer(-1), Value::Integer(9_007_199_254_740_993)]).unwrap(), Value::Float(-1.0));
         assert_eq!(power(&[Value::Integer(1), Value::Integer(i64::MAX)]).unwrap(), Value::Float(1.0));
         assert_eq!(power(&[Value::Null, Value::Integer(i64::MAX)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod isolated_integer_exponent_tests {
+    use super::*;
+
+    #[test]
+    fn integer_exponents_keep_exact_parity_and_powi_results() {
+        for exponent in [-5_i64, -3, 0, 1, 5, 10, 100] {
+            assert_eq!(integer_power(2.0, exponent, exponent as f64),
+                2.0_f64.powi(exponent as i32));
+        }
+        for exponent in [i64::MIN, i64::MAX, 9_007_199_254_740_993] {
+            let expected = if exponent & 1 == 0 { 1.0 } else { -1.0 };
+            assert_eq!(integer_power(-1.0, exponent, exponent as f64), expected);
+            assert_eq!(integer_power(1.0, exponent, exponent as f64), 1.0);
+            assert_eq!(power(&[
+                Value::Integer(-1), Value::Integer(exponent),
+            ]).unwrap(), Value::Float(expected));
+        }
+        assert_eq!(power(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
     }
 }
