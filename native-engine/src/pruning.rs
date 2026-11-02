@@ -327,19 +327,20 @@ pub fn can_skip_columns(
             if matches!(&**inner, Expr::Literal(Value::Boolean(true) | Value::Null))) {
         return true;
     }
-    if stats.values().any(|summary| !trustworthy(summary)) {
-        return false;
-    }
-    if let Some(first) = stats.values().next() {
-        if stats.values().any(|column| column.rows != first.rows) {
+    // Read each row-group summary only once. A wide Parquet table can
+    // otherwise traverse the statistics map three times per row group.
+    let mut expected_rows = None;
+    let mut mixed_case_keys = false;
+    for (name, summary) in stats {
+        if !trustworthy(summary) ||
+            expected_rows.is_some_and(|rows| rows != summary.rows) {
             return false;
         }
+        expected_rows = Some(summary.rows);
+        // Parquet keys are normally lowercase. Other metadata sources can
+        // still use case-insensitive lookup when uppercase keys are present.
+        mixed_case_keys |= name.bytes().any(|byte| byte.is_ascii_uppercase());
     }
-    // Standard Parquet column statistics keys are normalized ASCII lowercase.
-    // Avoid a linear scan of every column for each missing predicate leaf.
-    // External/mixed-case maps retain the legacy case-insensitive fallback.
-    let mixed_case_keys = stats.keys().any(|name|
-        name.bytes().any(|byte| byte.is_ascii_uppercase()));
     can_skip_columns_inner(stats, predicate, false, mixed_case_keys)
 }
 
@@ -992,5 +993,37 @@ mod direct_pruning_expression_budget_tests {
         assert!(!can_skip_columns(&stats, &predicate));
         assert!(can_skip(&stats["n"], "n",
             &Expr::Literal(Value::Boolean(false))));
+    }
+}
+
+#[cfg(test)]
+mod one_pass_statistics_validation_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_case_lookup_and_inconsistent_row_counts_remain_conservative() {
+        let value = ColumnStatistics {
+            rows: 4, nulls: 0,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(1)),
+        };
+        let predicate = Expr::binary(
+            Expr::Column("metric".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(3)),
+        );
+        let mixed = std::collections::HashMap::from([
+            ("MeTrIc".into(), value.clone()),
+            ("Other".into(), value.clone()),
+        ]);
+        assert!(can_skip_columns(&mixed, &predicate));
+        let inconsistent = std::collections::HashMap::from([
+            ("metric".into(), value.clone()),
+            ("other".into(), ColumnStatistics { rows: 5, ..value.clone() }),
+        ]);
+        assert!(!can_skip_columns(&inconsistent, &predicate));
+        let corrupt = std::collections::HashMap::from([
+            ("metric".into(), value.clone()),
+            ("other".into(), ColumnStatistics { nulls: 5, ..value }),
+        ]);
+        assert!(!can_skip_columns(&corrupt, &predicate));
     }
 }
