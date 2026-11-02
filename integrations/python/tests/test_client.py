@@ -410,3 +410,26 @@ printf '%s\r\n' '{"a":1}'
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IndependentPipeBudgetTests(unittest.TestCase):
+    def test_stdout_and_stderr_are_capped_independently(self):
+        script = (
+            "import sys;"
+            "sys.stdout.buffer.write(b'a' * 8);"
+            "sys.stderr.buffer.write(b'b' * 12)"
+        )
+        output = run_bounded(
+            [sys.executable, "-c", script],
+            timeout=5, max_output_bytes=8, max_error_bytes=12,
+        )
+        self.assertEqual(output.stdout, "a" * 8)
+        self.assertEqual(output.stderr, "b" * 12)
+        for stdout_limit, stderr_limit in ((7, 12), (8, 11)):
+            with self.subTest(stdout=stdout_limit, stderr=stderr_limit):
+                with self.assertRaisesRegex(ValueError, "limit"):
+                    run_bounded(
+                        [sys.executable, "-c", script], timeout=5,
+                        max_output_bytes=stdout_limit,
+                        max_error_bytes=stderr_limit,
+                    )
