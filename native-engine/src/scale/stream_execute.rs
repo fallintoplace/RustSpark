@@ -479,7 +479,12 @@ fn infer(
                     _ => return Err(Error::Unsupported(
                         "spilled GROUP BY does not support this aggregate".into())),
                 };
-                fields.push(Field::new(&item.alias, kind, true));
+                // Spilled COUNT variants never return NULL. Keep inference
+                // consistent with grouped_spill::output_schema.
+                let nullable = !matches!(&item.op,
+                    AggregateOp::CountAll | AggregateOp::Count(_) |
+                    AggregateOp::CountDistinct(_));
+                fields.push(Field::new(&item.alias, kind, nullable));
             }
             Schema::new(fields)
         }
