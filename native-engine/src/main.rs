@@ -24,6 +24,7 @@ use rustspark_native::{
 struct Args {
     csv: Option<PathBuf>,
     parquet: Option<PathBuf>,
+    json: Option<PathBuf>,
     sources: Vec<(String, PathBuf)>,
     table: String,
     sql: String,
@@ -50,12 +51,13 @@ fn read_sql_file(path: &Path) -> Result<String> {
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --json FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
     let mut parquet = None;
+    let mut json = None;
     let mut sources = Vec::new();
     let mut table = "data".to_string();
     let mut sql = None;
@@ -97,7 +99,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                     return Err(Error::Parse("duplicate --parquet".into()));
                 }
             }
-            "--source" | "--csv-table" | "--parquet-table" => {
+            "--json" => {
+                if json.replace(PathBuf::from(value)).is_some() {
+                    return Err(Error::Parse("duplicate --json".into()));
+                }
+            },
+            "--source" | "--csv-table" | "--parquet-table" | "--json-table" => {
                 let (table_name, file) = value.split_once('=')
                     .ok_or_else(|| Error::Parse(format!("{arg} expects TABLE=FILE")))?;
                 if table_name.is_empty() || file.is_empty() {
@@ -109,11 +116,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 let supported = match arg.as_str() {
                     "--csv-table" => extension.as_deref() == Some("csv"),
                     "--parquet-table" => extension.as_deref() == Some("parquet"),
-                    _ => matches!(extension.as_deref(), Some("csv" | "parquet")),
+                    "--json-table" => matches!(extension.as_deref(), Some("jsonl" | "ndjson")),
+                    _ => matches!(extension.as_deref(), Some("csv" | "parquet" | "jsonl" | "ndjson")),
                 };
                 if !supported {
                     return Err(Error::Unsupported(format!(
-                        "{arg} requires a .csv or .parquet file of the requested type"
+                        "{arg} requires a supported .csv, .parquet, .jsonl, or .ndjson file"
                     )));
                 }
                 sources.push((table_name.to_string(), path));
@@ -166,11 +174,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
         return Err(Error::Parse("use either --sql or --sql-file".into()));
     }
     if sources.is_empty() {
-        if csv.is_some() == parquet.is_some() {
-            return Err(Error::Parse("choose --csv, --parquet, or --source".into()));
+        let inputs = usize::from(csv.is_some()) + usize::from(parquet.is_some())
+            + usize::from(json.is_some());
+        if inputs != 1 {
+            return Err(Error::Parse("choose --csv, --parquet, --json, or --source".into()));
         }
-    } else if csv.is_some() || parquet.is_some() {
-        return Err(Error::Parse("--source cannot be mixed with --csv or --parquet".into()));
+    } else if csv.is_some() || parquet.is_some() || json.is_some() {
+        return Err(Error::Parse("--source cannot be mixed with single-file input".into()));
+    }
+    if stream && json.is_some() {
+        return Err(Error::Unsupported("--stream does not yet support JSONL input".into()));
     }
     if stream && !sources.is_empty() {
         return Err(Error::Unsupported("--stream does not yet support multiple file sources".into()));
@@ -183,7 +196,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, sources, table, sql, stream, csv_schema, jsonl, json_array, max_rows }))
+    Ok(Some(Args { csv, parquet, json, sources, table, sql, stream, csv_schema, jsonl, json_array, max_rows }))
 }
 
 
@@ -503,6 +516,8 @@ fn run() -> Result<()> {
             csv::read_csv(path)?
         } else if let Some(path) = &args.parquet {
             read_parquet_bounded(path)?
+        } else if let Some(path) = &args.json {
+            rustspark_native::jsonl::read_jsonl(path)?
         } else {
             return Err(Error::Parse("missing input file".into()));
         };
@@ -513,6 +528,7 @@ fn run() -> Result<()> {
                 .map(|ext| ext.to_ascii_lowercase()).as_deref() {
                 Some("csv") => csv::read_csv(path)?,
                 Some("parquet") => read_parquet_bounded(path)?,
+                Some("jsonl" | "ndjson") => rustspark_native::jsonl::read_jsonl(path)?,
                 _ => return Err(Error::Unsupported("unsupported native table format".into())),
             };
             catalog.register(table, data)?;
