@@ -22,11 +22,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Integer(1));
     }
     // A start-anchored identifier literal matches only at SQL position 1.
-    if let Some(prefix) = pattern.strip_prefix('^') {
-        if prefix.len() <= 4095 && prefix.chars().all(|ch|
-            ch.is_alphanumeric() || ch == '_') {
-            return Ok(Value::Integer(if text.starts_with(prefix) { 1 } else { 0 }));
-        }
+    if let Some(prefix) = regex_support::anchored_identifier(pattern) {
+        return Ok(Value::Integer(if text.starts_with(prefix) { 1 } else { 0 }));
     }
     if pattern == "." || pattern == ".+" {
         // Unlike a byte position, the SQL result counts Unicode scalars.
