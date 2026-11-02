@@ -17,6 +17,15 @@ fn copy_text(text: &str) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
+fn bounded_copy(text: &str, function: &str) -> Result<Value> {
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution(
+            format!("{function} result exceeds native 16 MiB budget")
+        ));
+    }
+    copy_text(text)
+}
+
 fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let width = match &args[1] {
@@ -50,10 +59,7 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
             .map_or(text.len(), |(byte, _)| byte);
         &text[..end]
     };
-    if result.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("LEFT/RIGHT result exceeds native 16 MiB budget".into()));
-    }
-    copy_text(result)
+    bounded_copy(result, "LEFT/RIGHT")
 }
 
 fn left(args: &[Value]) -> Result<Value> { slice(args, false) }
@@ -89,11 +95,8 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
     if left == right {
-        if left.len() > 16 * 1024 * 1024 {
-            return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
-        }
         // Compare bytes once instead of decoding every matching Unicode scalar.
-        return copy_text(left);
+        return bounded_copy(left, "COMMON_PREFIX");
     }
     let mut end = 0;
     for (&first, &second) in left.as_bytes().iter().zip(right.as_bytes()) {
@@ -103,10 +106,7 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
     // Different Unicode scalars may share leading UTF-8 bytes. Exclude any
     // partial scalar from the returned prefix.
     while !left.is_char_boundary(end) { end -= 1; }
-    if end > 16 * 1024 * 1024 {
-        return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
-    }
-    copy_text(&left[..end])
+    bounded_copy(&left[..end], "COMMON_PREFIX")
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -307,5 +307,24 @@ mod fallible_text_slice_tests {
         assert_eq!(common_prefix(&[Value::Text("é🙂".into()),
             Value::Text("é🙂".into())]).unwrap(), Value::Text("é🙂".into()));
         assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod bounded_substring_copy_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn left_right_and_prefix_share_utf8_safe_output_copy() {
+        let value = Value::Text("é🙂xyz".into());
+        assert_eq!(left(&[value.clone(), Value::Integer(2)]).unwrap(),
+            Value::Text("é🙂".into()));
+        assert_eq!(right(&[value.clone(), Value::Integer(3)]).unwrap(),
+            Value::Text("xyz".into()));
+        assert_eq!(common_prefix(&[
+            value, Value::Text("é🙂other".into()),
+        ]).unwrap(), Value::Text("é🙂".into()));
+        assert_eq!(bounded_copy("é🙂", "COMMON_PREFIX").unwrap(),
+            Value::Text("é🙂".into()));
     }
 }
