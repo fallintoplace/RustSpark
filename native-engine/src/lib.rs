@@ -58,6 +58,8 @@ pub mod csv;
 
 pub mod jsonl;
 
+pub mod jsonl_stream;
+
 pub mod memory;
 
 pub mod batch_utils;
