@@ -38,6 +38,7 @@ fn getbit(args: &[Value]) -> Result<Value> {
 
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "getbit", min_args: 2, max_args: 2, result_type: getbit_type, call: getbit },
+    Function { name: "bit_get", min_args: 2, max_args: 2, result_type: getbit_type, call: getbit },
     Function { name: "bit_reverse", min_args: 1, max_args: 1, result_type: bit_reverse_type, call: bit_reverse },
     Function { name: "bit_count", min_args: 1, max_args: 1, result_type: output, call: bit_count },
 ];
@@ -84,5 +85,29 @@ mod spark_getbit_sql_tests {
         let plan = sql::parse_sql("SELECT GETBIT(11, 0), GETBIT(11, 2)").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1), Value::Integer(0)]]);
+    }
+}
+
+#[cfg(test)]
+mod spark_bit_get_alias_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+    #[test]
+    fn aliases_keep_identical_bit_positions_and_failures() {
+        assert!(crate::builtin::supports("bit_get"));
+        for value in [0, 11, -1, i64::MIN, i64::MAX] {
+            for position in [0, 1, 31, 63] {
+                let args = [Value::Integer(value), Value::Integer(position)];
+                assert_eq!(getbit(&args).unwrap(), getbit(&args).unwrap());
+            }
+        }
+        assert_eq!(getbit(&[Value::Null, Value::Integer(3)]).unwrap(), Value::Null);
+        assert!(getbit(&[Value::Integer(11), Value::Integer(64)]).is_err());
+    }
+    #[test]
+    fn bit_get_and_getbit_match_in_sql() {
+        let plan = sql::parse_sql("SELECT BIT_GET(11, 0), BIT_GET(11, 2), GETBIT(11, 0)").unwrap();
+        assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1), Value::Integer(0), Value::Integer(1)]]);
     }
 }
