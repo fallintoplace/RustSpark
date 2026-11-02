@@ -54,6 +54,9 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "regexp_escape", min_args: 1, max_args: 1, result_type: regexp_escape_type, call: regexp_escape },Function {
     name: "regexp_like", min_args: 2, max_args: 2,
     result_type: output, call: evaluate,
+}, Function {
+    name: "regexp_contains", min_args: 2, max_args: 2,
+    result_type: output, call: evaluate,
 }];
 
 #[cfg(test)]
@@ -250,5 +253,22 @@ mod literal_identifier_classification_tests {
         assert!(is_literal_identifier(&"a".repeat(4095), 4095));
         assert!(!is_literal_identifier(&"a".repeat(4096), 4095));
         assert!(!is_literal_identifier(&"é".repeat(2048), 4095));
+    }
+}
+
+#[cfg(test)]
+mod regexp_contains_sql_tests {
+    use crate::{catalog::Catalog, executor, scalar::Value, sql};
+    #[test]
+    fn alias_preserves_regex_matching_and_nulls() {
+        let plan = sql::parse_sql(
+            "SELECT REGEXP_CONTAINS('Berlin', '^Ber'), REGEXP_CONTAINS('Berlin', '^lin'), REGEXP_CONTAINS(NULL, 'x')"
+        ).unwrap();
+        let rows = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Boolean(true), Value::Boolean(false), Value::Null,
+        ]]);
+        let invalid = sql::parse_sql("SELECT REGEXP_CONTAINS('text', '[bad')").unwrap();
+        assert!(executor::execute(&invalid, &Catalog::new()).is_err());
     }
 }
