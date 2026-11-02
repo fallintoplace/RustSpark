@@ -414,7 +414,9 @@ fn infer(
                         crate::schema::DataType::Float => crate::schema::DataType::Float,
                         _ => return Err(Error::Type("SUM requires numeric input".into())),
                     },
-                    AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(&source)?,
+                    AggregateOp::Min(expr) | AggregateOp::Max(expr) |
+                    AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) =>
+                        expr.output_type(&source)?,
                     _ => return Err(Error::Unsupported(
                         "spilled GROUP BY does not support this aggregate".into())),
                 };
@@ -1549,5 +1551,40 @@ mod streamed_distinct_adjacency_run_regressions {
         assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod spill_first_last_navigation_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    fn collect(sql_text: &str, stream: bool) -> Vec<Vec<Value>> {
+        let plan = sql::parse_sql(sql_text).unwrap();
+        let mut rows = if stream {
+            execute(&plan, &FileCatalog::new(), &StreamOptions::default(),
+                QueryControl::default()).unwrap()
+                .flat_map(|batch| batch.unwrap().rows().unwrap()).collect::<Vec<_>>()
+        } else {
+            executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap()
+        };
+        rows.sort_by(|a,b| format!("{a:?}").cmp(&format!("{b:?}")));
+        rows
+    }
+
+    #[test]
+    fn first_last_preserve_null_policy_and_shard_row_order() {
+        let sql = "SELECT col1 AS k, FIRST(col2, FALSE) AS first, \
+            LAST(col2, TRUE) AS last FROM VALUES \
+            (1, NULL), (1, 'first'), (1, 'last'), (2, NULL), (2, 'only') GROUP BY col1";
+        assert_eq!(collect(sql, true), collect(sql, false));
+    }
+
+    #[test]
+    fn first_last_with_computed_arguments_match_in_memory() {
+        let sql = "SELECT col1 AS k, FIRST(col2 + 1) AS first, \
+            LAST(col2 + 1) AS last FROM VALUES \
+            (1, 1), (1, 2), (1, NULL), (2, 3) GROUP BY col1";
+        assert_eq!(collect(sql, true), collect(sql, false));
     }
 }
