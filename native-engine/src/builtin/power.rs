@@ -15,7 +15,7 @@ fn power(args: &[Value]) -> Result<Value> {
     let Some(base) = super::number(&args[0])? else { return Ok(Value::Null) };
     let Some(exponent) = super::number(&args[1])? else { return Ok(Value::Null) };
     let result = match &args[1] {
-        Value::Integer(exponent) => integer_power(base, *exponent, exponent as f64),
+        Value::Integer(integer_exponent) => integer_power(base, *integer_exponent, exponent),
         _ => base.powf(exponent),
     };
     super::finite(result)
