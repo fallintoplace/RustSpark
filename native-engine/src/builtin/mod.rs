@@ -89,6 +89,7 @@ mod md5_digest;
 mod parse_url;
 mod sha2_digest;
 mod sha1_digest;
+mod xxhash64;
 mod get_json_object;
 // MODULE_IMPORTS
 
@@ -197,6 +198,7 @@ const MODULES: &[&[Function]] = &[
     &parse_url::FUNCTIONS,
     &sha2_digest::FUNCTIONS,
     &sha1_digest::FUNCTIONS,
+    &xxhash64::FUNCTIONS,
     &get_json_object::FUNCTIONS,
     // FUNCTION_LIST
 ];
