@@ -329,138 +329,111 @@ pub fn hash_join(
     Batch::from_rows(schema, output)
 }
 
-
-/** Join on multiple typed equality keys without concatenating or hashing a
- * lossy serialized surrogate key. NULL in any key component never matches.
- * This is the physical primitive for future composite SQL ON lowering.
- */
+/// Equijoin on multiple ordered key columns without concatenating TEXT
+/// keys into an ambiguous serialization. Build keys borrow original column
+/// values; hash collisions are resolved using exact composite equality.
 pub fn hash_join_composite(
-    left: &Batch, right: &Batch, keys: &[(&str, &str)], kind: JoinKind,
+    left: &Batch, right: &Batch,
+    left_keys: &[&str], right_keys: &[&str], kind: JoinKind,
 ) -> Result<Batch> {
-    if keys.is_empty() || keys.len() > 256 {
-        return Err(Error::Schema("composite join needs 1..=256 equality keys".into()));
+    if left_keys.is_empty() || left_keys.len() != right_keys.len() {
+        return Err(Error::Schema("composite join key arity mismatch".into()));
     }
-    let mut left_columns = Vec::new();
-    let mut right_columns = Vec::new();
-    left_columns.try_reserve_exact(keys.len())
-        .map_err(|_| Error::Execution("composite join key allocation failed".into()))?;
-    right_columns.try_reserve_exact(keys.len())
-        .map_err(|_| Error::Execution("composite join key allocation failed".into()))?;
-    for &(left_key, right_key) in keys {
+    if left_keys.len() == 1 {
+        return hash_join(left, right, left_keys[0], right_keys[0], kind);
+    }
+    if left_keys.len() > 256 {
+        return Err(Error::Execution("composite join key width exceeded".into()));
+    }
+    let mut lhs = Vec::new();
+    let mut rhs = Vec::new();
+    for (&left_key, &right_key) in left_keys.iter().zip(right_keys) {
         let left_index = left.schema().column(left_key)?;
         let right_index = right.schema().column(right_key)?;
-        if left.schema().field(left_index)?.data_type !=
-            right.schema().field(right_index)?.data_type {
-            return Err(Error::Type("composite join key types must match".into()));
+        if left.schema().field(left_index)?.data_type
+            != right.schema().field(right_index)?.data_type {
+            return Err(Error::Type("join key types must match".into()));
         }
-        left_columns.push(left.column(left_index)?);
-        right_columns.push(right.column(right_index)?);
+        lhs.push(left.column(left_index)?);
+        rhs.push(right.column(right_index)?);
     }
-    let mut by_key: HashMap<Vec<&Value>, Vec<usize>> = HashMap::new();
-    by_key.try_reserve(right.num_rows())
+    // A schema-only join retains exactly the normal nullability and
+    // disambiguation rules for all six join kinds.
+    let output_schema = hash_join(
+        &Batch::empty(left.schema().clone()),
+        &Batch::empty(right.schema().clone()),
+        left_keys[0], right_keys[0], kind,
+    )?.schema().clone();
+    let left_columns = (0..left.schema().len())
+        .map(|index| left.column(index)).collect::<Result<Vec<_>>>()?;
+    let right_columns = (0..right.schema().len())
+        .map(|index| right.column(index)).collect::<Result<Vec<_>>>()?;
+    let mut build: HashMap<Vec<&Value>, Vec<usize>> = HashMap::new();
+    build.try_reserve(right.num_rows())
         .map_err(|_| Error::Execution("composite join hash allocation failed".into()))?;
     for row in 0..right.num_rows() {
-        let mut key = Vec::new();
-        key.try_reserve_exact(keys.len())
-            .map_err(|_| Error::Execution("composite join key allocation failed".into()))?;
-        for column in &right_columns {
-            let value = &column[row];
-            if value.is_null() { key.clear(); break; }
-            key.push(value);
-        }
-        if !key.is_empty() {
-            by_key.entry(key).or_default().push(row);
+        let key = rhs.iter().map(|column| &column[row]).collect::<Vec<_>>();
+        if key.iter().all(|value| joinable(value)) {
+            build.entry(key).or_default().push(row);
         }
     }
-    let mut used: HashSet<String> = left.schema().fields().iter()
-        .map(|field| field.name.to_ascii_lowercase()).collect();
-    let output_schema = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-        left.schema().clone()
-    } else {
-        let mut fields = left.schema().fields().iter().map(|field|
-            Field::new(&field.name, field.data_type,
-                field.nullable || matches!(kind, JoinKind::Right | JoinKind::Full))
-        ).collect::<Vec<_>>();
-        for field in right.schema().fields() {
-            let mut name = field.name.clone();
-            while !used.insert(name.to_ascii_lowercase()) {
-                name = format!("right_{name}");
-            }
-            fields.push(Field::new(name, field.data_type,
-                field.nullable || matches!(kind, JoinKind::Left | JoinKind::Full)));
-        }
-        Schema::new(fields)?
-    };
-    let fixed = join_fixed_row_bytes(&output_schema)?;
     let left_text = join_text_columns(left)?;
     let right_text = join_text_columns(right)?;
-    let mut retained = 0usize;
-    let mut output = Vec::new();
-    let mut matched_right = if matches!(kind, JoinKind::Right | JoinKind::Full) {
-        vec![false; right.num_rows()]
-    } else {
-        Vec::new()
+    let fixed = join_fixed_row_bytes(&output_schema)?;
+    let mut bytes = 0usize;
+    let mut rows = 0usize;
+    let mut output: Vec<Vec<Value>> = (0..output_schema.len()).map(|_| Vec::new()).collect();
+    let mut matched_right = matches!(kind, JoinKind::Right | JoinKind::Full)
+        .then(|| vec![false; right.num_rows()]);
+    let mut append = |left_row: Option<usize>, right_row: Option<usize>| -> Result<()> {
+        if rows >= MAX_JOIN_ROWS {
+            return Err(Error::Execution("join output exceeds safety limit".into()));
+        }
+        charge_join_row(&mut bytes, fixed, &left_text, left_row, &right_text,
+            right_row, MAX_MATERIALIZED_JOIN_BYTES)?;
+        for (index, column) in left_columns.iter().enumerate() {
+            output[index].push(left_row.map_or(Value::Null, |row| column[row].clone()));
+        }
+        if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+            for (index, column) in right_columns.iter().enumerate() {
+                output[left.schema().len() + index].push(
+                    right_row.map_or(Value::Null, |row| column[row].clone()));
+            }
+        }
+        rows += 1;
+        Ok(())
     };
     for left_row in 0..left.num_rows() {
-        let mut key = Vec::new();
-        key.try_reserve_exact(keys.len())
-            .map_err(|_| Error::Execution("composite join probe allocation failed".into()))?;
-        for column in &left_columns {
-            let value = &column[left_row];
-            if value.is_null() { key.clear(); break; }
-            key.push(value);
-        }
-        let matches = if key.is_empty() { None } else { by_key.get(&key) };
-        let found = matches.is_some_and(|rows| !rows.is_empty());
-        if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-            if (kind == JoinKind::Semi && found) ||
-               (kind == JoinKind::Anti && !found) {
-                if output.len() >= MAX_JOIN_ROWS {
-                    return Err(Error::Execution("join output exceeds safety limit".into()));
+        let key = lhs.iter().map(|column| &column[left_row]).collect::<Vec<_>>();
+        let matches = if key.iter().all(|value| joinable(value)) {
+            build.get(&key)
+        } else {
+            None
+        };
+        match kind {
+            JoinKind::Semi if matches.is_some() => append(Some(left_row), None)?,
+            JoinKind::Anti if matches.is_none() => append(Some(left_row), None)?,
+            JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
+                if let Some(indices) = matches {
+                    for &right_row in indices {
+                        if let Some(flags) = matched_right.as_mut() {
+                            flags[right_row] = true;
+                        }
+                        append(Some(left_row), Some(right_row))?;
+                    }
+                } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
+                    append(Some(left_row), None)?;
                 }
-                charge_join_row(&mut retained, fixed, &left_text,
-                    Some(left_row), &[], None, MAX_MATERIALIZED_JOIN_BYTES)?;
-                output.push(left.row(left_row)?);
             }
-            continue;
-        }
-        if let Some(rows) = matches {
-            for &right_row in rows {
-                if output.len() >= MAX_JOIN_ROWS {
-                    return Err(Error::Execution("join output exceeds safety limit".into()));
-                }
-                charge_join_row(&mut retained, fixed, &left_text, Some(left_row),
-                    &right_text, Some(right_row), MAX_MATERIALIZED_JOIN_BYTES)?;
-                if !matched_right.is_empty() { matched_right[right_row] = true; }
-                let mut row = left.row(left_row)?;
-                row.extend(right.row(right_row)?);
-                output.push(row);
-            }
-        } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
-            if output.len() >= MAX_JOIN_ROWS {
-                return Err(Error::Execution("join output exceeds safety limit".into()));
-            }
-            charge_join_row(&mut retained, fixed, &left_text, Some(left_row),
-                &right_text, None, MAX_MATERIALIZED_JOIN_BYTES)?;
-            let mut row = left.row(left_row)?;
-            row.resize(output_schema.len(), Value::Null);
-            output.push(row);
+            _ => {}
         }
     }
-    if matches!(kind, JoinKind::Right | JoinKind::Full) {
-        for (row, matched) in matched_right.iter().enumerate() {
-            if *matched { continue; }
-            if output.len() >= MAX_JOIN_ROWS {
-                return Err(Error::Execution("join output exceeds safety limit".into()));
-            }
-            charge_join_row(&mut retained, fixed, &left_text, None,
-                &right_text, Some(row), MAX_MATERIALIZED_JOIN_BYTES)?;
-            let mut values = vec![Value::Null; left.schema().len()];
-            values.extend(right.row(row)?);
-            output.push(values);
+    if let Some(flags) = matched_right {
+        for (right_row, was_matched) in flags.into_iter().enumerate() {
+            if !was_matched { append(None, Some(right_row))?; }
         }
     }
-    Batch::from_rows(output_schema, output)
+    Batch::from_validated_columns(output_schema, output, rows)
 }
 
 #[cfg(test)]
