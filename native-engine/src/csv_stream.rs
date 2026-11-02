@@ -339,6 +339,31 @@ impl<R: BufRead> CsvStream<R> {
             return Some(Err(error));
         }
         let width = self.schema.len();
+        let mut row = Vec::new();
+        if row.try_reserve_exact(width).is_err() {
+            self.exhausted = true;
+            return Some(Err(Error::Execution("CSV parser row allocation failed".into())));
+        }
+        // A header-only file or an exhausted final batch has no output to
+        // retain. Read the first row before reserving capacity in every
+        // column, which can otherwise allocate megabytes for a wide schema.
+        let first = if let Some(pending) = self.pending_row.take() {
+            row = pending;
+            Ok(true)
+        } else {
+            self.read_row_into(&mut row)
+        };
+        match first {
+            Ok(true) => {}
+            Ok(false) => {
+                self.exhausted = true;
+                return None;
+            }
+            Err(error) => {
+                self.exhausted = true;
+                return Some(Err(error));
+            }
+        }
         let capacity = initial_output_capacity(self.batch_rows, width, byte_budget);
         let mut columns = Vec::new();
         if columns.try_reserve_exact(width).is_err() {
@@ -353,16 +378,15 @@ impl<R: BufRead> CsvStream<R> {
             }
             columns.push(column);
         }
-        let mut row = Vec::new();
-        if row.try_reserve_exact(width).is_err() {
-            self.exhausted = true;
-            return Some(Err(Error::Execution("CSV parser row allocation failed".into())));
-        }
         let mut row_count = 0usize;
         let mut used = 0usize;
         let row_width = self.schema.len().saturating_mul(std::mem::size_of::<Value>());
+        let mut has_first_row = true;
         for _ in 0..self.batch_rows.min(65_536) {
-            let next = if let Some(pending) = self.pending_row.take() {
+            let next = if has_first_row {
+                has_first_row = false;
+                Ok(true)
+            } else if let Some(pending) = self.pending_row.take() {
                 row = pending;
                 Ok(true)
             } else {
@@ -961,3 +985,44 @@ mod budgeted_csv_initial_capacity_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod lazy_csv_output_allocation_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn header_only_csv_has_no_output_batches() {
+        let mut empty = CsvStream::new(Cursor::new("id,city\n"), 1_000_000, 128)
+            .unwrap();
+        assert!(empty.next().is_none());
+        assert!(empty.next().is_none());
+    }
+
+    #[test]
+    fn wide_empty_headers_and_final_exhaustion_are_supported() {
+        let header = (0..4_096)
+            .map(|index| format!("column_{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut empty = CsvStream::new(Cursor::new(header), 65_536, 100_000).unwrap();
+        assert!(empty.next().is_none());
+
+        let mut rows = CsvStream::new(Cursor::new("id\none\ntwo\n"), 1, 128).unwrap();
+        assert_eq!(rows.next().unwrap().unwrap().row(0).unwrap(),
+            vec![Value::Text("one".into())]);
+        assert_eq!(rows.next().unwrap().unwrap().row(0).unwrap(),
+            vec![Value::Text("two".into())]);
+        assert!(rows.next().is_none());
+    }
+
+    #[test]
+    fn first_row_errors_are_terminal_without_producing_empty_batches() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)])
+            .unwrap();
+        let mut bad = CsvStream::new_typed(Cursor::new("id\ninvalid\n"), 1024, 128, schema)
+            .unwrap();
+        assert!(bad.next().unwrap().is_err());
+        assert!(bad.next().is_none());
+    }
+}
