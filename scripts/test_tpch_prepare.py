@@ -63,6 +63,16 @@ class FixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "empty"):
                 prepare.prepare(connection, destination, 0.1)
 
+    def test_queries_use_the_generated_dataset_scale_factor(self):
+        for scale in (0.01, 0.1, 1.0):
+            with self.subTest(scale=scale), tempfile.TemporaryDirectory() as folder:
+                connection = FakeConnection()
+                prepare.prepare(connection, Path(folder) / "fixture", scale)
+                self.assertIn(
+                    f"SELECT query_nr, query FROM tpch_queries(sf = {scale:g}) ORDER BY query_nr",
+                    connection.commands,
+                )
+
     def test_rejects_symlinked_and_regular_file_destinations(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
