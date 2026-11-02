@@ -208,10 +208,6 @@ class ExportDiagnosticsBudgetTests(unittest.TestCase):
                               diagnostics, 2, Path("never.arrow"), 1024,
                               max_stderr_bytes=0)
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class NamedParameterCommandTests(unittest.TestCase):
     def test_named_parameters_stay_sorted_and_type_checked(self):
         args = build_command("SELECT 1", Path("out.arrow"),
@@ -223,3 +219,6 @@ class NamedParameterCommandTests(unittest.TestCase):
                     {"okay": "utf8:" + "界" * 2730}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 build_command("SELECT 1", Path("out.arrow"), named_params=bad)
+
+if __name__ == "__main__":
+    unittest.main()
