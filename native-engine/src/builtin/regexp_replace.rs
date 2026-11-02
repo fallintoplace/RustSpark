@@ -175,10 +175,19 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
 
     let compiled = regex_support::compile(pattern)?;
+    let mut captures = compiled.captures_iter(suffix);
+    // Most predicates do not match every row. Check the first capture
+    // before preparing the replacement output and reuse that capture in
+    // the loop so matching inputs are not searched twice.
+    let Some(first_match) = captures.next() else {
+        let mut unchanged = new_output(text)?;
+        unchanged.push_str(text);
+        return Ok(Value::Text(unchanged));
+    };
     let mut result = new_output(text)?;
     result.push_str(&text[..start]);
     let mut consumed = 0;
-    for captures in compiled.captures_iter(suffix) {
+    for captures in std::iter::once(first_match).chain(captures) {
         let matched = captures.get(0).expect("regex captures always contain the whole match");
         push_bounded(&mut result, &suffix[consumed..matched.start()])?;
         append_bounded_expansion(&captures, replacement, &mut result)?;
@@ -678,5 +687,47 @@ mod fallible_regexp_replace_output_tests {
         assert!(evaluate(&[input, Value::Text("x".into()), replacement]).is_err());
         assert_eq!(evaluate(&[Value::Text("🙂abc".into()), Value::Text("none".into()),
             Value::Text("!".into())]).unwrap(), Value::Text("🙂abc".into()));
+    }
+}
+
+#[cfg(test)]
+mod unmatched_regex_replace_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_missing_matches_and_captured_substitutions() {
+        let long = "a".repeat(64);
+        for input in ["", "hello", "é🙂", long.as_str()] {
+            let unchanged = evaluate(&[
+                Value::Text(input.into()),
+                Value::Text("z([0-9]+)".into()),
+                Value::Text("$1".into()),
+            ]).unwrap();
+            assert_eq!(unchanged, Value::Text(input.into()));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("a1 b2".into()),
+            Value::Text("([a-z])([0-9])".into()),
+            Value::Text("$2-$1".into()),
+        ]).unwrap(), Value::Text("1-a 2-b".into()));
+    }
+
+    #[test]
+    fn nonmatching_suffix_keeps_the_full_prefix() {
+        let args = [
+            Value::Text("é🙂ab123".into()),
+            Value::Text("([A-Z]+)".into()),
+            Value::Text("x".into()),
+            Value::Integer(3),
+        ];
+        assert_eq!(evaluate(&args).unwrap(), Value::Text("é🙂ab123".into()));
+        assert!(evaluate(&[
+            Value::Text("a".into()), Value::Text("(".into()),
+            Value::Text("replacement".into()),
+        ]).is_err());
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text(".*".into()),
+            Value::Text("x".into()),
+        ]).unwrap(), Value::Null);
     }
 }
