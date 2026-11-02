@@ -205,17 +205,17 @@ fn add_to_state(
         }
         State::BitAnd(result) => match value.as_ref() {
             Value::Integer(number) =>
-                *result = Some(result.map_or(*number, |current| current & number)),
+                *result = Some(result.map_or(*number, |current| current & *number)),
             _ => return Err(Error::Type("BIT_AND requires integer input".into())),
         },
         State::BitOr(result) => match value.as_ref() {
             Value::Integer(number) =>
-                *result = Some(result.map_or(*number, |current| current | number)),
+                *result = Some(result.map_or(*number, |current| current | *number)),
             _ => return Err(Error::Type("BIT_OR requires integer input".into())),
         },
         State::BitXor(result) => match value.as_ref() {
             Value::Integer(number) =>
-                *result = Some(result.map_or(*number, |current| current ^ number)),
+                *result = Some(result.map_or(*number, |current| current ^ *number)),
             _ => return Err(Error::Type("BIT_XOR requires integer input".into())),
         },
         State::Min(current) | State::Max(current) => {
