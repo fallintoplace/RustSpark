@@ -72,6 +72,8 @@ pub mod partial_aggregate;
 
 pub mod stage_graph;
 
+pub mod local_workers;
+
 pub mod transport;
 
 pub mod task_scheduler;
