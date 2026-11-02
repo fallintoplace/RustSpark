@@ -180,6 +180,63 @@ fn hoist_select_aggregates(expr: Expr, aggregates: &mut Vec<AggregateItem>) -> R
     }
 }
 
+/// After grouping, a scalar expression may refer only to output aggregate
+/// slots or keys present in GROUP BY. Rewrite such keys to their hidden slots.
+fn bind_grouped_scalar(
+    expr: Expr, group_by: &[(Expr, String)], aggregates: &[AggregateItem],
+) -> Result<Expr> {
+    if let Some((_, slot)) = group_by.iter().find(|(group_expr, _)| *group_expr == expr) {
+        return Ok(Expr::Column(slot.clone()));
+    }
+    let visit = |value| bind_grouped_scalar(value, group_by, aggregates);
+    match expr {
+        Expr::Column(name) => {
+            if aggregates.iter().any(|item| item.alias.eq_ignore_ascii_case(&name)) {
+                Ok(Expr::Column(name))
+            } else {
+                Err(Error::Parse(format!(
+                    "SELECT column {name} is not grouped or aggregated"
+                )))
+            }
+        }
+        Expr::Binary { left, op, right } => Ok(Expr::binary(
+            visit(*left)?, op, visit(*right)?,
+        )),
+        Expr::Not(value) => Ok(Expr::Not(Box::new(visit(*value)?))),
+        Expr::IsNull(value) => Ok(Expr::IsNull(Box::new(visit(*value)?))),
+        Expr::IsDistinctFrom { left, right, negated } => Ok(Expr::IsDistinctFrom {
+            left: Box::new(visit(*left)?),
+            right: Box::new(visit(*right)?), negated,
+        }),
+        Expr::Like { value, pattern, escape } => Ok(Expr::Like {
+            value: Box::new(visit(*value)?),
+            pattern: Box::new(visit(*pattern)?),
+            escape: escape.map(|expr| visit(*expr).map(Box::new)).transpose()?,
+        }),
+        Expr::Case { branches, else_expr } => Ok(Expr::Case {
+            branches: branches.into_iter().map(|(condition, value)| Ok((
+                visit(condition)?, visit(value)?,
+            ))).collect::<Result<Vec<_>>>()?,
+            else_expr: else_expr.map(|expr| visit(*expr).map(Box::new)).transpose()?,
+        }),
+        Expr::Call { name, args } => Ok(Expr::Call {
+            name, args: args.into_iter().map(visit).collect::<Result<Vec<_>>>()?,
+        }),
+        Expr::InList { needle, choices, negated } => Ok(Expr::InList {
+            needle: Box::new(visit(*needle)?),
+            choices: choices.into_iter().map(visit).collect::<Result<Vec<_>>>()?,
+            negated,
+        }),
+        Expr::Cast { expression, target } => Ok(Expr::Cast {
+            expression: Box::new(visit(*expression)?), target,
+        }),
+        Expr::TryCast { expression, target } => Ok(Expr::TryCast {
+            expression: Box::new(visit(*expression)?), target,
+        }),
+        literal @ Expr::Literal(_) => Ok(literal),
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -1027,7 +1084,7 @@ impl Parser {
                     }
                     SelectItem::Scalar(item) => {
                         let expression = if computed_aggregate_aliases.contains(&item.alias) {
-                            item.expression
+                            bind_grouped_scalar(item.expression, &group_by, &aggregates)?
                         } else if matches!(item.expression, Expr::Literal(_)) {
                             item.expression
                         } else {
@@ -2620,5 +2677,41 @@ mod tpch_nested_select_aggregates_tests {
         let query = "SELECT promo, SUM(price) AS total FROM lineitem GROUP BY promo";
         assert_eq!(execute(&parse_sql(query).unwrap(), &catalog())
             .unwrap().num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod tpch_grouped_scalar_aggregate_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    fn run(query: &str) -> Result<Vec<Vec<Value>>> {
+        let mut catalog = Catalog::new();
+        catalog.register("sales", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("region", DataType::Integer, false),
+                Field::new("amount", DataType::Integer, false),
+            ])?,
+            vec![vec![Value::Integer(1), Value::Integer(10)],
+                 vec![Value::Integer(1), Value::Integer(20)],
+                 vec![Value::Integer(2), Value::Integer(5)]],
+        )?)?;
+        execute(&parse_sql(query)?, &catalog)?.rows()
+    }
+
+    #[test]
+    fn arithmetic_combines_grouped_keys_and_hidden_aggregate_slots() {
+        let query = "SELECT region + SUM(amount) AS score FROM sales \
+            GROUP BY region ORDER BY score";
+        assert_eq!(run(query).unwrap(), vec![
+            vec![Value::Integer(7)],
+            vec![Value::Integer(31)],
+        ]);
+    }
+
+    #[test]
+    fn non_grouped_columns_cannot_be_smuggled_into_computed_aggregates() {
+        assert!(run("SELECT amount + SUM(amount) AS bad FROM sales GROUP BY region").is_err());
+        assert!(run("SELECT region + SUM(amount) AS ok FROM sales GROUP BY region").is_ok());
     }
 }
