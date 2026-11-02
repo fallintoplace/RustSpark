@@ -790,7 +790,46 @@ impl Parser {
                 kind,
             };
         }
-        if self.take_word("WHERE") {
+        let where_in_select = self.peek_word("WHERE") && matches!(
+            (
+                self.tokens.get(self.index + 1),
+                self.tokens.get(self.index + 2),
+                self.tokens.get(self.index + 3),
+                self.tokens.get(self.index + 4),
+            ),
+            (Some(Token::Word(_)), Some(Token::Word(keyword)),
+                Some(Token::Symbol('(')), Some(Token::Word(select)))
+                if keyword.eq_ignore_ascii_case("IN")
+                    && select.eq_ignore_ascii_case("SELECT")
+        );
+        if where_in_select {
+            self.expect_word("WHERE")?;
+            let left_key = self.identifier()?;
+            self.expect_word("IN")?;
+            self.expect_symbol('(')?;
+            if self.subquery_depth >= 32 {
+                return Err(Error::Parse("IN subquery nesting limit exceeded".into()));
+            }
+            self.subquery_depth += 1;
+            let inner = self.select_with_intersections()?;
+            let inner = self.finish_query(inner)?;
+            self.expect_symbol(')')?;
+            self.subquery_depth -= 1;
+            let Plan::Project { selections, .. } = &inner else {
+                return Err(Error::Unsupported("IN subquery needs one projected column".into()));
+            };
+            if selections.len() != 1 {
+                return Err(Error::Parse("IN subquery must return one column".into()));
+            }
+            let right_key = selections[0].alias.clone();
+            plan = Plan::Join {
+                left: Box::new(plan), right: Box::new(inner),
+                left_key, right_key, kind: JoinKind::Semi,
+            };
+            if self.take_word("AND") {
+                plan = plan.filter(self.expression(2)?);
+            }
+        } else if self.take_word("WHERE") {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
             // subquery down to zero columns and at most one row. CROSS JOIN
             // then preserves the outer schema while returning outer rows
@@ -2455,5 +2494,33 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_in_subquery_semijoin_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn where_in_select_is_a_null_safe_semijoin() {
+        let mut catalog = Catalog::new();
+        catalog.register("parts", Batch::from_rows(
+            Schema::new(vec![Field::new("part_key", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)],
+                 vec![Value::Integer(3)], vec![Value::Null]],
+        ).unwrap()).unwrap();
+        catalog.register("available", Batch::from_rows(
+            Schema::new(vec![Field::new("candidate", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(3)], vec![Value::Null]],
+        ).unwrap()).unwrap();
+        let sql = "SELECT part_key FROM parts WHERE part_key IN (SELECT candidate FROM available) ORDER BY part_key";
+        let rows = execute(&parse_sql(sql).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(3)]]);
+    }
+
+    #[test]
+    fn rejects_multi_column_subqueries() {
+        assert!(parse_sql("SELECT part_key FROM parts WHERE part_key IN (SELECT candidate, candidate FROM available)").is_err());
     }
 }
