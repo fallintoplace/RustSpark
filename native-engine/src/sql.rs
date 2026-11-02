@@ -1002,7 +1002,9 @@ impl Parser {
         let mut group_exprs = Vec::<Expr>::new();
         if has_group_by {
             self.expect_word("BY")?;
-            if self.take_word("ALL") {
+            if self.take_symbol('(') {
+                self.expect_symbol(')')?;
+            } else if self.take_word("ALL") {
                 for item in &select {
                     if let SelectItem::Scalar(Selection { expression, .. }) = item {
                         if !matches!(expression, Expr::Literal(_))
