@@ -105,6 +105,7 @@ where I: IntoIterator<Item = Result<Batch>>
     let mut pending = Vec::new();
     let mut pending_rows = 0usize;
     let mut pending_bytes = 0usize;
+    let fixed_row_bytes = super::row_footprint::fixed_footprint(&schema);
     for incoming in input {
         control.check()?;
         let incoming = incoming?;
@@ -124,8 +125,10 @@ where I: IntoIterator<Item = Result<Batch>>
             let mut take = 0usize;
             let mut bytes = 0usize;
             while take < available_rows {
-                let row_bytes = super::row_footprint::footprint(
-                    sources.iter().map(|source| &source.as_slice()[take]),
+                let row_bytes = fixed_row_bytes.unwrap_or_else(||
+                    super::row_footprint::footprint(
+                        sources.iter().map(|source| &source.as_slice()[take]),
+                    )
                 );
                 if row_bytes > max_bytes_per_run {
                     return Err(Error::Execution("sort input row exceeds run byte budget".into()));
