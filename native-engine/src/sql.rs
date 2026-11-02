@@ -102,6 +102,27 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
     }
 }
 
+/// DATE literals used in analytical queries must be real calendar dates.
+fn valid_iso_date(text: &str) -> bool {
+    let b = text.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-'
+        || !b.iter().enumerate().all(|(i, ch)| i == 4 || i == 7 || ch.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(year) = text[..4].parse::<u32>() else { return false };
+    let Ok(month) = text[5..7].parse::<u32>() else { return false };
+    let Ok(day) = text[8..10].parse::<u32>() else { return false };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    year != 0 && (1..=days).contains(&day)
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -574,6 +595,17 @@ impl Parser {
                 };
                 self.expect_symbol(')')?;
                 Ok(Expr::TryCast { expression: Box::new(expression), target })
+            }
+            // Until native DATE is typed, use fixed-width ISO calendar text.
+            // Date32 Parquet input decodes to the same representation.
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("DATE")
+                && matches!(self.peek(), Some(Token::Text(_))) =>
+            {
+                let Some(Token::Text(value)) = self.next() else { unreachable!() };
+                if !valid_iso_date(&value) {
+                    return Err(Error::Parse("invalid DATE literal".into()));
+                }
+                Ok(Expr::Literal(Value::Text(value)))
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 Ok(Expr::Literal(Value::Null))
@@ -2477,5 +2509,30 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_date_literal_tests {
+    use super::*;
+
+    #[test]
+    fn date_literals_follow_iso_order_and_validate_leap_days() {
+        let catalog = crate::catalog::Catalog::new();
+        let query = "SELECT DATE '1992-01-01' < DATE '1998-12-01' AS before";
+        let rows = crate::executor::execute(&parse_sql(query).unwrap(), &catalog)
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Boolean(true)]]);
+        assert!(parse_sql("SELECT DATE '1996-02-29'").is_ok());
+        assert!(parse_sql("SELECT DATE '1900-02-29'").is_err());
+        assert!(parse_sql("SELECT DATE '2000-02-29'").is_ok());
+        assert!(parse_sql("SELECT DATE '1998-13-01'").is_err());
+        assert!(parse_sql("SELECT DATE '1998-02-30'").is_err());
+        assert!(parse_sql("SELECT DATE '1998-2-01'").is_err());
+    }
+
+    #[test]
+    fn date_remains_a_valid_column_name_without_a_string_literal() {
+        assert!(parse_sql("SELECT date FROM dates").is_ok());
     }
 }
