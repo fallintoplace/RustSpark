@@ -54,6 +54,8 @@ enum State {
     AvgDistinct { keys: HashSet<Value>, bytes: usize, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
+    First(Option<Value>),
+    Last(Option<Value>),
 }
 
 fn new_state(op: &AggregateOp) -> Result<State> {
@@ -62,6 +64,8 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Sum(_) => Ok(State::Sum(None)),
         AggregateOp::Min(_) => Ok(State::Min(None)),
         AggregateOp::Max(_) => Ok(State::Max(None)),
+        AggregateOp::First(_, _) => Ok(State::First(None)),
+        AggregateOp::Last(_, _) => Ok(State::Last(None)),
         AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, compensation: 0.0, count: 0 }),
         AggregateOp::CountDistinct(_) => Ok(State::CountDistinct { keys: HashSet::new(), bytes: 0 }),
         AggregateOp::SumDistinct(_) => Ok(State::SumDistinct {
@@ -153,6 +157,36 @@ fn add_avg(sum: &mut f64, compensation: &mut f64, count: &mut i64, value: &Value
     Ok(())
 }
 
+fn copy_retained_scalar(
+    value: &Value, previous: Option<&Value>,
+    retained: &mut usize, budget: usize,
+) -> Result<Value> {
+    let old_bytes = match previous {
+        Some(Value::Text(text)) => text.len(),
+        _ => 0,
+    };
+    let new_bytes = match value {
+        Value::Text(text) => text.len(),
+        _ => 0,
+    };
+    let next = retained.checked_sub(old_bytes)
+        .and_then(|n| n.checked_add(new_bytes))
+        .filter(|n| *n <= budget)
+        .ok_or_else(|| Error::Execution("spilled FIRST/LAST text state budget exceeded".into()))?;
+    let owned = match value {
+        Value::Text(text) => {
+            let mut copy = String::new();
+            copy.try_reserve_exact(text.len())
+                .map_err(|_| Error::Execution("FIRST/LAST text allocation failed".into()))?;
+            copy.push_str(text);
+            Value::Text(copy)
+        }
+        other => other.clone(),
+    };
+    *retained = next;
+    Ok(owned)
+}
+
 fn add_to_state(
     state: &mut State, op: &AggregateOp, batch: &Batch, row: usize,
     direct_column: Option<usize>,
@@ -166,13 +200,17 @@ fn add_to_state(
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) | AggregateOp::Sum(expr) |
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
         AggregateOp::Max(expr) | AggregateOp::SumDistinct(expr) |
-        AggregateOp::AvgDistinct(expr) => match direct_column {
+        AggregateOp::AvgDistinct(expr) |
+        AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) => match direct_column {
             Some(index) => Cow::Borrowed(batch.value(row, index)?),
             None => Cow::Owned(expr.evaluate(batch, row)?),
         },
         _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     };
-    if value.is_null() { return Ok(()); }
+    if value.is_null() && !matches!(op,
+        AggregateOp::First(_, false) | AggregateOp::Last(_, false)) {
+        return Ok(());
+    }
     let is_min = matches!(state, State::Min(_));
     match state {
         State::Count(count) => {
@@ -195,6 +233,19 @@ fn add_to_state(
                 add_avg(sum, compensation, count, &value)?;
             }
         }
+        State::First(current) => {
+            if current.is_none() {
+                *current = Some(copy_retained_scalar(
+                    value.as_ref(), None, retained_bytes, max_retained_bytes,
+                )?);
+            }
+        }
+        State::Last(current) => {
+            let next = copy_retained_scalar(
+                value.as_ref(), current.as_ref(), retained_bytes, max_retained_bytes,
+            )?;
+            *current = Some(next);
+        }
         State::Min(current) | State::Max(current) => {
             if let Some(existing) = current {
                 let order = value.sql_compare(existing)?
@@ -216,7 +267,8 @@ fn bind_aggregate_column(op: &AggregateOp, schema: &Schema) -> Result<Option<usi
         AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr) |
         AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) |
         AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) |
-        AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr,
+        AggregateOp::Min(expr) | AggregateOp::Max(expr) |
+        AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) => expr,
         _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     };
     match expression {
@@ -240,7 +292,8 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
                 DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("SUM requires numeric input".into())),
             },
-            AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(input)?,
+            AggregateOp::Min(expr) | AggregateOp::Max(expr) |
+            AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) => expr.output_type(input)?,
             AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) => match expr.output_type(input)? {
                 DataType::Integer | DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("AVG requires numeric input".into())),
@@ -383,7 +436,8 @@ fn aggregate_shard_with_budget(
                         Value::Float((sum + compensation) / count as f64)
                     },
                 State::SumDistinct { total: v, .. } |
-                State::Sum(v) | State::Min(v) | State::Max(v) => v.unwrap_or(Value::Null),
+                State::Sum(v) | State::Min(v) | State::Max(v) |
+                State::First(v) | State::Last(v) => v.unwrap_or(Value::Null),
             });
         }
         // Keys and finalized aggregate values already belong to this shard.
