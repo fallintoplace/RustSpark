@@ -141,6 +141,14 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "WIDTH_BUCKET" => width_bucket::output_type(args, schema),
         "BIT_COUNT" => bit_count::output_type(args, schema),
         "BIT_GET" | "GETBIT" => bit_get::output_type(args, schema),
+        "DATE_PART" | "DATEPART" => {
+            check_arity(name, args, 2, 2)?;
+            match &args[0] {
+                Expr::Literal(Value::Text(field)) if field.eq_ignore_ascii_case("YEAR") =>
+                    year::output_type(&args[1..], schema),
+                _ => Err(Error::Unsupported("DATE_PART currently supports the literal YEAR field".into())),
+            }
+        },
         "YEAR" => year::output_type(args, schema),
         "TYPEOF" => {
             check_arity(name, args, 1, 1)?;
@@ -184,6 +192,14 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "WIDTH_BUCKET" => width_bucket::eval(args, batch, row),
         "BIT_COUNT" => bit_count::eval(args, batch, row),
         "BIT_GET" | "GETBIT" => bit_get::eval(args, batch, row),
+        "DATE_PART" | "DATEPART" => {
+            check_arity(name, args, 2, 2)?;
+            match &args[0] {
+                Expr::Literal(Value::Text(field)) if field.eq_ignore_ascii_case("YEAR") =>
+                    year::eval(&args[1..], batch, row),
+                _ => Err(Error::Unsupported("DATE_PART currently supports the literal YEAR field".into())),
+            }
+        },
         "YEAR" => year::eval(args, batch, row),
         "TYPEOF" => {
             let kind = match &args[0] {
