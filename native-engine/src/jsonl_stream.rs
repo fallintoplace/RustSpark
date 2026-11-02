@@ -8,6 +8,7 @@ use crate::{batch::Batch, scalar::Value, schema::{DataType, Schema}, Error, Resu
 
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BATCH_ROWS: usize = 16_384;
+const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CELLS_PER_BATCH: usize = 1_000_000;
 
 /// The consumer supplies a schema to avoid buffering every input row just to
@@ -17,6 +18,8 @@ pub struct JsonlScan<R> {
     schema: Schema,
     batch_rows: usize,
     max_total_bytes: usize,
+    max_batch_bytes: usize,
+    pending_row: Option<(Vec<Value>, usize)>,
     bytes_read: usize,
     line: String,
     finished: bool,
@@ -55,21 +58,36 @@ impl<R: BufRead> JsonlScan<R> {
     pub fn new(
         reader: R, schema: Schema, batch_rows: usize, max_total_bytes: usize,
     ) -> Result<Self> {
+        Self::with_batch_byte_budget(
+            reader, schema, batch_rows, max_total_bytes, MAX_BATCH_BYTES
+        )
+    }
+
+    /// Cap the estimated memory owned by one produced batch. An oversized
+    /// single row fails rather than being allowed through the quota.
+    pub fn with_batch_byte_budget(
+        reader: R, schema: Schema, batch_rows: usize,
+        max_total_bytes: usize, max_batch_bytes: usize,
+    ) -> Result<Self> {
+        if max_batch_bytes == 0 || max_batch_bytes > MAX_BATCH_BYTES {
+            return Err(Error::Execution("invalid JSONL batch byte budget".into()));
+        }
         if batch_rows == 0 || batch_rows > MAX_BATCH_ROWS
             || batch_rows.checked_mul(schema.len().max(1))
                 .is_none_or(|cells| cells > MAX_CELLS_PER_BATCH) {
             return Err(Error::Execution("JSONL streaming batch budget exceeded".into()));
         }
         Ok(Self {
-            reader, schema, batch_rows, max_total_bytes,
+            reader, schema, batch_rows, max_total_bytes, max_batch_bytes,
             bytes_read: 0, line: String::new(), finished: false,
+            pending_row: None,
         })
     }
 
     pub fn schema(&self) -> &Schema { &self.schema }
     pub fn bytes_read(&self) -> usize { self.bytes_read }
 
-    fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
+    fn next_row(&mut self) -> Result<Option<(Vec<Value>, usize)>> {
         loop {
             self.line.clear();
             let remaining = self.max_total_bytes.saturating_sub(self.bytes_read);
@@ -122,7 +140,7 @@ impl<R: BufRead> JsonlScan<R> {
                     return Err(Error::Type(format!("incompatible JSONL column: {name}")));
                 };
             }
-            return Ok(Some(row));
+            return Ok(Some((row, read)));
         }
     }
 }
@@ -137,9 +155,32 @@ impl<R: BufRead> Iterator for JsonlScan<R> {
             self.finished = true;
             return Some(Err(Error::Execution(format!("JSONL batch allocation failed: {error}"))));
         }
+        let mut batch_bytes = 0usize;
         while rows.len() < self.batch_rows {
-            match self.next_row() {
-                Ok(Some(row)) => rows.push(row),
+            let next = match self.pending_row.take() {
+                Some(row) => Ok(Some(row)),
+                None => self.next_row(),
+            };
+            match next {
+                Ok(Some((row, input_bytes))) => {
+                    let estimate = input_bytes.saturating_add(
+                        self.schema.len().saturating_mul(std::mem::size_of::<Value>())
+                    );
+                    if estimate > self.max_batch_bytes {
+                        self.finished = true;
+                        return Some(Err(Error::Execution(
+                            "JSONL row exceeds batch byte budget".into()
+                        )));
+                    }
+                    if !rows.is_empty() && batch_bytes.saturating_add(estimate) > self.max_batch_bytes {
+                        // The row has been decoded, but not yielded. Carry it
+                        // exactly once into the following batch.
+                        self.pending_row = Some((row, input_bytes));
+                        break;
+                    }
+                    batch_bytes += estimate;
+                    rows.push(row);
+                }
                 Ok(None) => { self.finished = true; break; }
                 Err(error) => { self.finished = true; return Some(Err(error)); }
             }
