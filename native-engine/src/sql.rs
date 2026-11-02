@@ -790,7 +790,69 @@ impl Parser {
                 kind,
             };
         }
-        if self.take_word("WHERE") {
+        let where_scalar_aggregate = self.peek_word("WHERE") && matches!(
+            (
+                self.tokens.get(self.index + 1),
+                self.tokens.get(self.index + 2),
+                self.tokens.get(self.index + 3),
+                self.tokens.get(self.index + 4),
+            ),
+            (Some(Token::Word(_)), Some(Token::Operator(op)),
+             Some(Token::Symbol('(')), Some(Token::Word(select)))
+                if ["=", "!=", "<>", "<", "<=", ">", ">="].contains(&op.as_str())
+                    && select.eq_ignore_ascii_case("SELECT")
+        );
+        if where_scalar_aggregate {
+            if select.iter().any(|item| matches!(item, SelectItem::Star)) {
+                return Err(Error::Unsupported("scalar subquery requires explicit SELECT list".into()));
+            }
+            self.expect_word("WHERE")?;
+            let left_key = self.identifier()?;
+            let comparison = match self.next() {
+                Some(Token::Operator(op)) => match op.as_str() {
+                    "=" => BinaryOp::Equal,
+                    "!=" | "<>" => BinaryOp::NotEqual,
+                    "<" => BinaryOp::Less,
+                    "<=" => BinaryOp::LessEqual,
+                    ">" => BinaryOp::Greater,
+                    ">=" => BinaryOp::GreaterEqual,
+                    _ => unreachable!("prechecked comparison"),
+                },
+                _ => unreachable!("prechecked comparison token"),
+            };
+            self.expect_symbol('(')?;
+            if self.subquery_depth >= 32 {
+                return Err(Error::Parse("scalar subquery nesting limit exceeded".into()));
+            }
+            self.subquery_depth += 1;
+            let scalar = self.select_with_intersections()?;
+            let scalar = self.finish_query(scalar)?;
+            self.expect_symbol(')')?;
+            self.subquery_depth -= 1;
+            let Plan::Project { input, selections } = &scalar else {
+                return Err(Error::Unsupported("scalar subquery needs an aggregate projection".into()));
+            };
+            if selections.len() != 1 || !matches!(input.as_ref(),
+                Plan::Aggregate { group_by, .. } if group_by.is_empty()) {
+                return Err(Error::Unsupported(
+                    "scalar subquery requires one global aggregate".into(),
+                ));
+            }
+            let inner_name = selections[0].alias.clone();
+            let hidden_name = "__rustspark_scalar_aggregate_value";
+            let renamed = scalar.project(vec![Selection::new(
+                Expr::Column(inner_name), hidden_name,
+            )]);
+            plan = Plan::CrossJoin {
+                left: Box::new(plan), right: Box::new(renamed),
+            };
+            plan = plan.filter(Expr::binary(
+                Expr::Column(left_key), comparison, Expr::Column(hidden_name.into()),
+            ));
+            if self.take_word("AND") {
+                plan = plan.filter(self.expression(2)?);
+            }
+        } else if self.take_word("WHERE") {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
             // subquery down to zero columns and at most one row. CROSS JOIN
             // then preserves the outer schema while returning outer rows
@@ -2455,5 +2517,35 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_scalar_aggregate_filter_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn compares_outer_rows_with_uncorrelated_scalar_aggregate() {
+        let mut catalog = Catalog::new();
+        catalog.register("customer", Batch::from_rows(
+            Schema::new(vec![Field::new("c_acctbal", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(10)], vec![Value::Integer(20)],
+                 vec![Value::Integer(30)], vec![Value::Null]],
+        ).unwrap()).unwrap();
+        let query = "SELECT c_acctbal FROM customer WHERE c_acctbal > (SELECT AVG(c_acctbal) FROM customer) ORDER BY c_acctbal";
+        let result = execute(&parse_sql(query).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(result, vec![vec![Value::Integer(30)]]);
+    }
+
+    #[test]
+    fn rejects_non_scalar_and_nonaggregate_subqueries() {
+        for sql in [
+            "SELECT c_acctbal FROM customer WHERE c_acctbal = (SELECT c_acctbal FROM customer)",
+            "SELECT c_acctbal FROM customer WHERE c_acctbal = (SELECT AVG(c_acctbal), MAX(c_acctbal) FROM customer)",
+            "SELECT * FROM customer WHERE c_acctbal > (SELECT AVG(c_acctbal) FROM customer)",
+        ] {
+            assert!(parse_sql(sql).is_err(), "{sql}");
+        }
     }
 }
