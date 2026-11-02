@@ -55,7 +55,11 @@ impl<'de> Deserialize<'de> for BorrowedObjectKey<'de> {
             fn visit_str<E: serde::de::Error>(self, value: &str)
                 -> std::result::Result<Self::Value, E>
             {
-                Ok(BorrowedObjectKey(std::borrow::Cow::Owned(value.to_owned())))
+                let mut owned = String::new();
+                owned.try_reserve_exact(value.len())
+                    .map_err(|_| E::custom("JSON_SIZE escaped key allocation failed"))?;
+                owned.push_str(value);
+                Ok(BorrowedObjectKey(std::borrow::Cow::Owned(owned)))
             }
             fn visit_string<E: serde::de::Error>(self, value: String)
                 -> std::result::Result<Self::Value, E>
@@ -86,7 +90,13 @@ impl<'de> Deserialize<'de> for RootObjectSize {
             {
                 let mut names = HashSet::new();
                 while let Some(name) = map.next_key::<BorrowedObjectKey<'de>>()? {
-                    names.insert(name.0);
+                    if !names.contains(name.0.as_ref()) {
+                        names.try_reserve(1).map_err(|_|
+                            <A::Error as serde::de::Error>::custom(
+                                "JSON_SIZE object key allocation failed",
+                            ))?;
+                        names.insert(name.0);
+                    }
                     map.next_value::<IgnoredAny>()?;
                 }
                 Ok(RootObjectSize(names.len()))
@@ -335,5 +345,38 @@ mod borrowed_json_size_object_key_regressions {
             Value::Integer(expected as i64));
         assert!(json_size(&[Value::Text(r#"{"x":0} trailing"#.into())]).is_err());
         assert_eq!(json_size(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod json_size_fallible_key_dedup_tests {
+    use super::*;
+
+    #[test]
+    fn counts_distinct_escaped_and_duplicate_object_keys() {
+        for (input, count) in [
+            (r#"{"a":1,"a":2,"b":{"nested":[1,2]}}"#, 2),
+            (r#"{"\u0061":1,"a":2,"🙂":3,"🙂":4}"#, 2),
+            (r#"{"":0,"":1,"\u00e9":2,"é":3}"#, 2),
+        ] {
+            assert_eq!(json_size(&[Value::Text(input.into())]).unwrap(),
+                Value::Integer(count));
+        }
+    }
+
+    #[test]
+    fn counts_large_object_keys_without_materializing_nested_values() {
+        let mut input = String::from("{");
+        for index in 0..4096 {
+            if index != 0 { input.push(','); }
+            input.push_str(&format!(r#""k{index}":[null,{{"n":{index}}}]"#));
+        }
+        input.push('}');
+        assert_eq!(json_size(&[Value::Text(input)]).unwrap(), Value::Integer(4096));
+    }
+
+    #[test]
+    fn rejects_invalid_json_instead_of_returning_partial_counts() {
+        assert!(json_size(&[Value::Text("{\"a\": 1, ".into())]).is_err());
     }
 }
