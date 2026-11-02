@@ -65,6 +65,32 @@ pub(crate) fn shift_output_type(args: &[Expr], schema: &Schema) -> Result<DataTy
     Ok(DataType::Text)
 }
 
+pub(crate) fn sub_output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
+    if args.len() != 2 {
+        return Err(Error::Parse("DATE_SUB expects date and days".into()));
+    }
+    if args[0].output_type(schema)? != DataType::Text
+        || args[1].output_type(schema)? != DataType::Integer {
+        return Err(Error::Type("DATE_SUB requires text date and integer days".into()));
+    }
+    Ok(DataType::Text)
+}
+
+pub(crate) fn eval_sub(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
+    let date = args[0].evaluate(batch, row)?;
+    let days = args[1].evaluate(batch, row)?;
+    match (date, days) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Text(date), Value::Integer(days)) => {
+            let negative = days.checked_neg().ok_or_else(|| Error::Execution(
+                "DATE_SUB days overflow".into()
+            ))?;
+            Ok(Value::Text(shift_days(&date, negative)?))
+        }
+        _ => Err(Error::Type("DATE_SUB requires text date and integer days".into())),
+    }
+}
+
 pub(crate) fn eval_add(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
     let date = args[0].evaluate(batch, row)?;
     let days = args[1].evaluate(batch, row)?;
@@ -143,5 +169,30 @@ mod date_add_tpch_tests {
         let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
             .unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("1999-03-01".into()), Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod date_sub_tpch_tests {
+    use super::*;
+
+    #[test]
+    fn subtracts_calendar_days_across_years() {
+        let plan = crate::sql::parse_sql(
+            "SELECT DATE_SUB('1999-01-01', 1), DATE_SUB('1996-03-01', 1)"
+        ).unwrap();
+        let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Text("1998-12-31".into()),
+            Value::Text("1996-02-29".into()),
+        ]]);
+    }
+
+    #[test]
+    fn invalid_or_oversized_day_counts_fail_safely() {
+        assert!(crate::sql::parse_sql("SELECT DATE_SUB('1998-12-01', 9223372036854775807)")
+            .is_ok());
+        assert!(shift_days("1998-12-01", -4_000_001).is_err());
     }
 }
