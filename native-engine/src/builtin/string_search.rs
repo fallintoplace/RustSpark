@@ -147,6 +147,10 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
 fn locate(args: &[Value]) -> Result<Value> {
     locate_values(&args[0], &args[1], args.get(2))
 }
+// STRPOS(string, substring) reverses the argument order of LOCATE.
+fn strpos(args: &[Value]) -> Result<Value> {
+    locate_values(&args[1], &args[0], None)
+}
 
 fn instr_type(types: &[DataType]) -> Result<DataType> {
     if !(2..=4).contains(&types.len())
@@ -238,6 +242,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "strcmp", min_args: 2, max_args: 2, result_type: strcmp_type, call: strcmp },
     Function { name: "split_part", min_args: 3, max_args: 3, result_type: split_type, call: split_part },
     Function { name: "locate", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
+    Function { name: "strpos", min_args: 2, max_args: 2, result_type: locate_type, call: strpos },
     Function { name: "position", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
     Function { name: "instr", min_args: 2, max_args: 4, result_type: instr_type, call: instr },
 ];
@@ -720,5 +725,25 @@ mod early_match_locate_tests {
         assert_eq!(locate(&[
             Value::Null, Value::Text("abc".into()),
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod strpos_sql_tests {
+    use crate::{catalog::Catalog, executor, scalar::Value, sql};
+
+    #[test]
+    fn strpos_uses_string_first_and_character_positions() {
+        let plan = sql::parse_sql(
+            "SELECT STRPOS('é🙂x', '🙂'), STRPOS('banana', 'na'), STRPOS('abc', 'z'), STRPOS(NULL, 'a')"
+        ).unwrap();
+        let rows = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Integer(2), Value::Integer(3), Value::Integer(0), Value::Null,
+        ]]);
+        assert!(crate::builtin::supports("strpos"));
+        assert!(sql::parse_sql("SELECT STRPOS('abc')").is_ok());
+        assert!(executor::execute(&sql::parse_sql("SELECT STRPOS('abc')").unwrap(),
+            &Catalog::new()).is_err());
     }
 }
