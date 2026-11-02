@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
+    Array, ArrayRef, BooleanArray, Decimal128Array, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
     builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
@@ -151,6 +151,11 @@ pub fn schema_from_arrow(input: &ArrowSchema) -> Result<Schema> {
             ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 |
             ArrowType::UInt64 => DataType::Integer,
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
+            // TPC-H money columns fit a 15-digit mantissa. Until native
+            // fixed-point arithmetic lands, decode this narrow subset as f64;
+            // reject wider decimals instead of silently losing large integers.
+            ArrowType::Decimal128(precision, scale)
+                if *precision <= 15 && (0..=15).contains(scale) => DataType::Float,
             ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
             ArrowType::Dictionary(key, value)
                 if matches!(key.as_ref(),
@@ -267,6 +272,16 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                 Some((0..values.len()).map(|row| {
                     if values.is_null(row) { Value::Null }
                     else { Value::Float(values.value(row)) }
+                }).collect())
+            }
+            ArrowType::Decimal128(precision, scale)
+                if *precision <= 15 && (0..=15).contains(scale) => {
+                let values = array.as_any().downcast_ref::<Decimal128Array>()
+                    .ok_or_else(|| Error::Type("invalid Decimal128 Arrow array".into()))?;
+                let factor = 10_f64.powi(i32::from(*scale));
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Value::Null }
+                    else { Value::Float(values.value(row) as f64 / factor) }
                 }).collect())
             }
             ArrowType::Utf8 => {
@@ -735,5 +750,32 @@ mod direct_arrow_metadata_contract_tests {
             ArrowField::new("bytes", ArrowType::Binary, true),
         ]);
         assert!(schema_from_arrow(&unsupported).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_arrow_decimal128_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_tpch_decimal_money_with_nulls() {
+        let values = Decimal128Array::from(vec![Some(12345_i128), Some(-750_i128), None])
+            .with_precision_and_scale(15, 2).unwrap();
+        let record = RecordBatch::try_from_iter(vec![(
+            "l_extendedprice", Arc::new(values) as ArrayRef,
+        )]).unwrap();
+        let output = from_arrow(&record).unwrap();
+        assert_eq!(output.schema().field(0).unwrap().data_type, DataType::Float);
+        assert_eq!(output.column(0).unwrap(), &[
+            Value::Float(123.45), Value::Float(-7.5), Value::Null,
+        ]);
+    }
+
+    #[test]
+    fn rejects_wide_or_negative_scale_decimals_without_silent_coercion() {
+        for kind in [ArrowType::Decimal128(38, 2), ArrowType::Decimal128(15, -2)] {
+            let schema = ArrowSchema::new(vec![ArrowField::new("amount", kind, true)]);
+            assert!(schema_from_arrow(&schema).is_err());
+        }
     }
 }
