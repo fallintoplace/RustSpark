@@ -44,9 +44,19 @@ impl CommitLedger {
                 if at_capacity {
                     return Err(Error::Execution("shuffle partition tracking budget exceeded".into()));
                 }
+                if sequence != 0 {
+                    return Err(Error::Execution("first shuffle chunk must use sequence zero".into()));
+                }
+                // Invalid first frames must not occupy a partition slot.
+                // Reserve before publishing any tracking state.
+                let mut checksums = Vec::new();
+                checksums.try_reserve_exact(1)
+                    .map_err(|_| Error::Execution("shuffle chunk tracking allocation failed".into()))?;
+                checksums.push(checksum);
                 entry.insert(PartitionState {
-                    attempt, checksums: Vec::new(), committed: false,
-                })
+                    attempt, checksums, committed: false,
+                });
+                return Ok(true);
             }
         };
         if attempt < state.attempt { return Ok(false); }
