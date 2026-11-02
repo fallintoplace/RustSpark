@@ -791,17 +791,24 @@ impl Parser {
             };
         }
         if self.take_word("WHERE") {
-            // Uncorrelated IN with one selected column is a SEMI JOIN for a
-            // WHERE predicate: NULL/UNKNOWN never selects an outer row.
-            // Correlated and NOT IN subqueries need different lowering.
-            let in_subquery = matches!(self.peek(), Some(Token::Word(_)))
+            // Uncorrelated IN and NOT IN each need special null semantics.
+            let positive_in = matches!(self.peek(), Some(Token::Word(_)))
                 && matches!(self.tokens.get(self.index + 1),
                     Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"))
                 && self.tokens.get(self.index + 2) == Some(&Token::Symbol('('))
                 && matches!(self.tokens.get(self.index + 3),
                     Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"));
-            if in_subquery {
+            let negative_in = matches!(self.peek(), Some(Token::Word(_)))
+                && matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("NOT"))
+                && matches!(self.tokens.get(self.index + 2),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"))
+                && self.tokens.get(self.index + 3) == Some(&Token::Symbol('('))
+                && matches!(self.tokens.get(self.index + 4),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"));
+            if positive_in || negative_in {
                 let outer_key = self.identifier()?;
+                if negative_in { self.expect_word("NOT")?; }
                 self.expect_word("IN")?;
                 self.expect_symbol('(')?;
                 if self.subquery_depth >= 32 {
@@ -819,11 +826,51 @@ impl Parser {
                         "IN subquery must select exactly one explicit column".into()
                     )),
                 };
-                plan = Plan::Join {
-                    left: Box::new(plan), right: Box::new(inner),
-                    left_key: outer_key, right_key: inner_key,
-                    kind: JoinKind::Semi,
-                };
+                if negative_in {
+                    // SQL NOT IN differs from an ordinary anti join:
+                    // * any RHS NULL makes every result UNKNOWN;
+                    // * an outer NULL is UNKNOWN when the RHS is nonempty;
+                    // * NULL NOT IN (empty RHS) is TRUE.
+                    // Use one-row witnesses to preserve these cases while
+                    // EXCEPT ALL keeps the original outer multiplicities.
+                    let has_rhs_null = Plan::Project {
+                        input: Box::new(inner.clone().filter(Expr::IsNull(Box::new(
+                            Expr::Column(inner_key.clone()),
+                        ))).limit(0, Some(1))),
+                        selections: Vec::new(),
+                    };
+                    let null_rhs_matches = Plan::CrossJoin {
+                        left: Box::new(plan.clone()), right: Box::new(has_rhs_null),
+                    };
+                    let without_null_rhs = Plan::ExceptAll {
+                        left: Box::new(plan.clone()), right: Box::new(null_rhs_matches),
+                    };
+                    let rhs_not_empty = Plan::Project {
+                        input: Box::new(inner.clone().limit(0, Some(1))),
+                        selections: Vec::new(),
+                    };
+                    let null_outer = plan.filter(Expr::IsNull(Box::new(
+                        Expr::Column(outer_key.clone()),
+                    )));
+                    let null_outer_matches = Plan::CrossJoin {
+                        left: Box::new(null_outer), right: Box::new(rhs_not_empty),
+                    };
+                    let eligible = Plan::ExceptAll {
+                        left: Box::new(without_null_rhs),
+                        right: Box::new(null_outer_matches),
+                    };
+                    plan = Plan::Join {
+                        left: Box::new(eligible), right: Box::new(inner),
+                        left_key: outer_key, right_key: inner_key,
+                        kind: JoinKind::Anti,
+                    };
+                } else {
+                    plan = Plan::Join {
+                        left: Box::new(plan), right: Box::new(inner),
+                        left_key: outer_key, right_key: inner_key,
+                        kind: JoinKind::Semi,
+                    };
+                }
                 if self.take_word("AND") {
                     plan = plan.filter(self.expression(2)?);
                 }
@@ -2530,5 +2577,52 @@ mod tpch_uncorrelated_in_subquery_tests {
     fn in_subquery_must_select_a_single_column() {
         assert!(parse_sql("SELECT id FROM a WHERE id IN \
             (SELECT x, y FROM b)").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_null_aware_not_in_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    fn run(orders: Vec<Value>) -> Vec<Vec<Value>> {
+        let mut catalog = Catalog::new();
+        catalog.register("customer", Batch::from_rows(
+            Schema::new(vec![Field::new("custkey", DataType::Integer, true)]).unwrap(),
+            vec![
+                vec![Value::Integer(1)], vec![Value::Integer(2)],
+                vec![Value::Integer(3)], vec![Value::Integer(3)],
+                vec![Value::Null],
+            ],
+        ).unwrap()).unwrap();
+        catalog.register("orders", Batch::from_rows(
+            Schema::new(vec![Field::new("orderkey", DataType::Integer, true)]).unwrap(),
+            orders.into_iter().map(|value| vec![value]).collect(),
+        ).unwrap()).unwrap();
+        let query = "SELECT custkey FROM customer WHERE custkey NOT IN \
+            (SELECT orderkey FROM orders) ORDER BY custkey NULLS FIRST";
+        execute(&parse_sql(query).unwrap(), &catalog).unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn not_in_preserves_outer_duplicates_without_rhs_nulls() {
+        assert_eq!(run(vec![Value::Integer(1), Value::Integer(2)]), vec![
+            vec![Value::Integer(3)], vec![Value::Integer(3)],
+        ]);
+    }
+
+    #[test]
+    fn rhs_null_makes_not_in_unknown_for_all_rows() {
+        assert!(run(vec![Value::Integer(1), Value::Null]).is_empty());
+        assert!(run(vec![Value::Null]).is_empty());
+    }
+
+    #[test]
+    fn empty_rhs_matches_all_outer_rows_including_null() {
+        assert_eq!(run(vec![]), vec![
+            vec![Value::Null], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Integer(3)],
+            vec![Value::Integer(3)],
+        ]);
     }
 }
