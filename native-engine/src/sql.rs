@@ -102,6 +102,87 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
     }
 }
 
+/// Decode the ISO dates used as TPC-H query constants.
+fn iso_calendar_parts(value: &str) -> Result<(i64, i64, i64)> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || bytes.iter().enumerate().any(|(i, byte)|
+            i != 4 && i != 7 && !byte.is_ascii_digit()) {
+        return Err(Error::Parse("date arithmetic requires YYYY-MM-DD".into()));
+    }
+    let year: i64 = value[0..4].parse().expect("validated digits");
+    let month: i64 = value[5..7].parse().expect("validated digits");
+    let day: i64 = value[8..10].parse().expect("validated digits");
+    if !(1..=9999).contains(&year) || !(1..=12).contains(&month)
+        || day < 1 || day > calendar_days_in_month(year, month) {
+        return Err(Error::Parse("invalid ISO calendar date".into()));
+    }
+    Ok((year, month, day))
+}
+
+fn calendar_days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn calendar_days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
+}
+
+fn calendar_from_epoch_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    (year, month, day)
+}
+
+fn shift_literal_date(value: &str, quantity: i64, unit: &str, subtract: bool) -> Result<String> {
+    let (year, month, day) = iso_calendar_parts(value)?;
+    let delta = if subtract { quantity.checked_neg() } else { Some(quantity) }
+        .ok_or_else(|| Error::Parse("date interval exceeds numeric range".into()))?;
+    let (year, month, day) = if unit.eq_ignore_ascii_case("DAY")
+        || unit.eq_ignore_ascii_case("DAYS") {
+        let days = calendar_days_since_epoch(year, month, day).checked_add(delta)
+            .ok_or_else(|| Error::Parse("date interval exceeds numeric range".into()))?;
+        calendar_from_epoch_days(days)
+    } else if ["MONTH", "MONTHS", "YEAR", "YEARS"].iter()
+        .any(|keyword| unit.eq_ignore_ascii_case(keyword)) {
+        let delta_months = if unit.eq_ignore_ascii_case("YEAR")
+            || unit.eq_ignore_ascii_case("YEARS") {
+            delta.checked_mul(12)
+                .ok_or_else(|| Error::Parse("date interval exceeds numeric range".into()))?
+        } else { delta };
+        let total = (year * 12 + month - 1).checked_add(delta_months)
+            .ok_or_else(|| Error::Parse("date interval exceeds numeric range".into()))?;
+        let y = total.div_euclid(12);
+        let m = total.rem_euclid(12) + 1;
+        (y, m, day.min(calendar_days_in_month(y, m)))
+    } else {
+        return Err(Error::Unsupported(format!("unsupported DATE interval unit: {unit}")));
+    };
+    if !(1..=9999).contains(&year) {
+        return Err(Error::Parse("date interval result is outside ISO range".into()));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -475,6 +556,22 @@ impl Parser {
                 break;
             }
             let _ = self.next();
+            if matches!(op, BinaryOp::Add | BinaryOp::Subtract) && self.take_word("INTERVAL") {
+                let value = match self.next() {
+                    Some(Token::Text(value)) | Some(Token::Number(value)) => value,
+                    _ => return Err(Error::Parse("INTERVAL needs a numeric literal".into())),
+                };
+                let quantity = value.parse::<i64>()
+                    .map_err(|_| Error::Parse("INTERVAL quantity must be an integer".into()))?;
+                let unit = self.identifier()?;
+                let Expr::Literal(Value::Text(date)) = left else {
+                    return Err(Error::Unsupported("date interval requires a literal date".into()));
+                };
+                left = Expr::Literal(Value::Text(shift_literal_date(
+                    &date, quantity, &unit, op == BinaryOp::Subtract,
+                )?));
+                continue;
+            }
             let right = self.expression(precedence + 1)?;
             left = Expr::binary(left, op, right);
         }
@@ -2455,5 +2552,40 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_literal_date_intervals {
+    use super::*;
+    use crate::{catalog::Catalog, executor::execute};
+
+    fn scalar(query: &str) -> Value {
+        execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().value(0, 0).unwrap().clone()
+    }
+
+    #[test]
+    fn supports_tpch_day_and_year_interval_constants() {
+        assert_eq!(scalar("SELECT '1998-12-01' - INTERVAL '90' DAY"),
+            Value::Text("1998-09-02".into()));
+        assert_eq!(scalar("SELECT '1994-01-01' + INTERVAL '1' YEAR"),
+            Value::Text("1995-01-01".into()));
+        assert_eq!(scalar("SELECT '2000-02-29' + INTERVAL '1' YEAR"),
+            Value::Text("2001-02-28".into()));
+        assert_eq!(scalar("SELECT '1995-01-31' + INTERVAL 1 MONTH"),
+            Value::Text("1995-02-28".into()));
+    }
+
+    #[test]
+    fn rejects_invalid_dates_units_and_range_overflow() {
+        for sql in [
+            "SELECT '1995-02-29' - INTERVAL '1' DAY",
+            "SELECT '1995-03-01' + INTERVAL '1' HOUR",
+            "SELECT '9999-12-31' + INTERVAL '1' DAY",
+            "SELECT '1995-03-01' + INTERVAL '9223372036854775807' YEAR",
+        ] {
+            assert!(parse_sql(sql).is_err(), "{sql}");
+        }
     }
 }
