@@ -6,6 +6,18 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Integer)
 }
 
+fn count_ascii_class(text: &str, runs: bool, matches: impl Fn(u8) -> bool) -> Result<Value> {
+    let mut count = 0usize;
+    let mut previous_match = false;
+    for byte in text.bytes() {
+        let matched = matches(byte);
+        if matched && (!runs || !previous_match) { count += 1; }
+        previous_match = matched;
+    }
+    i64::try_from(count).map(Value::Integer)
+        .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -24,33 +36,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             return Ok(Value::Integer(i64::from(text.starts_with(prefix))));
         }
     }
+    // Exact ASCII classes need no regex compilation.
     if pattern == "[A-Za-z]" || pattern == "[A-Za-z]+" {
-        // Character classes are ASCII-only. Count individual bytes or runs
-        // without regex compilation and without decoding Unicode scalars.
-        let runs = pattern == "[A-Za-z]+";
-        let mut count = 0usize;
-        let mut previous_letter = false;
-        for byte in text.bytes() {
-            let letter = byte.is_ascii_alphabetic();
-            if letter && (!runs || !previous_letter) { count += 1; }
-            previous_letter = letter;
-        }
-        return i64::try_from(count).map(Value::Integer)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+        return count_ascii_class(text, pattern.ends_with('+'),
+            |byte| byte.is_ascii_alphabetic());
     }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
-        // These exact classes match ASCII bytes, not Unicode-wide \\d.
-        // A single scan can count all digits or maximal digit runs.
-        let runs = pattern == "[0-9]+";
-        let mut count = 0usize;
-        let mut previous_digit = false;
-        for byte in text.bytes() {
-            let digit = byte.is_ascii_digit();
-            if digit && (!runs || !previous_digit) { count += 1; }
-            previous_digit = digit;
-        }
-        return i64::try_from(count).map(Value::Integer)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+        return count_ascii_class(text, pattern.ends_with('+'),
+            |byte| byte.is_ascii_digit());
     }
     if pattern == ".+" {
         // Greedy dot-plus matches each maximal nonempty run excluding LF.
@@ -319,5 +312,24 @@ mod native_regexp_predicate_alias_tests {
         assert_eq!(regexp_predicate(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
         assert!(regexp_predicate(&[Value::Text("a".into()), Value::Text("(".into())]).is_err());
         assert!(regexp_predicate_type(&[DataType::Text, DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shared_ascii_class_count_tests {
+    use super::*;
+
+    #[test]
+    fn class_shortcuts_match_regex_for_unicode_and_run_boundaries() {
+        for text in ["", "abc123", "aa11bb22", "é🙂a1Z0", "\nabc\n123", "٩a٣2"] {
+            for pattern in ["[A-Za-z]", "[A-Za-z]+", "[0-9]", "[0-9]+"] {
+                let expected = regex_support::compile(pattern).unwrap()
+                    .find_iter(text).count() as i64;
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), Value::Integer(expected),
+                    "text={text:?} pattern={pattern:?}");
+            }
+        }
     }
 }
