@@ -68,6 +68,19 @@ fn json_quote(args: &[Value]) -> Result<Value> {
     if input.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("JSON_QUOTE input exceeds 16 MiB".into()));
     }
+    if input.is_ascii() && input.bytes().all(|byte|
+        (0x20..0x7f).contains(&byte) && byte != b'"' && byte != b'\\') {
+        let needed = input.len().checked_add(2)
+            .filter(|size| *size <= JSON_QUOTE_LIMIT)
+            .ok_or_else(|| Error::Execution("JSON_QUOTE output exceeds 16 MiB".into()))?;
+        let mut quoted = String::new();
+        quoted.try_reserve_exact(needed)
+            .map_err(|_| Error::Execution("JSON_QUOTE allocation failed".into()))?;
+        quoted.push('"');
+        quoted.push_str(input);
+        quoted.push('"');
+        return Ok(Value::Text(quoted));
+    }
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(input.len().saturating_add(2).min(JSON_QUOTE_LIMIT))
         .map_err(|_| Error::Execution("JSON_QUOTE output allocation failed".into()))?;
@@ -229,5 +242,23 @@ mod exact_quote_allocation_regressions {
         assert!(writer.write_all(&oversized).is_err());
         assert!(writer.exceeded);
         assert_eq!(writer.bytes, b"abc");
+    }
+}
+
+#[cfg(test)]
+mod safe_ascii_json_quote_regressions {
+    use super::*;
+    #[test]
+    fn plain_ascii_matches_serde_and_escaping_keeps_fallback() {
+        for input in ["", "simple", "A-Z_0123 !#$%&'()+,-./:;<=>?@[ ]^_`{|}~",
+                      "quote \"", "backslash \\", "tab\tand\nnewline", "café🙂"] {
+            assert_eq!(json_quote(&[Value::Text(input.into())]).unwrap(),
+                Value::Text(serde_json::to_string(input).unwrap()));
+        }
+        let plain = "x".repeat(100_000);
+        assert_eq!(json_quote(&[Value::Text(plain.clone())]).unwrap(),
+            Value::Text(format!("\"{plain}\"")));
+        assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
+        assert!(json_quote(&[Value::Text("x".repeat(JSON_QUOTE_LIMIT - 1))]).is_err());
     }
 }
