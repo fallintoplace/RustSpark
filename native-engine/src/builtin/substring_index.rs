@@ -383,11 +383,11 @@ mod shared_negative_ring_boundary_tests {
             ("é🙂".repeat(300), "🙂".to_owned()),
             ("aaaaa".repeat(60), "aa".to_owned()),
         ] {
-            let fields = text.split(&delimiter).collect::<Vec<_>>();
+            let fields = text.split(delimiter.as_str()).collect::<Vec<_>>();
             for count in [2usize, 16, 17, 256] {
                 let expected = fields.iter()
                     .skip(fields.len().saturating_sub(count))
-                    .copied().collect::<Vec<_>>().join(&delimiter);
+                    .copied().collect::<Vec<_>>().join(delimiter.as_str());
                 assert_eq!(evaluate(&[
                     Value::Text(text.clone()), Value::Text(delimiter.clone()),
                     Value::Integer(-(count as i64)),
