@@ -289,6 +289,15 @@ fn run() -> Result<()> {
         print!("{}", graph.explain_text());
         return Ok(());
     }
+    // A zero output cap needs only a validated result schema. Blocking
+    // operators such as GROUP BY otherwise scan and spill the entire input.
+    if args.max_rows == Some(0) {
+        control.check()?;
+        let stdout = io::stdout();
+        let mut output = io::BufWriter::new(stdout.lock());
+        write_csv(&schema, std::iter::empty::<Result<Batch>>(), &mut output)?;
+        return control.check();
+    }
     control.check()?;
     let input = stream_execute::execute(&plan, &catalog, &options, control.clone())?;
     let stdout = io::stdout();
