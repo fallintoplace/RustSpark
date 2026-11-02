@@ -1,6 +1,11 @@
 use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
+#[inline]
+pub(super) fn is_ascii_sql_whitespace(byte: u8) -> bool {
+    is_ascii_sql_whitespace(byte)
+}
+
 pub(super) fn character_count(text: &str) -> usize {
     if text.is_ascii() { text.len() } else { text.chars().count() }
 }
@@ -87,5 +92,22 @@ mod ascii_word_count_scan_tests {
         assert_eq!(word_count(&[Value::Text(" a\x0bb\x0cc ".into())]).unwrap(), Value::Integer(3));
         assert_eq!(word_count(&[Value::Text("東京\u{00a0}é".into())]).unwrap(), Value::Integer(2));
         assert_eq!(word_count(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod shared_ascii_whitespace_tests {
+    use super::*;
+
+    #[test]
+    fn sql_whitespace_includes_vertical_tab_but_not_nul() {
+        for byte in [b' ', b'\t', b'\r', b'\n', b'\x0b', b'\x0c'] {
+            assert!(is_ascii_sql_whitespace(byte), "byte={byte}");
+        }
+        for byte in [0, b'A', b'_', b'1'] {
+            assert!(!is_ascii_sql_whitespace(byte), "byte={byte}");
+        }
+        assert_eq!(word_count(&[Value::Text("a\x0bb\x0cc".into())]).unwrap(),
+            Value::Integer(3));
     }
 }
