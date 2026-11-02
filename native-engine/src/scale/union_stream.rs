@@ -197,6 +197,9 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                     return Some(Err(error));
                 }
             };
+            // Empty batches are not distinct keys, including zero-column batches.
+            // Do not consume the only zero-width key slot before a real row arrives.
+            if batch.num_rows() == 0 { continue; }
             // All zero-column rows are the same key. Keep just the first row,
             // with the same 64-byte key footprint and admission checks.
             if batch.schema().is_empty() {
@@ -358,6 +361,36 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                 return Some(batch.take_sorted_owned(&selected));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod union_distinct_empty_zero_width_regressions {
+    use super::*;
+
+    #[test]
+    fn ignores_empty_zero_width_batches_before_a_real_row() {
+        let schema = Schema::new(vec![]).unwrap();
+        let empty = Batch::new_with_row_count(schema.clone(), vec![], 0).unwrap();
+        let populated = Batch::new_with_row_count(schema.clone(), vec![], 3).unwrap();
+        let mut stream = UnionDistinctStream::new(
+            vec![Ok(empty.clone()), Ok(populated), Ok(empty)].into_iter(),
+            std::iter::empty::<Result<Batch>>(),
+            schema, QueryControl::default(), 1, 64,
+        ).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 1);
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn empty_zero_width_input_does_not_charge_the_distinct_budget() {
+        let schema = Schema::new(vec![]).unwrap();
+        let empty = Batch::new_with_row_count(schema.clone(), vec![], 0).unwrap();
+        let mut stream = UnionDistinctStream::new(
+            [Ok(empty)].into_iter(), std::iter::empty::<Result<Batch>>(),
+            schema, QueryControl::default(), 1, 1,
+        ).unwrap();
+        assert!(stream.next().is_none());
     }
 }
 
