@@ -243,6 +243,23 @@ fn infer_kinds(records: &[Vec<String>], columns: usize) -> Vec<DataType> {
     states.into_iter().map(InferredKind::data_type).collect()
 }
 
+// Keep the decoded CSV column buffers within the parser's cell budget and
+// report allocation failures instead of aborting the query process.
+fn allocate_value_columns(width: usize, rows: usize) -> Result<Vec<Vec<Value>>> {
+    width.checked_mul(rows).filter(|&cells| cells <= MAX_CSV_CELLS)
+        .ok_or_else(|| Error::Execution("CSV materialization exceeds cell budget".into()))?;
+    let mut columns = Vec::new();
+    columns.try_reserve_exact(width)
+        .map_err(|_| Error::Execution("CSV column allocation failed".into()))?;
+    for _ in 0..width {
+        let mut column = Vec::new();
+        column.try_reserve_exact(rows)
+            .map_err(|_| Error::Execution("CSV value allocation failed".into()))?;
+        columns.push(column);
+    }
+    Ok(columns)
+}
+
 pub fn from_csv_str(input: &str) -> Result<Batch> {
     // Count the CSV header separately from the table's data-row admission budget.
     let mut records = parse_records_with_limit(
@@ -272,8 +289,7 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
     let row_count = records.len() - 1;
     // Build column vectors directly. Previously the importer allocated a
     // Vec<Value> for every row, then Batch::from_rows transposed them again.
-    let mut columns = (0..schema.len())
-        .map(|_| Vec::with_capacity(row_count)).collect::<Vec<_>>();
+    let mut columns = allocate_value_columns(schema.len(), row_count)?;
     for record in records.into_iter().skip(1) {
         for (index, text) in record.into_iter().enumerate() {
             let value = if text.is_empty() {
@@ -382,12 +398,11 @@ pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
         return Err(Error::Execution("CSV row count limit exceeded".into()));
     }
     let row_count = records.len() - 1;
-    let mut columns = (0..schema.len())
-        .map(|_| Vec::with_capacity(row_count)).collect::<Vec<_>>();
+    if records.iter().skip(1).any(|record| record.len() != schema.len()) {
+        return Err(Error::Parse("CSV row width differs from header".into()));
+    }
+    let mut columns = allocate_value_columns(schema.len(), row_count)?;
     for record in records.into_iter().skip(1) {
-        if record.len() != schema.len() {
-            return Err(Error::Parse("CSV row width differs from header".into()));
-        }
         for (index, text) in record.into_iter().enumerate() {
             let value = if text.is_empty() {
                 Value::Null
@@ -694,5 +709,37 @@ mod row_major_inference_regressions {
         let parsed = from_csv_str(&text).unwrap();
         assert_eq!(parsed.num_rows(), 5);
         assert_eq!(parsed.schema().len(), 96);
+    }
+}
+
+#[cfg(test)]
+mod fallible_eager_csv_materialization_regressions {
+    use super::*;
+
+    #[test]
+    fn refuses_impossible_output_shape_before_allocation() {
+        assert!(matches!(allocate_value_columns(4_096, usize::MAX),
+            Err(Error::Execution(_))));
+        assert!(matches!(allocate_value_columns(usize::MAX, 2),
+            Err(Error::Execution(_))));
+        assert_eq!(allocate_value_columns(0, 100).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn typed_and_inferred_wide_csv_keep_nullable_values_and_order() {
+        let header = (0..192).map(|index| format!("n_{index}"))
+            .collect::<Vec<_>>().join(",");
+        let rows = (0..39).map(|row| (0..192).map(|col|
+            if (row + col) % 13 == 0 { String::new() }
+            else { (row * 17 + col).to_string() }
+        ).collect::<Vec<_>>().join(",")).collect::<Vec<_>>().join("\n");
+        let csv = format!("{header}\n{rows}\n");
+        let inferred = from_csv_str(&csv).unwrap();
+        let typed = from_csv_str_typed(&csv, inferred.schema().clone()).unwrap();
+        assert_eq!(inferred, typed);
+        assert_eq!(typed.num_rows(), 39);
+        assert!(typed.rows().unwrap().iter().any(|row| row.iter().any(Value::is_null)));
+        assert!(matches!(from_csv_str_typed(&format!("{header}\n1,2\n"),
+            typed.schema().clone()), Err(Error::Parse(_))));
     }
 }

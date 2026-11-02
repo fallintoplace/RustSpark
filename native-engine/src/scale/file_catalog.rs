@@ -104,6 +104,8 @@ impl FileCatalog {
         if self.contains_key(key.as_ref()) {
             return Err(Error::Schema(format!("file-backed table already exists: {name}")));
         }
+        self.tables.try_reserve(1)
+            .map_err(|_| Error::Execution("CSV catalog allocation failed".into()))?;
         self.tables.insert(key.into_owned(), CsvTable {
             path: path.as_ref().to_path_buf(), schema, max_record_bytes
         });
@@ -121,6 +123,8 @@ impl FileCatalog {
             .map_err(|err| Error::Execution(format!("Parquet metadata: {err}")))?;
         let empty = arrow_array::RecordBatch::new_empty(builder.schema().clone());
         let schema = crate::arrow_bridge::from_arrow(&empty)?.schema().clone();
+        self.parquet.try_reserve(1)
+            .map_err(|_| Error::Execution("Parquet catalog allocation failed".into()))?;
         self.parquet.insert(key.into_owned(), ParquetTable {
             path: path.to_path_buf(), schema,
         });
@@ -156,7 +160,15 @@ impl FileCatalog {
                 }
             }
         }
-        let count = staged.tables.len() + staged.parquet.len();
+        let count = staged.tables.len().checked_add(staged.parquet.len())
+            .ok_or_else(|| Error::Execution("catalog registration count overflow".into()))?;
+        // Both registry maps must admit their entire staged batches before
+        // any key becomes visible. The second allocation can still fail without
+        // partially publishing the first format.
+        self.tables.try_reserve(staged.tables.len())
+            .map_err(|_| Error::Execution("CSV catalog allocation failed".into()))?;
+        self.parquet.try_reserve(staged.parquet.len())
+            .map_err(|_| Error::Execution("Parquet catalog allocation failed".into()))?;
         self.tables.extend(staged.tables);
         self.parquet.extend(staged.parquet);
         Ok(count)
@@ -492,5 +504,44 @@ mod stable_file_descriptor_catalog_tests {
     fn directories_are_rejected_at_registration_or_open() {
         let dir = std::env::temp_dir();
         assert!(open_regular_source(&dir).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_catalog_atomic_admission_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    fn csv(name: String) -> FileRegistration {
+        FileRegistration::Csv {
+            path: format!("{name}.csv").into(),
+            name,
+            schema: Schema::new(vec![
+                Field::new("value", DataType::Integer, false),
+            ]).unwrap(),
+            max_record_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn registers_many_tables_without_losing_existing_entries() {
+        let mut catalog = FileCatalog::new();
+        assert_eq!(catalog.register_many([csv("existing".into())]).unwrap(), 1);
+        let registrations = (0..512).map(|index| csv(format!("table_{index}")));
+        assert_eq!(catalog.register_many(registrations).unwrap(), 512);
+        assert_eq!(catalog.list().len(), 513);
+        assert_eq!(catalog.get("existing").unwrap().path(), Path::new("existing.csv"));
+        assert_eq!(catalog.get("TABLE_511").unwrap().path(), Path::new("table_511.csv"));
+    }
+
+    #[test]
+    fn failed_late_admission_keeps_the_catalog_unchanged() {
+        let mut catalog = FileCatalog::new();
+        catalog.register_many([csv("existing".into())]).unwrap();
+        let staged = (0..128).map(|index| csv(format!("candidate_{index}")))
+            .chain(std::iter::once(csv("EXISTING".into())));
+        assert!(catalog.register_many(staged).is_err());
+        assert_eq!(catalog.list(), vec!["existing"]);
+        assert!(catalog.get("candidate_0").is_err());
     }
 }

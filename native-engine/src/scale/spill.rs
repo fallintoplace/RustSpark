@@ -323,6 +323,16 @@ impl<W: Write> SpillWriter<W> {
     }
 }
 
+fn push_decoded_value(column: &mut Vec<Value>, value: Value) -> Result<()> {
+    if column.len() == column.capacity() {
+        column.try_reserve(1).map_err(|_| Error::Execution(
+            "spill decoded column allocation failed".into()
+        ))?;
+    }
+    column.push(value);
+    Ok(())
+}
+
 pub struct SpillReader<R: Read> {
     input: BufReader<R>,
     schema: Schema,
@@ -343,7 +353,10 @@ impl<R: Read> SpillReader<R> {
         if &magic != MAGIC { return Err(Error::Parse("invalid spill file signature".into())); }
         let count = read_u32(&mut input)?;
         if count > MAX_FIELDS { return Err(Error::Schema("spill schema has too many fields".into())); }
-        let mut fields = Vec::with_capacity(count);
+        let mut fields = Vec::new();
+        fields.try_reserve_exact(count).map_err(|_| Error::Execution(
+            "spill schema allocation failed".into()
+        ))?;
         for _ in 0..count {
             let name = read_bounded(&mut input, MAX_NAME_BYTES)?;
             let name = String::from_utf8(name)
@@ -382,7 +395,10 @@ impl<R: Read> SpillReader<R> {
     ) -> Result<Batch> {
         let field = self.schema.field(0)?;
         let (data_type, nullable) = (field.data_type, field.nullable);
-        let mut values = Vec::with_capacity(rows.min(1024));
+        let mut values = Vec::new();
+        values.try_reserve_exact(rows.min(1024)).map_err(|_| Error::Execution(
+            "spill decoded column allocation failed".into()
+        ))?;
         for _ in 0..rows {
             let tag = read_byte(&mut self.input)?;
             let value = match (data_type, tag) {
@@ -403,7 +419,7 @@ impl<R: Read> SpillReader<R> {
                 }
                 _ => return Err(Error::Parse("spill value does not match schema".into())),
             };
-            values.push(value);
+            push_decoded_value(&mut values, value)?;
         }
         Batch::from_validated_columns(self.schema.clone(), vec![values], rows)
     }
@@ -415,14 +431,17 @@ impl<R: Read> SpillReader<R> {
         &mut self, rows: usize, mut bytes_seen: usize,
     ) -> Result<Batch> {
         let nullable = self.schema.field(0)?.nullable;
-        let mut values = Vec::with_capacity(rows.min(1024));
+        let mut values = Vec::new();
+        values.try_reserve_exact(rows.min(1024)).map_err(|_| Error::Execution(
+            "spill decoded column allocation failed".into()
+        ))?;
         for _ in 0..rows {
             let value = match read_byte(&mut self.input)? {
                 0 if nullable => Value::Null,
                 5 => Value::Text(read_text_bounded(&mut self.input, &mut bytes_seen)?),
                 _ => return Err(Error::Parse("spill value does not match schema".into())),
             };
-            values.push(value);
+            push_decoded_value(&mut values, value)?;
         }
         Batch::from_validated_columns(self.schema.clone(), vec![values], rows)
     }
@@ -471,8 +490,17 @@ impl<R: Read> SpillReader<R> {
         if self.schema.len() == 1 && self.schema.field(0)?.data_type == DataType::Text {
             return Ok(Some(self.read_single_text_column(rows, bytes_seen)?));
         }
-        let mut columns = (0..self.schema.len())
-            .map(|_| Vec::with_capacity(initial_capacity)).collect::<Vec<_>>();
+        let mut columns = Vec::new();
+        columns.try_reserve_exact(self.schema.len()).map_err(|_| Error::Execution(
+            "spill decoded schema allocation failed".into()
+        ))?;
+        for _ in 0..self.schema.len() {
+            let mut cells = Vec::new();
+            cells.try_reserve_exact(initial_capacity).map_err(|_| Error::Execution(
+                "spill decoded column allocation failed".into()
+            ))?;
+            columns.push(cells);
+        }
         for _ in 0..rows {
             for (column, field) in columns.iter_mut().zip(self.schema.fields()) {
                 let (data_type, nullable) = (field.data_type, field.nullable);
@@ -509,7 +537,7 @@ impl<R: Read> SpillReader<R> {
                     5 => Value::Text(read_text_bounded(&mut self.input, &mut bytes_seen)?),
                     _ => return Err(Error::Parse("invalid spill value tag".into())),
                 };
-                column.push(value);
+                push_decoded_value(column, value)?;
             }
         }
         Ok(Some(Batch::from_validated_columns(self.schema.clone(), columns, rows)?))
@@ -1410,5 +1438,41 @@ mod bounded_wide_spill_startup_tests {
         let truncated = &encoded[..encoded.len() - 1];
         let mut reader = SpillReader::new(truncated, 256).unwrap();
         assert!(reader.next_batch().is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_spill_value_growth_regressions {
+    use super::*;
+
+    #[test]
+    fn scalar_and_multicolumn_decoders_grow_beyond_initial_capacity() {
+        let scalar_schema = Schema::new(vec![
+            Field::new("value", DataType::Integer, true)
+        ]).unwrap();
+        let mixed_schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("name", DataType::Text, true),
+            Field::new("enabled", DataType::Boolean, true),
+        ]).unwrap();
+        let scalar = Batch::from_rows(scalar_schema.clone(),
+            (0..2300).map(|index| vec![
+                if index % 7 == 0 { Value::Null } else { Value::Integer(index) }
+            ]).collect()).unwrap();
+        let mixed = Batch::from_rows(mixed_schema.clone(),
+            (0..2300).map(|index| vec![
+                Value::Integer(index),
+                if index % 7 == 0 { Value::Null }
+                    else { Value::Text(format!("hello-{index}-🙂")) },
+                Value::Boolean(index % 2 == 0),
+            ]).collect()).unwrap();
+        for (schema, expected) in [(scalar_schema, scalar), (mixed_schema, mixed)] {
+            let mut writer = SpillWriter::new(Vec::new(), schema).unwrap();
+            writer.write_batch(&expected).unwrap();
+            let wire = writer.finish().unwrap();
+            let mut reader = SpillReader::new(wire.as_slice(), 3000).unwrap();
+            assert_eq!(reader.next_batch().unwrap(), Some(expected));
+            assert_eq!(reader.next_batch().unwrap(), None);
+        }
     }
 }
