@@ -84,6 +84,49 @@ fn bound_distinct_comparison<'a>(
     Ok(Some((batch.column(index)?, literal, *negated ^ inverse)))
 }
 
+
+enum NumericOperand<'a> {
+    Column(&'a [Value]),
+    Literal(&'a Value),
+}
+
+impl NumericOperand<'_> {
+    fn at(&self, row: usize) -> &Value {
+        match self {
+            Self::Column(values) => &values[row],
+            Self::Literal(value) => value,
+        }
+    }
+}
+
+fn bound_numeric_operand<'a>(
+    batch: &'a Batch, expression: &'a Expr,
+) -> Result<Option<NumericOperand<'a>>> {
+    match expression {
+        Expr::Column(name) => Ok(Some(NumericOperand::Column(
+            batch.column(batch.schema().column(name)?)?,
+        ))),
+        Expr::Literal(value) => Ok(Some(NumericOperand::Literal(value))),
+        _ => Ok(None),
+    }
+}
+
+// Binary numeric expressions with direct operands need no AST dispatch,
+// repeated column lookup or temporary owned Value on each row.
+fn bound_arithmetic<'a>(
+    batch: &'a Batch, expression: &'a Expr,
+) -> Result<Option<(NumericOperand<'a>, crate::expr::BinaryOp, NumericOperand<'a>)>> {
+    use crate::expr::BinaryOp;
+    let Expr::Binary { left, op, right } = expression else { return Ok(None); };
+    if !matches!(op, BinaryOp::Add | BinaryOp::Subtract
+        | BinaryOp::Multiply | BinaryOp::Divide) {
+        return Ok(None);
+    }
+    let Some(left) = bound_numeric_operand(batch, left)? else { return Ok(None); };
+    let Some(right) = bound_numeric_operand(batch, right)? else { return Ok(None); };
+    Ok(Some((left, *op, right)))
+}
+
 pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
     selections.iter().try_for_each(|item| item.expression.validate_budget())?;
     let schema = Schema::new(
@@ -130,6 +173,13 @@ pub fn project(batch: &Batch, selections: &[Selection]) -> Result<Batch> {
                         .unwrap_or_else(|| value != literal),
                 };
                 column.push(Value::Boolean(if negated { !distinct } else { distinct }));
+            }
+        } else if let Some((left, op, right)) =
+            bound_arithmetic(batch, &selection.expression)? {
+            for row in 0..batch.num_rows() {
+                let value = crate::expr::evaluate_binary(left.at(row), op, right.at(row))?;
+                charge_projected_value(&mut generated_bytes, &value, 1)?;
+                column.push(value);
             }
         } else {
             for row in 0..batch.num_rows() {
@@ -196,6 +246,17 @@ pub fn project_owned(batch: Batch, selections: &[Selection]) -> Result<Batch> {
                         };
                         Ok(Value::Boolean(if negated { !distinct } else { distinct }))
                     }).collect::<Result<Vec<_>>>()?
+                } else if let Some((left, op, right)) =
+                    bound_arithmetic(&batch, expression)? {
+                    let mut values = Vec::new();
+                    values.try_reserve_exact(rows)
+                        .map_err(|_| Error::Execution("arithmetic projection allocation failed".into()))?;
+                    for row in 0..rows {
+                        let value = crate::expr::evaluate_binary(left.at(row), op, right.at(row))?;
+                        charge_projected_value(&mut generated_bytes, &value, 1)?;
+                        values.push(value);
+                    }
+                    values
                 } else {
                     let mut values = Vec::with_capacity(rows);
                     for row in 0..rows {
@@ -766,6 +827,72 @@ mod direct_project_expression_budget_tests {
             project_owned(empty.clone(), &[selection]),
         ] {
             assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod bound_arithmetic_projection_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+    fn input() -> Batch {
+        Batch::from_rows(Schema::new(vec![
+            Field::new("x", DataType::Integer, true),
+            Field::new("y", DataType::Float, true),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap(), vec![
+            vec![Value::Integer(4), Value::Float(2.5), Value::Text("a".into())],
+            vec![Value::Null, Value::Float(3.0), Value::Text("🙂".into())],
+            vec![Value::Integer(-8), Value::Null, Value::Null],
+            vec![Value::Integer(0), Value::Float(10.0), Value::Text("z".into())],
+        ]).unwrap()
+    }
+
+    #[test]
+    fn both_ownership_paths_agree_with_rowwise_reference() {
+        let batch = input();
+        let operations = [
+            BinaryOp::Add, BinaryOp::Subtract, BinaryOp::Multiply, BinaryOp::Divide,
+        ];
+        for op in operations {
+            for expr in [
+                Expr::binary(Expr::Column("x".into()), op,
+                    Expr::Literal(Value::Integer(3))),
+                Expr::binary(Expr::Column("y".into()), op,
+                    Expr::Column("x".into())),
+                Expr::binary(Expr::Literal(Value::Integer(11)), op,
+                    Expr::Column("x".into())),
+            ] {
+                let expected = (0..batch.num_rows()).map(|row|
+                    expr.evaluate(&batch, row)).collect::<Result<Vec<_>>>().unwrap();
+                let selections = vec![
+                    Selection::new(expr, "result"),
+                    Selection::new(Expr::Column("note".into()), "note"),
+                ];
+                for actual in [
+                    project(&batch, &selections).unwrap(),
+                    project_owned(batch.clone(), &selections).unwrap(),
+                ] {
+                    assert_eq!(actual.column(0).unwrap(), expected, "op={op:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_and_division_errors_remain_visible() {
+        let batch = Batch::from_rows(Schema::new(vec![
+            Field::new("x", DataType::Integer, false)
+        ]).unwrap(), vec![vec![Value::Integer(i64::MAX)], vec![Value::Integer(0)]]).unwrap();
+        for (op, rhs) in [
+            (BinaryOp::Add, Value::Integer(1)),
+            (BinaryOp::Divide, Value::Integer(0)),
+        ] {
+            let selections = [Selection::new(Expr::binary(
+                Expr::Column("x".into()), op, Expr::Literal(rhs)), "v")];
+            assert!(project(&batch, &selections).is_err());
+            assert!(project_owned(batch.clone(), &selections).is_err());
         }
     }
 }
