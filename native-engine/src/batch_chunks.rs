@@ -524,6 +524,7 @@ mod owned_concat_column_buffer_reuse_regressions {
 #[cfg(test)]
 mod fallible_concatenation_reservation_regressions {
     use super::*;
+    use crate::schema::Schema;
 
     #[test]
     fn impossible_allocations_fail_without_panicking_or_partial_publication() {
