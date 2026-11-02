@@ -705,6 +705,34 @@ impl Parser {
                 self.expect_symbol(')')?;
                 Ok(Expr::Call { name: word, args })
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("TRIM")
+                && self.peek() == Some(&Token::Symbol('('))
+                && matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Word(direction)) if ["LEADING", "TRAILING", "BOTH"]
+                    .iter().any(|keyword| direction.eq_ignore_ascii_case(keyword))) =>
+            {
+                self.expect_symbol('(')?;
+                let function = if self.take_word("LEADING") {
+                    "ltrim"
+                } else if self.take_word("TRAILING") {
+                    "rtrim"
+                } else {
+                    self.expect_word("BOTH")?;
+                    "btrim"
+                };
+                let characters = if self.take_word("FROM") {
+                    None
+                } else {
+                    let chars = self.expression(0)?;
+                    self.expect_word("FROM")?;
+                    Some(chars)
+                };
+                let value = self.expression(0)?;
+                self.expect_symbol(')')?;
+                let mut args = vec![value];
+                if let Some(chars) = characters { args.push(chars); }
+                Ok(Expr::Call { name: function.into(), args })
+            }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
                 if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
