@@ -66,9 +66,18 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                         // promotion is supported by native set schemas.
                         (|| -> Result<Batch> {
                             let rows = batch.num_rows();
-                            let source_types = batch.schema().fields().iter()
-                                .map(|field| field.data_type).collect::<Vec<_>>();
-                            let mut columns = Vec::with_capacity(self.schema.len());
+                            let mut source_types = Vec::new();
+                            source_types.try_reserve_exact(batch.schema().len())
+                                .map_err(|_| Error::Execution(
+                                    "UNION source type allocation failed".into()
+                                ))?;
+                            source_types.extend(batch.schema().fields().iter()
+                                .map(|field| field.data_type));
+                            let mut columns = Vec::new();
+                            columns.try_reserve_exact(self.schema.len())
+                                .map_err(|_| Error::Execution(
+                                    "UNION column allocation failed".into()
+                                ))?;
                             // Move unchanged column vectors and TEXT payloads
                             // directly into the UNION result. Only promoted
                             // INTEGER columns need new numeric values.
@@ -76,12 +85,18 @@ where L: Iterator<Item = Result<Batch>>, R: Iterator<Item = Result<Batch>>
                                 .zip(batch.into_columns()).enumerate() {
                                 if source_type == crate::schema::DataType::Integer &&
                                     self.schema.field(index)?.data_type == crate::schema::DataType::Float {
-                                    columns.push(values.into_iter().map(|value| match value {
+                                    let mut promoted = Vec::new();
+                                    promoted.try_reserve_exact(values.len())
+                                        .map_err(|_| Error::Execution(
+                                            "UNION numeric promotion allocation failed".into()
+                                        ))?;
+                                    promoted.extend(values.into_iter().map(|value| match value {
                                         crate::scalar::Value::Integer(number) =>
                                             crate::scalar::Value::Float(number as f64),
                                         crate::scalar::Value::Null => crate::scalar::Value::Null,
                                         _ => unreachable!("validated integer input batch"),
-                                    }).collect());
+                                    }));
+                                    columns.push(promoted);
                                 } else {
                                     columns.push(values);
                                 }
@@ -904,5 +919,41 @@ mod composite_union_single_entry_lookup_regressions {
         let rows = stream.next().unwrap().unwrap().rows().unwrap();
         assert_eq!(rows, vec![new_row, other_row]);
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod fallible_union_numeric_promotion_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn mixed_integer_float_union_retains_nullable_text_and_input_order() {
+        let left_schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("description", DataType::Text, true),
+        ]).unwrap();
+        let output_schema = Schema::new(vec![
+            Field::new("id", DataType::Float, true),
+            Field::new("description", DataType::Text, true),
+        ]).unwrap();
+        let left = Batch::from_rows(left_schema, vec![
+            vec![Value::Integer(9007199254740993), Value::Text("🙂".repeat(512))],
+            vec![Value::Null, Value::Null],
+        ]).unwrap();
+        let right = Batch::from_rows(output_schema.clone(), vec![
+            vec![Value::Float(1.5), Value::Text("end".into())]
+        ]).unwrap();
+        let batches = UnionAllStream::new(
+            [Ok(left)].into_iter(), [Ok(right)].into_iter(),
+            output_schema, QueryControl::default()
+        ).collect::<Result<Vec<_>>>().unwrap();
+        let rows = batches.into_iter()
+            .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Float(9007199254740993i64 as f64), Value::Text("🙂".repeat(512))],
+            vec![Value::Null, Value::Null],
+            vec![Value::Float(1.5), Value::Text("end".into())],
+        ]);
     }
 }
