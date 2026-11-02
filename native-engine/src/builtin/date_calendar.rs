@@ -161,6 +161,20 @@ fn next_day(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(iso_text(date)))
 }
 
+fn trunc_date(args: &[Value]) -> Result<Value> {
+    let Some(mut date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    let Some(format) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if ["YEAR", "YYYY", "YY"].iter().any(|name| format.eq_ignore_ascii_case(name)) {
+        date.month = 1;
+        date.day = 1;
+    } else if ["MONTH", "MON", "MM"].iter().any(|name| format.eq_ignore_ascii_case(name)) {
+        date.day = 1;
+    } else {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Text(iso_text(date)))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
@@ -178,6 +192,8 @@ pub(super) const FUNCTIONS: &[Function] = &[
         result_type: date_text_type, call: monthname },
     Function { name: "next_day", min_args: 2, max_args: 2,
         result_type: text_pair_type, call: next_day },
+    Function { name: "trunc", min_args: 2, max_args: 2,
+        result_type: text_pair_type, call: trunc_date },
 ];
 
 #[cfg(test)]
@@ -316,5 +332,24 @@ mod next_day_tests {
         assert_eq!(next_day(&[Value::Null, Value::Text("FRI".into())]).unwrap(), Value::Null);
         assert_eq!(next_day(&[Value::Text("2024-01-01".into()), Value::Null]).unwrap(), Value::Null);
         assert!(next_day(&[Value::Text("9999-12-31".into()), Value::Text("SUN".into())]).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod trunc_date_tests {
+    use super::*;
+    #[test]
+    fn truncates_calendar_years_and_months() {
+        assert_eq!(trunc_date(&[Value::Text("2024-02-29".into()), Value::Text("YEAR".into())]).unwrap(),
+            Value::Text("2024-01-01".into()));
+        assert_eq!(trunc_date(&[Value::Text("2024-02-29".into()), Value::Text("mm".into())]).unwrap(),
+            Value::Text("2024-02-01".into()));
+        assert_eq!(trunc_date(&[Value::Text("2024-12-31".into()), Value::Text("mon".into())]).unwrap(),
+            Value::Text("2024-12-01".into()));
+        assert_eq!(trunc_date(&[Value::Text("2024-12-31".into()), Value::Text("DAY".into())]).unwrap(),
+            Value::Null);
+        assert_eq!(trunc_date(&[Value::Null, Value::Text("YEAR".into())]).unwrap(), Value::Null);
+        assert_eq!(trunc_date(&[Value::Text("2024-01-01".into()), Value::Null]).unwrap(), Value::Null);
     }
 }
