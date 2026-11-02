@@ -32,6 +32,7 @@ fn contains(args: &[Value]) -> Result<Value> {
 
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "startswith", min_args: 2, max_args: 2, result_type: output, call: startswith },
+    Function { name: "starts_with", min_args: 2, max_args: 2, result_type: output, call: startswith },
     Function { name: "endswith", min_args: 2, max_args: 2, result_type: output, call: endswith },
     Function { name: "contains", min_args: 2, max_args: 2, result_type: output, call: contains },
 ];
@@ -83,5 +84,20 @@ mod tests {
         let rows = executor::execute(&sql::parse_sql(sql).unwrap(), &catalog)
             .unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Boolean(true), Value::Boolean(true), Value::Boolean(true)]]);
+    }
+}
+
+#[cfg(test)]
+mod starts_with_sql_tests {
+    use crate::{catalog::Catalog, executor, scalar::Value, sql};
+    #[test]
+    fn starts_with_handles_unicode_empty_prefix_and_nulls() {
+        let plan = sql::parse_sql("SELECT STARTS_WITH('école🙂', 'é'), STARTS_WITH('abc', ''), STARTS_WITH('abc', 'b'), STARTS_WITH(NULL, 'x')").unwrap();
+        let rows = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Boolean(true), Value::Boolean(true), Value::Boolean(false), Value::Null,
+        ]]);
+        let invalid = sql::parse_sql("SELECT STARTS_WITH(1, 'a')").unwrap();
+        assert!(executor::execute(&invalid, &Catalog::new()).is_err());
     }
 }
