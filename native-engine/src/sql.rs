@@ -343,6 +343,59 @@ impl Parser {
                     let insensitive = self.take_word("ILIKE");
                     let regex = self.take_word("RLIKE") || self.take_word("REGEXP");
                     if !insensitive && !regex { self.expect_word("LIKE")?; }
+                    // Spark supports LIKE ANY/SOME/ALL (and ILIKE variants).
+                    // Lower quantified patterns through the existing SQL
+                    // three-valued boolean operators with short-circuiting.
+                    if !regex && (self.peek_word("ANY") ||
+                        self.peek_word("SOME") || self.peek_word("ALL")) {
+                        let all = self.take_word("ALL");
+                        if !all && !self.take_word("ANY") {
+                            self.expect_word("SOME")?;
+                        }
+                        self.expect_symbol('(')?;
+                        if self.take_symbol(')') {
+                            return Err(Error::Parse("quantified LIKE needs a pattern".into()));
+                        }
+                        let mut predicates = Vec::new();
+                        loop {
+                            if predicates.len() >= 128 {
+                                return Err(Error::Parse("quantified LIKE exceeds 128 patterns".into()));
+                            }
+                            let pattern = self.expression(0)?;
+                            let (subject, pattern) = if insensitive {
+                                (
+                                    Expr::Call { name: "lower".into(), args: vec![left.clone()] },
+                                    Expr::Call { name: "lower".into(), args: vec![pattern] },
+                                )
+                            } else { (left.clone(), pattern) };
+                            predicates.push(Expr::Like {
+                                value: Box::new(subject),
+                                pattern: Box::new(pattern),
+                                escape: None,
+                            });
+                            if self.take_symbol(')') { break; }
+                            self.expect_symbol(',')?;
+                        }
+                        let op = if all { BinaryOp::And } else { BinaryOp::Or };
+                        // A left-folded 128-pattern predicate would exceed
+                        // the native expression depth guard. Combine adjacent
+                        // pairs into a balanced tree while keeping the original
+                        // left-to-right short-circuit evaluation order.
+                        while predicates.len() > 1 {
+                            let mut next = Vec::with_capacity(predicates.len().div_ceil(2));
+                            let mut iter = predicates.into_iter();
+                            while let Some(left) = iter.next() {
+                                next.push(match iter.next() {
+                                    Some(right) => Expr::binary(left, op, right),
+                                    None => left,
+                                });
+                            }
+                            predicates = next;
+                        }
+                        let expression = predicates.pop().expect("quantified list not empty");
+                        left = if negate { Expr::Not(Box::new(expression)) } else { expression };
+                        continue;
+                    }
                     let pattern = self.expression(4)?;
                     let escape = if !regex && self.take_word("ESCAPE") {
                         Some(Box::new(self.expression(4)?))
@@ -2292,3 +2345,63 @@ mod spark_minus_alias_sql_tests {
     }
 }
 
+
+#[cfg(test)]
+mod quantified_like_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, scalar::Value};
+
+    fn evaluate_one(query: &str) -> Value {
+        let plan = parse_sql(query).unwrap();
+        executor::execute(&plan, &Catalog::new()).unwrap()
+            .rows().unwrap()[0][0].clone()
+    }
+
+    #[test]
+    fn any_all_some_and_ilike_preserve_three_valued_logic() {
+        for (query, expected) in [
+            ("SELECT 'Spark' LIKE ANY ('no%', 'Spa%')", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE SOME ('%par%', 'no%')", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE ALL ('S%', '%ark')", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE ALL ('S%', 'x%')", Value::Boolean(false)),
+            ("SELECT 'Spark' LIKE ANY ('x%', NULL)", Value::Null),
+            ("SELECT 'Spark' LIKE ALL ('S%', NULL)", Value::Null),
+            ("SELECT 'Spark' LIKE ANY ('S%', NULL)", Value::Boolean(true)),
+            ("SELECT 'Spark' LIKE ALL ('x%', NULL)", Value::Boolean(false)),
+            ("SELECT 'Spark' ILIKE ANY ('spa%', 'x%')", Value::Boolean(true)),
+            ("SELECT 'Spark' NOT LIKE ALL ('S%', 'x%')", Value::Boolean(true)),
+        ] {
+            assert_eq!(evaluate_one(query), expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn long_quantified_pattern_lists_stay_within_expression_depth_budget() {
+        let patterns = std::iter::repeat_n("'no%'", 127)
+            .chain(std::iter::once("'Spa%'"))
+            .collect::<Vec<_>>().join(",");
+        let query = format!("SELECT 'Spark' LIKE ANY ({patterns})");
+        assert_eq!(evaluate_one(&query), Value::Boolean(true));
+    }
+
+    #[test]
+    fn quantifier_rejects_empty_and_malformed_lists() {
+        for query in [
+            "SELECT 'x' LIKE ANY ()",
+            "SELECT 'x' LIKE ALL ()",
+            "SELECT 'x' ILIKE ANY ('a',)",
+        ] {
+            assert!(parse_sql(query).is_err(), "{query}");
+        }
+    }
+
+    #[test]
+    fn short_circuit_does_not_evaluate_discarded_pattern() {
+        assert_eq!(evaluate_one(
+            "SELECT 'hello' LIKE ANY ('hello', RAISE_ERROR('late'))"
+        ), Value::Boolean(true));
+        assert_eq!(evaluate_one(
+            "SELECT 'hello' LIKE ALL ('wrong', RAISE_ERROR('late'))"
+        ), Value::Boolean(false));
+    }
+}
