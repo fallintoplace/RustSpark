@@ -11,6 +11,41 @@ fn normalized_uppercase(name: &str) -> Cow<'_, str> {
 }
 
 
+/// Add calendar months to a native ISO date, clipping the day to the
+/// last valid date in the destination month (Spark ADD_MONTHS semantics).
+fn add_iso_months(date: &str, offset: i64) -> Result<String> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || bytes.iter().enumerate().any(|(i, byte)|
+            i != 4 && i != 7 && !byte.is_ascii_digit()) {
+        return Err(Error::Type("ADD_MONTHS requires YYYY-MM-DD".into()));
+    }
+    let year: i64 = date[0..4].parse().expect("checked ISO year");
+    let month: i64 = date[5..7].parse().expect("checked ISO month");
+    let day: i64 = date[8..10].parse().expect("checked ISO day");
+    let days_in_month = |year: i64, month: i64| -> i64 {
+        match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+            2 => 28,
+            _ => 0,
+        }
+    };
+    if year == 0 || day == 0 || day > days_in_month(year, month) {
+        return Err(Error::Type("ADD_MONTHS received an invalid calendar date".into()));
+    }
+    let total = (year * 12 + month - 1).checked_add(offset)
+        .ok_or_else(|| Error::Execution("ADD_MONTHS numeric overflow".into()))?;
+    let new_year = total.div_euclid(12);
+    let new_month = total.rem_euclid(12) + 1;
+    if !(1..=9999).contains(&new_year) {
+        return Err(Error::Execution("ADD_MONTHS result outside ISO range".into()));
+    }
+    let new_day = day.min(days_in_month(new_year, new_month));
+    Ok(format!("{new_year:04}-{new_month:02}-{new_day:02}"))
+}
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
@@ -64,6 +99,18 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if args.len() < 2 { return Err(Error::Parse("CONCAT requires at least two arguments".into())); }
             for arg in args {
                 if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("CONCAT requires text".into())); }
+            }
+            Ok(DataType::Text)
+        },
+        "ADD_MONTHS" => {
+            if args.len() != 2 {
+                return Err(Error::Parse("ADD_MONTHS expects two arguments".into()));
+            }
+            if (!matches!(&args[0], Expr::Literal(Value::Null))
+                && args[0].output_type(schema)? != DataType::Text)
+                || (!matches!(&args[1], Expr::Literal(Value::Null))
+                    && args[1].output_type(schema)? != DataType::Integer) {
+                return Err(Error::Type("ADD_MONTHS requires an ISO date and integer months".into()));
             }
             Ok(DataType::Text)
         },
@@ -331,6 +378,12 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
             Ok(Value::Text(text))
+        },
+        "ADD_MONTHS" => match args {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [Value::Text(date), Value::Integer(months)] =>
+                Ok(Value::Text(add_iso_months(date, *months)?)),
+            _ => Err(Error::Type("ADD_MONTHS requires an ISO date and integer months".into())),
         },
         "SUBSTRING" | "SUBSTR" => match args {
             [Value::Text(text), Value::Integer(start)] => {
@@ -680,5 +733,38 @@ mod spark_format_string_tests {
         assert!(evaluate("printf", &[Value::Text("a".repeat(4097))]).is_err());
         assert!(evaluate("printf", &[Value::Text("%s".into()),
             Value::Text("x".repeat(1024 * 1024 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_add_months_tests {
+    use super::*;
+
+    #[test]
+    fn shifts_months_and_clips_end_of_month() {
+        let date = |s: &str, n: i64| evaluate("add_months", &[
+            Value::Text(s.into()), Value::Integer(n),
+        ]).unwrap();
+        assert_eq!(date("1993-07-01", 3), Value::Text("1993-10-01".into()));
+        assert_eq!(date("2000-01-31", 1), Value::Text("2000-02-29".into()));
+        assert_eq!(date("1995-03-31", -1), Value::Text("1995-02-28".into()));
+        assert_eq!(date("1999-12-31", 1), Value::Text("2000-01-31".into()));
+        assert_eq!(evaluate("add_months", &[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn refuses_invalid_dates_and_overflows() {
+        assert!(evaluate("add_months", &[
+            Value::Text("1995-02-29".into()), Value::Integer(1),
+        ]).is_err());
+        assert!(evaluate("add_months", &[
+            Value::Text("9999-12-31".into()), Value::Integer(1),
+        ]).is_err());
+        assert!(evaluate("add_months", &[
+            Value::Text("1993-07-01".into()), Value::Integer(i64::MAX),
+        ]).is_err());
+        let schema = Schema::new(vec![]).unwrap();
+        assert!(return_type("ADD_MONTHS", &[Expr::Literal(Value::Integer(1)),
+            Expr::Literal(Value::Integer(1))], &schema).is_err());
     }
 }
