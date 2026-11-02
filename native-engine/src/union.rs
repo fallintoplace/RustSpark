@@ -2,29 +2,67 @@ use crate::{batch::Batch, scalar::Value, Error, Result};
 #[cfg(test)]
 use crate::schema::Schema;
 
-pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
-    let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
-    let count = left
-        .num_rows()
-        .checked_add(right.num_rows())
+// Bound the fully materialized result, including text payloads, before
+// allocating output columns or numeric-widening temporary batches.
+const MAX_UNION_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+
+fn preflight_union_bytes(
+    left: &Batch, right: &Batch, max_bytes: usize,
+) -> Result<usize> {
+    let count = left.num_rows().checked_add(right.num_rows())
         .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
-    let mut columns = Vec::with_capacity(schema.len());
+    let schema = crate::set_ops::compatible_schema(left, right)?;
+    let base = count.checked_mul(schema.len())
+        .and_then(|cells| cells.checked_mul(std::mem::size_of::<Value>()))
+        .ok_or_else(|| Error::Execution("UNION output byte estimate overflow".into()))?;
+    if base > max_bytes {
+        return Err(Error::Execution("UNION output byte budget exceeded".into()));
+    }
+    let mut bytes = base;
+    for input in [left, right] {
+        for (index, field) in input.schema().fields().iter().enumerate() {
+            if field.data_type != crate::schema::DataType::Text { continue; }
+            for cell in input.column(index)? {
+                if let Value::Text(text) = cell {
+                    bytes = bytes.checked_add(text.len())
+                        .filter(|&size| size <= max_bytes)
+                        .ok_or_else(|| Error::Execution(
+                            "UNION output byte budget exceeded".into()
+                        ))?;
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
+pub fn union_all(left: &Batch, right: &Batch) -> Result<Batch> {
+    union_all_with_budget(left, right, MAX_UNION_OUTPUT_BYTES)
+}
+
+/// Reject oversized materialized unions before cloning large text payloads.
+pub fn union_all_with_budget(left: &Batch, right: &Batch, max_bytes: usize) -> Result<Batch> {
+    let count = preflight_union_bytes(left, right, max_bytes)?;
+    let (left, right, schema) = crate::set_ops::align_set_inputs(left, right)?;
+    let mut columns = Vec::new();
+    columns.try_reserve_exact(schema.len())
+        .map_err(|_| Error::Execution("UNION output column allocation failed".into()))?;
     for column in 0..schema.len() {
-        let mut values = Vec::with_capacity(count);
+        let mut values = Vec::new();
+        values.try_reserve_exact(count)
+            .map_err(|_| Error::Execution("UNION output allocation failed".into()))?;
         values.extend_from_slice(left.column(column)?);
         values.extend_from_slice(right.column(column)?);
         columns.push(values);
     }
-    // Inputs and numeric widening are already validated for this schema.
     Batch::from_validated_columns(schema, columns, count)
 }
 
 /// Concatenate temporary inputs by consuming their columns. A changed numeric
 /// result type still widens INTEGER values to FLOAT before appending.
 pub fn union_all_owned(left: Batch, right: Batch) -> Result<Batch> {
+    let count = preflight_union_bytes(&left, &right, MAX_UNION_OUTPUT_BYTES)?;
     let schema = crate::set_ops::compatible_schema(&left, &right)?;
-    let count = left.num_rows().checked_add(right.num_rows())
-        .ok_or_else(|| Error::Execution("UNION row count overflow".into()))?;
     let left_types = left.schema().fields().iter().map(|field| field.data_type)
         .collect::<Vec<_>>();
     let right_types = right.schema().fields().iter().map(|field| field.data_type)
@@ -405,5 +443,38 @@ mod union_all_validated_column_tests {
         let a = Batch::new_with_row_count(empty.clone(), vec![], 5).unwrap();
         let b = Batch::new_with_row_count(empty, vec![], 3).unwrap();
         assert_eq!(union_all_owned(a, b).unwrap().num_rows(), 8);
+    }
+}
+
+#[cfg(test)]
+mod bounded_union_output_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn charges_text_and_fixed_slots_before_constructing_output() {
+        let schema = Schema::new(vec![Field::new("payload", DataType::Text, true)]).unwrap();
+        let large = Value::Text("x".repeat(2048));
+        let left = Batch::from_rows(schema.clone(), vec![vec![large.clone()], vec![Value::Null]]).unwrap();
+        let right = Batch::from_rows(schema, vec![vec![large]]).unwrap();
+        let exact = 3 * std::mem::size_of::<Value>() + 4096;
+        assert!(union_all_with_budget(&left, &right, exact - 1).is_err());
+        let result = union_all_with_budget(&left, &right, exact).unwrap();
+        assert_eq!(result.num_rows(), 3);
+        assert_eq!(result, union_all_owned(left, right).unwrap());
+    }
+
+    #[test]
+    fn numeric_widening_and_empty_schema_remain_valid() {
+        let int_schema = Schema::new(vec![Field::new("a", DataType::Integer, false)]).unwrap();
+        let float_schema = Schema::new(vec![Field::new("b", DataType::Float, false)]).unwrap();
+        let left = Batch::from_rows(int_schema, vec![vec![Value::Integer(2)]]).unwrap();
+        let right = Batch::from_rows(float_schema, vec![vec![Value::Float(3.5)]]).unwrap();
+        let result = union_all_with_budget(&left, &right, 2 * std::mem::size_of::<Value>()).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Float(2.0)], vec![Value::Float(3.5)],
+        ]);
+        let zero = Batch::new_with_row_count(Schema::new(vec![]).unwrap(), vec![], 3).unwrap();
+        assert_eq!(union_all_with_budget(&zero, &zero, 0).unwrap().num_rows(), 6);
     }
 }
