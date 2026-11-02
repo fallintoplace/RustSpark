@@ -217,12 +217,52 @@ fn fast_null_test<'a>(batch: &'a Batch, predicate: &Expr)
     Ok(Some((batch.column(index)?, select_null, nullable)))
 }
 
+// A handful of literal choices can be tested without allocating a hash
+// table. Large lists still use O(1)-average membership lookups.
+enum LiteralKeys<T> {
+    Small(Vec<T>),
+    Hashed(std::collections::HashSet<T>),
+}
+
+impl<T: Eq + std::hash::Hash> LiteralKeys<T> {
+    fn new(choice_count: usize) -> Self {
+        if choice_count <= 4 {
+            Self::Small(Vec::with_capacity(choice_count))
+        } else {
+            Self::Hashed(std::collections::HashSet::with_capacity(choice_count))
+        }
+    }
+
+    fn insert(&mut self, value: T) {
+        match self {
+            Self::Small(values) => {
+                if !values.contains(&value) { values.push(value); }
+            }
+            Self::Hashed(values) => { values.insert(value); }
+        }
+    }
+
+    fn contains(&self, value: &T) -> bool {
+        match self {
+            Self::Small(values) => values.contains(value),
+            Self::Hashed(values) => values.contains(value),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Small(values) => values.is_empty(),
+            Self::Hashed(values) => values.is_empty(),
+        }
+    }
+}
+
 /// Prebuild an integer literal IN-list once per input batch. Scalar IN
 /// evaluates every choice for every row, which is quadratic in row and list
 /// counts. Mixed numeric types and computed choices keep the SQL fallback.
 fn fast_integer_in_list<'a>(
     batch: &'a Batch, predicate: &Expr,
-) -> Result<Option<(&'a [Value], std::collections::HashSet<i64>, bool, bool)>> {
+) -> Result<Option<(&'a [Value], LiteralKeys<i64>, bool, bool)>> {
     let Expr::InList { needle, choices, negated } = predicate else {
         return Ok(None);
     };
@@ -231,7 +271,7 @@ fn fast_integer_in_list<'a>(
     if batch.schema().field(index)?.data_type != DataType::Integer {
         return Ok(None);
     }
-    let mut keys = std::collections::HashSet::with_capacity(choices.len());
+    let mut keys = LiteralKeys::new(choices.len());
     let mut has_null = false;
     for choice in choices {
         match choice {
@@ -247,7 +287,7 @@ fn fast_integer_in_list<'a>(
 /// NULL choices make unmatched NOT IN rows UNKNOWN, not TRUE.
 fn fast_text_in_list<'a>(
     batch: &'a Batch, predicate: &'a Expr,
-) -> Result<Option<(&'a [Value], std::collections::HashSet<&'a str>, bool, bool)>> {
+) -> Result<Option<(&'a [Value], LiteralKeys<&'a str>, bool, bool)>> {
     let Expr::InList { needle, choices, negated } = predicate else {
         return Ok(None);
     };
@@ -256,7 +296,7 @@ fn fast_text_in_list<'a>(
     if batch.schema().field(index)?.data_type != DataType::Text {
         return Ok(None);
     }
-    let mut keys = std::collections::HashSet::with_capacity(choices.len());
+    let mut keys = LiteralKeys::new(choices.len());
     let mut has_null = false;
     for choice in choices {
         match choice {
@@ -278,7 +318,7 @@ fn float_membership_key(number: f64) -> u64 {
 
 fn fast_float_in_list<'a>(
     batch: &'a Batch, predicate: &Expr,
-) -> Result<Option<(&'a [Value], std::collections::HashSet<u64>, bool, bool)>> {
+) -> Result<Option<(&'a [Value], LiteralKeys<u64>, bool, bool)>> {
     let Expr::InList { needle, choices, negated } = predicate else {
         return Ok(None);
     };
@@ -287,7 +327,7 @@ fn fast_float_in_list<'a>(
     if batch.schema().field(index)?.data_type != DataType::Float {
         return Ok(None);
     }
-    let mut keys = std::collections::HashSet::with_capacity(choices.len());
+    let mut keys = LiteralKeys::new(choices.len());
     let mut has_null = false;
     for choice in choices {
         match choice {
@@ -412,7 +452,7 @@ pub fn select_indices(batch: &Batch, predicate: &Expr) -> Result<Vec<usize>> {
         }
         for (row, value) in column.iter().enumerate() {
             if let Value::Text(text) = value {
-                let matched = keys.contains(text.as_str());
+                let matched = keys.contains(&text.as_str());
                 if if negated { !has_null && !matched } else { matched } {
                     selected.push(row);
                 }
@@ -1459,6 +1499,55 @@ mod direct_vector_filter_expression_budget_tests {
         for result in [select_indices(&empty, &predicate).map(|_| ()),
                        filter(&empty, &predicate).map(|_| ())] {
             assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod small_literal_set_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn small_and_hashed_membership_match_scalar_sql() {
+        for (name, kind, data, literals) in [
+            ("n", DataType::Integer,
+                vec![Value::Null, Value::Integer(1), Value::Integer(2), Value::Integer(5)],
+                vec![Value::Integer(1), Value::Integer(2), Value::Integer(1),
+                     Value::Integer(3), Value::Integer(4)]),
+            ("s", DataType::Text,
+                vec![Value::Null, Value::Text("é🙂".into()), Value::Text("other".into()),
+                     Value::Text("".into())],
+                vec![Value::Text("é🙂".into()), Value::Text("x".into()),
+                     Value::Text("y".into()), Value::Text("z".into()), Value::Text("w".into())]),
+            ("f", DataType::Float,
+                vec![Value::Null, Value::Float(-0.0), Value::Float(f64::NAN),
+                     Value::Float(8.0)],
+                vec![Value::Float(0.0), Value::Float(f64::NAN),
+                     Value::Float(1.0), Value::Float(2.0), Value::Float(3.0)]),
+        ] {
+            let batch = Batch::from_rows(
+                Schema::new(vec![Field::new(name, kind, true)]).unwrap(),
+                data.into_iter().map(|value| vec![value]).collect(),
+            ).unwrap();
+            for len in [0, 1, 3, 4, 5] {
+                for negated in [false, true] {
+                    for null_choice in [false, true] {
+                        let mut choices = literals[..len].iter().cloned()
+                            .map(Expr::Literal).collect::<Vec<_>>();
+                        if null_choice { choices.push(Expr::Literal(Value::Null)); }
+                        let predicate = Expr::InList {
+                            needle: Box::new(Expr::Column(name.into())),
+                            choices, negated,
+                        };
+                        let expected = (0..batch.num_rows()).filter(|&row|
+                            predicate.evaluate(&batch, row).unwrap()
+                                .as_boolean().unwrap() == Some(true)
+                        ).collect::<Vec<_>>();
+                        assert_eq!(select_indices(&batch, &predicate).unwrap(), expected);
+                    }
+                }
+            }
         }
     }
 }
