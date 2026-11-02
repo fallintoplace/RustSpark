@@ -9,7 +9,10 @@ fn output(types: &[DataType]) -> Result<DataType> {
     }
 }
 
-fn copy_text(text: &str) -> Result<Value> {
+fn copy_bounded_text(text: &str, budget_error: &'static str) -> Result<Value> {
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution(budget_error.into()));
+    }
     let mut result = String::new();
     result.try_reserve_exact(text.len())
         .map_err(|_| Error::Execution("native text output allocation failed".into()))?;
@@ -50,10 +53,7 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
             .map_or(text.len(), |(byte, _)| byte);
         &text[..end]
     };
-    if result.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("LEFT/RIGHT result exceeds native 16 MiB budget".into()));
-    }
-    copy_text(result)
+    copy_bounded_text(result, "LEFT/RIGHT result exceeds native 16 MiB budget")
 }
 
 fn left(args: &[Value]) -> Result<Value> { slice(args, false) }
@@ -89,11 +89,8 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
     let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
     if left == right {
-        if left.len() > 16 * 1024 * 1024 {
-            return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
-        }
         // Compare bytes once instead of decoding every matching Unicode scalar.
-        return copy_text(left);
+        return copy_bounded_text(left, "COMMON_PREFIX result exceeds native 16 MiB budget");
     }
     let mut end = 0;
     for (&first, &second) in left.as_bytes().iter().zip(right.as_bytes()) {
@@ -103,10 +100,7 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
     // Different Unicode scalars may share leading UTF-8 bytes. Exclude any
     // partial scalar from the returned prefix.
     while !left.is_char_boundary(end) { end -= 1; }
-    if end > 16 * 1024 * 1024 {
-        return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
-    }
-    copy_text(&left[..end])
+    copy_bounded_text(&left[..end], "COMMON_PREFIX result exceeds native 16 MiB budget")
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -307,5 +301,22 @@ mod fallible_text_slice_tests {
         assert_eq!(common_prefix(&[Value::Text("é🙂".into()),
             Value::Text("é🙂".into())]).unwrap(), Value::Text("é🙂".into()));
         assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod common_copy_bound_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_unicode_text_and_budget_error() {
+        assert_eq!(
+            copy_bounded_text("é🙂", "budget error").unwrap(),
+            Value::Text("é🙂".into()),
+        );
+        assert!(matches!(
+            copy_bounded_text(&"x".repeat(16 * 1024 * 1024 + 1), "budget error"),
+            Err(Error::Execution(message)) if message == "budget error",
+        ));
     }
 }
