@@ -584,6 +584,28 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("SUBSTRING")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let source = self.expression(0)?;
+                let mut args = vec![source];
+                if self.take_word("FROM") {
+                    args.push(self.expression(0)?);
+                    if self.take_word("FOR") {
+                        args.push(self.expression(0)?);
+                    }
+                } else {
+                    while self.take_symbol(',') {
+                        args.push(self.expression(0)?);
+                        if args.len() > 3 {
+                            return Err(Error::Parse("SUBSTRING expects at most 3 arguments".into()));
+                        }
+                    }
+                }
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: "substring".into(), args })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("POSITION")
                 && self.peek() == Some(&Token::Symbol('(')) =>
             {
@@ -2455,5 +2477,24 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_substring_syntax_tests {
+    use super::*;
+
+    #[test]
+    fn standard_substring_from_for_matches_comma_syntax() {
+        let query = "SELECT SUBSTRING('123456789' FROM 1 FOR 2), \
+            SUBSTRING('123456789', 1, 2), SUBSTRING('abcde' FROM 3)";
+        let result = crate::executor::execute(
+            &parse_sql(query).unwrap(), &crate::catalog::Catalog::new(),
+        ).unwrap().rows().unwrap();
+        assert_eq!(result, vec![vec![
+            Value::Text("12".into()), Value::Text("12".into()),
+            Value::Text("cde".into()),
+        ]]);
+        assert!(parse_sql("SELECT SUBSTRING('abc' FROM 1 FOR)").is_err());
     }
 }
