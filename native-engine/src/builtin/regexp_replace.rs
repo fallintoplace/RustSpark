@@ -673,7 +673,8 @@ mod unmatched_regex_replace_fast_path_tests {
 
     #[test]
     fn preserves_missing_matches_and_captured_substitutions() {
-        for input in ["", "hello", "é🙂", "a".repeat(64).as_str()] {
+        let long = "a".repeat(64);
+        for input in ["", "hello", "é🙂", long.as_str()] {
             let unchanged = evaluate(&[
                 Value::Text(input.into()),
                 Value::Text("z([0-9]+)".into()),
