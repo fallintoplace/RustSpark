@@ -377,11 +377,22 @@ impl Parser {
                             self.expect_symbol(',')?;
                         }
                         let op = if all { BinaryOp::And } else { BinaryOp::Or };
-                        let mut expressions = predicates.into_iter();
-                        let mut expression = expressions.next().expect("quantified list not empty");
-                        for predicate in expressions {
-                            expression = Expr::binary(expression, op, predicate);
+                        // A left-folded 128-pattern predicate would exceed
+                        // the native expression depth guard. Combine adjacent
+                        // pairs into a balanced tree while keeping the original
+                        // left-to-right short-circuit evaluation order.
+                        while predicates.len() > 1 {
+                            let mut next = Vec::with_capacity(predicates.len().div_ceil(2));
+                            let mut iter = predicates.into_iter();
+                            while let Some(left) = iter.next() {
+                                next.push(match iter.next() {
+                                    Some(right) => Expr::binary(left, op, right),
+                                    None => left,
+                                });
+                            }
+                            predicates = next;
                         }
+                        let expression = predicates.pop().expect("quantified list not empty");
                         left = if negate { Expr::Not(Box::new(expression)) } else { expression };
                         continue;
                     }
@@ -2181,6 +2192,15 @@ mod quantified_like_sql_tests {
         ] {
             assert_eq!(evaluate_one(query), expected, "{query}");
         }
+    }
+
+    #[test]
+    fn long_quantified_pattern_lists_stay_within_expression_depth_budget() {
+        let patterns = std::iter::repeat_n("'no%'", 127)
+            .chain(std::iter::once("'Spa%'"))
+            .collect::<Vec<_>>().join(",");
+        let query = format!("SELECT 'Spark' LIKE ANY ({patterns})");
+        assert_eq!(evaluate_one(&query), Value::Boolean(true));
     }
 
     #[test]
