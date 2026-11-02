@@ -16,6 +16,7 @@ use super::{
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
     grouped_spill::{grouped_aggregate, GroupFiles},
+    distinct_spill::{distinct_to_disk, DistinctFiles},
     grace_join::{grace_join, JoinFiles}, spill::SpillReader,
 };
 
@@ -80,6 +81,64 @@ impl Iterator for GroupedOutput {
                 Ok(reader)
             })();
             match next_reader {
+                Ok(reader) => self.reader = Some(reader),
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
+/// Read exact DISTINCT spill results without keeping all unique keys in RAM.
+/// The reader must close before the owned shard files are deleted.
+struct SpilledDistinctOutput {
+    reader: Option<SpillReader<BufReader<File>>>,
+    files: DistinctFiles,
+    next_file: usize,
+    batch_rows: usize,
+    control: QueryControl,
+    stopped: bool,
+}
+
+impl Iterator for SpilledDistinctOutput {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
+        loop {
+            if let Err(error) = self.control.check() {
+                self.reader = None;
+                self.stopped = true;
+                return Some(Err(error));
+            }
+            if let Some(reader) = &mut self.reader {
+                match reader.next_batch() {
+                    Ok(Some(batch)) if batch.num_rows() == 0 => continue,
+                    Ok(Some(batch)) => return Some(Ok(batch)),
+                    Ok(None) => self.reader = None,
+                    Err(error) => {
+                        self.reader = None;
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                }
+                continue;
+            }
+            let Some(path) = self.files.paths().get(self.next_file) else {
+                self.stopped = true;
+                return None;
+            };
+            self.next_file += 1;
+            match (|| {
+                let reader = SpillReader::new(
+                    BufReader::new(File::open(path)?), self.batch_rows)?;
+                if reader.schema() != self.files.schema() {
+                    return Err(Error::Schema("DISTINCT result spill schema mismatch".into()));
+                }
+                Ok(reader)
+            })() {
                 Ok(reader) => self.reader = Some(reader),
                 Err(error) => {
                     self.stopped = true;
@@ -379,12 +438,6 @@ fn infer(
         Plan::Aggregate { input, group_by, aggregates } => {
             if group_by.is_empty() {
                 let schema = child(input)?;
-                if aggregates.iter().any(|item| matches!(&item.op,
-                    AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
-                    AggregateOp::AvgDistinct(_))) {
-                    return Err(Error::Unsupported(
-                        "stream global DISTINCT aggregates require a spill path".into()));
-                }
                 let result = aggregate::global_output_schema(&schema, aggregates)?;
                 cache.schemas.borrow_mut().insert(plan as *const Plan, result.clone());
                 return Ok(result);
@@ -392,9 +445,6 @@ fn infer(
             let source = child(input)?;
             let mut fields = Vec::new();
             for (expr, alias) in group_by {
-                // Computed GROUP BY keys are materialized as hidden input
-                // columns before partitioned aggregation. Output names and
-                // types still come from the user's original expressions.
                 fields.push(Field::new(alias, expr.output_type(&source)?, true));
             }
             for item in aggregates {
@@ -413,7 +463,19 @@ fn infer(
                         crate::schema::DataType::Float => crate::schema::DataType::Float,
                         _ => return Err(Error::Type("SUM requires numeric input".into())),
                     },
-                    AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(&source)?,
+                    AggregateOp::Min(expr) | AggregateOp::Max(expr) |
+                    AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) =>
+                        expr.output_type(&source)?,
+                    AggregateOp::BitAnd(expr) | AggregateOp::BitOr(expr) |
+                    AggregateOp::BitXor(expr) => {
+                        let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                            DataType::Integer
+                        } else { expr.output_type(&source)? };
+                        if kind != DataType::Integer {
+                            return Err(Error::Type("bitwise aggregation requires integer input".into()));
+                        }
+                        DataType::Integer
+                    }
                     _ => return Err(Error::Unsupported(
                         "spilled GROUP BY does not support this aggregate".into())),
                 };
@@ -530,8 +592,20 @@ fn lower(
             let batches = RowBatcher::new(reader, source.schema().clone(), options.batch_rows)?;
             Ok(Box::new(batches))
         }
-        Plan::Filter { input, predicate } =>
-            Ok(Box::new(FilterStream::new(child(input)?, predicate.clone(), control.clone()))),
+        Plan::Filter { input, predicate } => {
+            if let Plan::Scan { table } = input.as_ref() {
+                if let Some(parquet) = catalog.get_parquet(table)? {
+                    // Retain the residual row filter after metadata pruning.
+                    let scan = parquet.open_pruned(options.batch_rows, predicate)?;
+                    return Ok(Box::new(FilterStream::new(
+                        scan, predicate.clone(), control.clone(),
+                    )));
+                }
+            }
+            Ok(Box::new(FilterStream::new(
+                child(input)?, predicate.clone(), control.clone(),
+            )))
+        },
         Plan::Distinct { input } if matches!(input.as_ref(), Plan::UnionAll { .. }) => {
             let Plan::UnionAll { left, right } = input.as_ref() else {
                 unreachable!("checked UNION ALL plan");
@@ -544,9 +618,27 @@ fn lower(
                 MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
             )?))
         }
-        Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
-            child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
-        ))),
+        Plan::Distinct { input } => {
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
+            if schema.is_empty() {
+                // A zero-width DISTINCT relation has at most one output row.
+                // The disk DISTINCT format intentionally requires columns.
+                return Ok(Box::new(DistinctOutput::new(
+                    child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS,
+                    MAX_STREAM_DISTINCT_BYTES)));
+            }
+            // Do not emit a prefix before spilling: if in-memory DISTINCT
+            // exhausts its budget, replaying earlier rows would duplicate
+            // results. A blocking exact partitioned pass is retry-safe.
+            let files = distinct_to_disk(
+                child(input)?, schema, &options.scratch_directory,
+                16, MAX_STREAM_DISTINCT_KEYS, options.batch_rows, control
+            )?;
+            Ok(Box::new(SpilledDistinctOutput {
+                files, reader: None, next_file: 0, batch_rows: options.batch_rows,
+                control: control.clone(), stopped: false,
+            }))
+        },
         Plan::CrossJoin { left, right } => {
             let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth, cache)?;
             let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth, cache)?;
@@ -579,48 +671,37 @@ fn lower(
                 return Ok(Box::new(std::iter::once(Ok(result))));
             }
             let mut groups = Vec::with_capacity(group_by.len());
-            let mut has_computed_keys = false;
-            let mut selections = schema.fields().iter()
-                .map(|field| Selection::new(
-                    Expr::Column(field.name.clone()), field.name.clone(),
-                ))
-                .collect::<Vec<_>>();
+            let mut computed = Vec::<Selection>::new();
+            // Keep the source columns available to aggregate expressions.
+            // Materialize each computed grouping expression once per row.
+            for field in schema.fields() {
+                computed.push(Selection::new(Expr::Column(field.name.clone()), field.name.clone()));
+            }
+            let mut needs_projection = false;
             for (index, (expr, alias)) in group_by.iter().enumerate() {
                 if let Expr::Column(name) = expr {
                     groups.push((name.clone(), alias.clone()));
-                    continue;
-                }
-                has_computed_keys = true;
-                // Hidden keys cannot overwrite user data or another grouping
-                // expression. Keep all existing fields for aggregate inputs.
-                let mut suffix = 0usize;
-                let name = loop {
-                    let candidate = format!("__rustspark_group_{index}_{suffix}");
-                    if !selections.iter().any(|item|
-                        item.alias.eq_ignore_ascii_case(&candidate)) {
-                        break candidate;
+                } else {
+                    needs_projection = true;
+                    let mut hidden = format!("__rustspark_spill_key_{index}");
+                    while computed.iter().any(|selection|
+                        selection.alias.eq_ignore_ascii_case(&hidden)) {
+                        hidden.push('_');
                     }
-                    suffix = suffix.checked_add(1).ok_or_else(|| Error::Execution(
-                        "temporary grouping key name overflow".into()))?;
-                };
-                groups.push((name.clone(), alias.clone()));
-                selections.push(Selection::new(expr.clone(), name));
+                    computed.push(Selection::new(expr.clone(), hidden.clone()));
+                    groups.push((hidden, alias.clone()));
+                }
             }
-            let (input_schema, source): (Schema, BatchStream) = if has_computed_keys {
-                // Reuse the exact projection schema, including nullability,
-                // to keep the spill writer and input batches consistent.
-                let projected = crate::project::project(
-                    &Batch::empty(schema.clone()), &selections,
-                )?.schema().clone();
-                let source = ProjectStream::new(
-                    child(input)?, selections, control.clone(),
-                );
-                (projected, Box::new(source))
-            } else {
-                (schema, child(input)?)
-            };
+            let input_stream = child(input)?;
+            let (input_stream, input_schema): (BatchStream, Schema) = if needs_projection {
+                // Projecting an empty typed batch resolves every computed key
+                // before touching input sources and creates the spill schema.
+                let projected = crate::project::project(&Batch::empty(schema.clone()), &computed)?;
+                let projected_schema = projected.schema().clone();
+                (Box::new(ProjectStream::new(input_stream, computed, control.clone())), projected_schema)
+            } else { (input_stream, schema) };
             let files = grouped_aggregate(
-                source, input_schema, &groups, aggregates,
+                input_stream, input_schema, &groups, aggregates,
                 &options.scratch_directory, 16, 200_000, options.batch_rows, control
             )?;
             Ok(Box::new(GroupedOutput {
@@ -628,8 +709,31 @@ fn lower(
                 control: control.clone(), stopped: false,
             }))
         }
-        Plan::Project { input, selections } =>
-            Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
+        Plan::Project { input, selections } => {
+            // For a direct Parquet projection, decode only referenced physical
+            // fields. Keep ProjectStream to restore SELECT order and aliases.
+            if let Plan::Scan { table } = input.as_ref() {
+                if let Some(parquet) = catalog.get_parquet(table)? {
+                    let mut columns = Vec::new();
+                    for selection in selections {
+                        let Expr::Column(name) = &selection.expression else {
+                            return Ok(Box::new(ProjectStream::new(
+                                child(input)?, selections.clone(), control.clone())));
+                        };
+                        if !columns.iter().any(|existing: &&str|
+                            existing.eq_ignore_ascii_case(name)) {
+                            columns.push(name.as_str());
+                        }
+                    }
+                    if !columns.is_empty() {
+                        let source = parquet.open_columns(options.batch_rows, &columns)?;
+                        return Ok(Box::new(ProjectStream::new(
+                            source, selections.clone(), control.clone())));
+                    }
+                }
+            }
+            Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone())))
+        },
         Plan::Limit { input, offset, count: Some(count) }
             if matches!(input.as_ref(), Plan::Filter { .. }) => {
             let Plan::Filter { input: source, predicate } = input.as_ref() else {
@@ -641,29 +745,81 @@ fn lower(
                 source, predicate.clone(), *offset, *count, control.clone(),
             )))
         }
+        Plan::Limit { input, offset, count: Some(count) }
+            if matches!(input.as_ref(), Plan::Sort { .. }) &&
+                offset.checked_add(*count)
+                    .is_some_and(|k| k <= super::topk_stream::MAX_TOPK_ROWS) => {
+            let Plan::Sort { input: source, keys } = input.as_ref() else {
+                unreachable!("checked sort below LIMIT")
+            };
+            let schema = infer(source, catalog, depth + 2, options.max_plan_depth, cache)?;
+            let chunks = super::topk_stream::top_k_stream(
+                lower(source, catalog, options, control, depth + 2, cache)?,
+                schema, keys, *offset, *count, options.batch_rows, control,
+            )?;
+            Ok(Box::new(chunks))
+        }
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
-            let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
-            for key in keys {
-                let crate::expr::Expr::Column(name) = &key.expression else {
-                    return Err(Error::Unsupported("external sort requires column keys".into()));
-                };
-                schema.column(name)?;
-            }
+            let source_schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
+            let computed = keys.iter().any(|key| !matches!(key.expression, Expr::Column(_)));
+            let (source, schema, sort_keys, restore): (
+                BatchStream, Schema, Vec<crate::sort::SortKey>, Option<Vec<Selection>>
+            ) = if computed {
+                // External merge sorts physical columns. Materialize computed
+                // order expressions once in hidden columns, then remove them
+                // from the sorted output before returning to the parent plan.
+                let originals = source_schema.fields().iter()
+                    .map(|field| Selection::new(Expr::Column(field.name.clone()), field.name.clone()))
+                    .collect::<Vec<_>>();
+                let mut extended = originals.clone();
+                let mut sort_keys = Vec::with_capacity(keys.len());
+                for (index, key) in keys.iter().enumerate() {
+                    let mut key = key.clone();
+                    if !matches!(key.expression, Expr::Column(_)) {
+                        let mut hidden = format!("__rustspark_sort_key_{index}");
+                        while extended.iter().any(|item|
+                            item.alias.eq_ignore_ascii_case(&hidden)) {
+                            hidden.push('_');
+                        }
+                        extended.push(Selection::new(key.expression, hidden.clone()));
+                        key.expression = Expr::Column(hidden);
+                    }
+                    sort_keys.push(key);
+                }
+                let projected_schema = crate::project::project(
+                    &Batch::empty(source_schema), &extended,
+                )?.schema().clone();
+                let source = Box::new(ProjectStream::new(
+                    child(input)?, extended, control.clone(),
+                ));
+                (source, projected_schema, sort_keys, Some(originals))
+            } else {
+                for key in keys {
+                    if let Expr::Column(name) = &key.expression { source_schema.column(name)?; }
+                }
+                (child(input)?, source_schema, keys.clone(), None)
+            };
             let runs = write_sorted_runs(
-                child(input)?, schema.clone(), keys, &options.scratch_directory,
+                source, schema.clone(), &sort_keys, &options.scratch_directory,
                 options.sort_run_rows, control
             )?;
             let files = merge_to_fan_in(
-                runs, &options.scratch_directory, schema.clone(), keys,
+                runs, &options.scratch_directory, schema.clone(), &sort_keys,
                 options.merge_fan_in, options.sort_run_rows, control
             )?;
             let reader = RunMerger::new(
-                files.files(), schema, keys,
+                files.files(), schema, &sort_keys,
                 options.sort_run_rows, options.batch_rows, control.clone()
             )?;
-            Ok(Box::new(SortedOutput { reader, _files: files }))
+            let sorted: BatchStream = Box::new(SortedOutput { reader, _files: files });
+            match restore {
+                Some(selections) => Ok(Box::new(ProjectStream::new(
+                    sorted, selections, control.clone(),
+                ))),
+                None => Ok(sorted),
+            }
         }
         Plan::Intersect { left, right } |
         Plan::IntersectAll { left, right } |
@@ -1585,6 +1741,86 @@ mod streamed_distinct_adjacency_run_regressions {
     }
 }
 
+#[cfg(test)]
+mod spilled_expression_grouping_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    fn memory_result(sql_text: &str) -> Vec<Vec<Value>> {
+        let plan = sql::parse_sql(sql_text).unwrap();
+        let batch = executor::execute(&plan, &Catalog::new()).unwrap();
+        batch.rows().unwrap()
+    }
+
+    fn spill_result(sql_text: &str) -> Vec<Vec<Value>> {
+        let plan = sql::parse_sql(sql_text).unwrap();
+        let output = execute(&plan, &FileCatalog::new(),
+            &StreamOptions::default(), QueryControl::default()).unwrap();
+        output.flat_map(|batch| batch.unwrap().rows().unwrap()).collect()
+    }
+
+    fn canonical(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        rows
+    }
+
+    #[test]
+    fn computed_integer_and_text_keys_match_in_memory_sql() {
+        for sql in [
+            "SELECT col1 + 1 AS k, SUM(col2) AS total FROM VALUES (1, 2), (2, 3), (1, 5) GROUP BY col1 + 1",
+            "SELECT LOWER(col1) AS k, COUNT(*) AS count FROM VALUES ('ABC'), ('abc'), ('XYZ') GROUP BY LOWER(col1)",
+            "SELECT col1 * 2 AS k, COUNT(*) AS count FROM VALUES (1), (2), (1), (NULL) GROUP BY col1 * 2",
+        ] {
+            assert_eq!(canonical(spill_result(sql)), canonical(memory_result(sql)), "{sql}");
+        }
+    }
+
+    #[test]
+    fn mixed_column_and_expression_group_keys_preserve_values() {
+        let sql = "SELECT col1 AS region, col2 + 1 AS bucket, SUM(col3) AS total \
+            FROM VALUES ('east', 1, 4), ('east', 1, 6), ('west', 1, 3) \
+            GROUP BY col1, col2 + 1";
+        assert_eq!(canonical(spill_result(sql)), canonical(memory_result(sql)));
+    }
+}
+
+#[cfg(test)]
+mod sql_parquet_rowgroup_pruning_regressions {
+    use super::*;
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+    static ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn prunes_impossible_row_groups_but_preserves_residual_filter() {
+        let file = std::env::temp_dir().join(format!(
+            "rustspark-parquet-pruning-{}-{}.parquet",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let data = Batch::from_rows(schema, (1..=6)
+            .map(|n| vec![Value::Integer(n)]).collect()).unwrap();
+        let arrow = crate::arrow_bridge::to_arrow(&data).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2)).build();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            fs::File::create(&file).unwrap(), arrow.schema(), Some(props)).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_parquet("t", &file).unwrap();
+        let plan = crate::sql::parse_sql(
+            "SELECT id FROM t WHERE id >= 5",
+        ).unwrap();
+        let options = StreamOptions { batch_rows: 1, ..StreamOptions::default() };
+        let result = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Value::Integer(5)], vec![Value::Integer(6)]]);
+        fs::remove_file(file).unwrap();
+    }
+}
 
 #[cfg(test)]
 mod computed_group_by_stream_tests {
@@ -1637,7 +1873,7 @@ mod computed_group_by_stream_tests {
     #[test]
     fn expression_names_never_override_real_input_columns() {
         let source = Batch::from_rows(Schema::new(vec![
-            Field::new("__rustspark_group_0_0", DataType::Text, false),
+            Field::new("__rustspark_spill_key_0", DataType::Text, false),
             Field::new("n", DataType::Integer, false),
         ]).unwrap(), vec![
             vec![Value::Text("a".into()), Value::Integer(-2)],

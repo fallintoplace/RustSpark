@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use crate::{
-    batch::Batch, join::{self, JoinKind}, scalar::Value,
+    batch::Batch, bloom::BloomFilter, join::{self, JoinKind}, scalar::Value,
     schema::Schema, Error, Result,
 };
 use super::{
@@ -173,6 +173,12 @@ fn discard_null_join_keys(batch: Batch, key_column: usize) -> Result<Option<Batc
     Ok(Some(batch.take_sorted_owned(&selected)?))
 }
 
+/// A Bloom negative proves a probe window has no equality matches.
+/// NULL keys never match, even if a build-side Bloom filter contains NULL.
+fn can_skip_probe_window(filter: &BloomFilter, keys: &[Value]) -> bool {
+    keys.iter().all(|key| key.is_null() || !filter.might_contain(key))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn grace_join<L, R>(
     left: L, right: R, left_schema: Schema, right_schema: Schema,
@@ -260,6 +266,15 @@ where L: IntoIterator<Item = Result<Batch>>,
             JoinKind::Full => JoinKind::Left,
             other => other,
         };
+        // A Bloom negative can skip an entire probe window without a hash
+        // lookup. Outer/anti join probe rows must never be discarded.
+        let bloom = if build.num_rows() > 64 &&
+            matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi)
+        {
+            let mut filter = BloomFilter::for_expected_items(build.num_rows(), 0.01)?;
+            filter.insert_batch(build.column(right_index)?);
+            Some(filter)
+        } else { None };
         // Build once per on-disk shard instead of once for every 256 probe rows.
         let prepared = join::PreparedHashJoin::new(
             left_schema.clone(), &build, left_key, right_key, probe_kind,
@@ -269,6 +284,14 @@ where L: IntoIterator<Item = Result<Batch>>,
             let mut start = 0;
             while start < batch.num_rows() {
                 let end = start.saturating_add(io_batch_rows.min(256)).min(batch.num_rows());
+                if let Some(filter) = &bloom {
+                    if can_skip_probe_window(
+                        filter, &batch.column(left_index)?[start..end]
+                    ) {
+                        start = end;
+                        continue;
+                    }
+                }
                 let joined = prepared.probe_range_with_matches(
                     &batch, start, end, matched_right.as_deref_mut(),
                 )?;
@@ -986,5 +1009,32 @@ mod null_join_partition_selection_tests {
             let output = discard_null_join_keys(before, 0).unwrap().unwrap();
             assert_eq!(output.rows().unwrap(), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod bloom_probe_pruning_tests {
+    use super::*;
+
+    #[test]
+    fn bloom_negative_windows_are_skippable_without_losing_inserted_keys() {
+        let mut bloom = BloomFilter::for_expected_items(10_000, 0.01).unwrap();
+        let keys = (0..10_000).map(Value::Integer).collect::<Vec<_>>();
+        bloom.insert_batch(&keys);
+        for key in &keys {
+            assert!(!can_skip_probe_window(&bloom, &[key.clone()]));
+        }
+        assert!(can_skip_probe_window(&bloom, &[Value::Null, Value::Null]));
+        assert!(!can_skip_probe_window(
+            &bloom, &[Value::Null, Value::Integer(9_999)]));
+    }
+
+    #[test]
+    fn bloom_pruning_uses_canonical_floating_key_semantics() {
+        let mut bloom = BloomFilter::new(8192, 5).unwrap();
+        bloom.insert(&Value::Float(-0.0));
+        bloom.insert(&Value::Float(f64::NAN));
+        assert!(!can_skip_probe_window(&bloom, &[Value::Float(0.0)]));
+        assert!(!can_skip_probe_window(&bloom, &[Value::Float(f64::NAN)]));
     }
 }
