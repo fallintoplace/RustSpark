@@ -1185,3 +1185,87 @@ mod grouped_direct_column_output_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod streaming_exact_distinct_aggregates {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn schema() -> Schema {
+        Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap()
+    }
+
+    #[test]
+    fn distinct_counts_sums_and_averages_across_batch_boundaries() {
+        let schema = schema();
+        let parts = vec![
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Null],
+            ]).unwrap(),
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(2)], vec![Value::Integer(3)], vec![Value::Integer(4)],
+            ]).unwrap(),
+            Batch::from_rows(schema.clone(), vec![
+                vec![Value::Integer(4)], vec![Value::Null],
+            ]).unwrap(),
+        ];
+        let column = Expr::Column("n".into());
+        let items = vec![
+            AggregateItem::new(AggregateOp::CountDistinct(column.clone()), "distinct_count"),
+            AggregateItem::new(AggregateOp::SumDistinct(column.clone()), "distinct_sum"),
+            AggregateItem::new(AggregateOp::AvgDistinct(column.clone()), "distinct_avg"),
+            AggregateItem::new(AggregateOp::CountAll, "total_rows"),
+        ];
+        let streamed = aggregate_global_stream(parts.clone().into_iter().map(Ok),
+            &schema, &items, || Ok(())).unwrap();
+        assert_eq!(streamed.rows().unwrap(), vec![vec![
+            Value::Integer(4), Value::Integer(10), Value::Float(2.5), Value::Integer(8),
+        ]]);
+        let combined = parts.into_iter().reduce(|mut one, next| {
+            one.append_owned(next).unwrap();
+            one
+        }).unwrap();
+        assert_eq!(streamed, aggregate(&combined, &[], &items).unwrap());
+    }
+
+    #[test]
+    fn empty_input_distincts_produce_count_zero_and_nullable_results() {
+        let schema = schema();
+        let n = Expr::Column("n".into());
+        let items = vec![
+            AggregateItem::new(AggregateOp::CountDistinct(n.clone()), "c"),
+            AggregateItem::new(AggregateOp::SumDistinct(n.clone()), "s"),
+            AggregateItem::new(AggregateOp::AvgDistinct(n), "a"),
+        ];
+        let result = aggregate_global_stream(std::iter::empty(), &schema, &items,
+            || Ok(())).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![vec![
+            Value::Integer(0), Value::Null, Value::Null,
+        ]]);
+    }
+
+    #[test]
+    fn stream_rejects_changed_schema_and_honors_cancellation() {
+        let schema = schema();
+        let items = [AggregateItem::new(
+            AggregateOp::CountDistinct(Expr::Column("n".into())), "c",
+        )];
+        let bad = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Float, true),
+        ]).unwrap(), vec![vec![Value::Float(2.0)]]).unwrap();
+        assert!(aggregate_global_stream(std::iter::once(Ok(bad)), &schema, &items,
+            || Ok(())).is_err());
+        let mut checks = 0;
+        let input = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(1)] ; 100]).unwrap();
+        assert!(aggregate_global_stream(std::iter::once(Ok(input)), &schema, &items,
+            || {
+                checks += 1;
+                if checks > 1 {
+                    Err(Error::Execution("cancelled".into()))
+                } else {
+                    Ok(())
+                }
+            }).is_err());
+    }
+}
