@@ -783,21 +783,37 @@ impl Parser {
             }
             let right_key = self.identifier()?;
             let residual = if self.take_word("AND") {
-                if kind != JoinKind::Inner {
-                    return Err(Error::Unsupported(
-                        "residual JOIN ON predicates require INNER JOIN".into()
-                    ));
-                }
                 Some(self.expression(2)?)
             } else { None };
+            let mut left = plan;
+            let mut right = right;
+            let after_join = match residual {
+                Some(predicate) => match kind {
+                    JoinKind::Inner => Some(predicate),
+                    // For a LEFT JOIN, right-only ON predicates must be
+                    // evaluated before NULL extension, never as WHERE filters.
+                    JoinKind::Left => {
+                        right = right.filter(predicate);
+                        None
+                    }
+                    JoinKind::Right => {
+                        left = left.filter(predicate);
+                        None
+                    }
+                    _ => return Err(Error::Unsupported(
+                        "residual ON predicates require INNER, LEFT or RIGHT JOIN".into()
+                    )),
+                },
+                None => None,
+            };
             plan = Plan::Join {
-                left: Box::new(plan),
+                left: Box::new(left),
                 right: Box::new(right),
                 left_key,
                 right_key,
                 kind,
             };
-            if let Some(predicate) = residual {
+            if let Some(predicate) = after_join {
                 plan = plan.filter(predicate);
             }
         }
