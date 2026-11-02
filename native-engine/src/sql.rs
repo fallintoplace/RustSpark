@@ -680,9 +680,16 @@ impl Parser {
             Plan::OneRow
         };
         loop {
+            // A comma-separated FROM list has the same Cartesian semantics
+            // as CROSS JOIN. Parse each relation, not only bare table names.
+            if self.take_symbol(',') {
+                let right = self.from_relation()?;
+                plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
+                continue;
+            }
             if self.take_word("CROSS") {
                 self.expect_word("JOIN")?;
-                let right = Plan::scan(self.identifier()?);
+                let right = self.from_relation()?;
                 plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
                 continue;
             }
@@ -731,7 +738,43 @@ impl Parser {
             };
         }
         if self.take_word("WHERE") {
-            plan = plan.filter(self.expression(0)?);
+            // An uncorrelated EXISTS is a one-bit relation test. Project the
+            // subquery down to zero columns and at most one row. CROSS JOIN
+            // then preserves the outer schema while returning outer rows
+            // exactly once if the witness relation is nonempty.
+            let negate = self.take_word("NOT");
+            if self.take_word("EXISTS") {
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("EXISTS subquery nesting limit exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let inner = self.select_with_intersections()?;
+                let inner = self.finish_query(inner)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                let witness = Plan::Project {
+                    input: Box::new(inner.limit(0, Some(1))),
+                    selections: Vec::new(),
+                };
+                let matched = Plan::CrossJoin {
+                    left: Box::new(plan.clone()), right: Box::new(witness),
+                };
+                plan = if negate {
+                    // EXCEPT ALL preserves outer duplicates when the witness
+                    // is absent. Ordinary EXCEPT would incorrectly dedupe.
+                    Plan::ExceptAll {
+                        left: Box::new(plan), right: Box::new(matched),
+                    }
+                } else {
+                    matched
+                };
+                // Only a complete top-level EXISTS predicate is supported.
+                // Trailing AND/OR produces an explicit unsupported SQL error.
+            } else {
+                if negate { self.index -= 1; }
+                plan = plan.filter(self.expression(0)?);
+            }
         }
 
         // Spark permits arbitrary grouping expressions, SELECT aliases and 1-based ordinals.
@@ -942,7 +985,18 @@ impl Parser {
             let source = self.identifier()?;
             self.scan_or_cte(source)?
         };
-        if self.take_word("AS") {
+        let explicit_alias = self.take_word("AS");
+        // Spark accepts FROM source alias and FROM (query) alias(columns)
+        // without AS. Never consume a clause or join keyword as an alias.
+        const CLAUSE_KEYWORDS: &[&str] = &[
+            "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH",
+            "UNION", "INTERSECT", "EXCEPT", "MINUS", "JOIN", "INNER", "LEFT",
+            "RIGHT", "FULL", "CROSS", "OUTER", "SEMI", "ANTI", "ON", "USING",
+            "WINDOW", "QUALIFY", "LATERAL", "TABLESAMPLE",
+        ];
+        let implicit_alias = matches!(self.peek(), Some(Token::Word(word))
+            if !CLAUSE_KEYWORDS.iter().any(|reserved| word.eq_ignore_ascii_case(reserved)));
+        if explicit_alias || implicit_alias {
             self.identifier()?;
             if self.take_symbol('(') {
                 let mut names = Vec::new();
@@ -1087,6 +1141,39 @@ impl Parser {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
+            if self.take_word("ALL") {
+                let selected = match &plan {
+                    Plan::Project { selections, .. } => Some(selections.as_slice()),
+                    Plan::Distinct { input } => match input.as_ref() {
+                        Plan::Project { selections, .. } => Some(selections.as_slice()),
+                        _ => None,
+                    },
+                    _ => None,
+                }.ok_or_else(|| Error::Unsupported(
+                    "ORDER BY ALL requires explicit projected columns".into()
+                ))?;
+                let descending = if self.take_word("DESC") {
+                    true
+                } else {
+                    self.take_word("ASC");
+                    false
+                };
+                let nulls_first = if self.take_word("NULLS") {
+                    if self.take_word("FIRST") {
+                        true
+                    } else {
+                        self.expect_word("LAST")?;
+                        false
+                    }
+                } else { !descending };
+                for item in selected {
+                    keys.push(SortKey {
+                        expression: Expr::Column(item.alias.clone()),
+                        descending,
+                        nulls_first,
+                    });
+                }
+            } else {
             loop {
                 let is_ordinal = match self.peek() {
                     Some(Token::Number(number)) if number.chars().all(|ch| ch.is_ascii_digit()) => {
@@ -1142,6 +1229,7 @@ impl Parser {
                 if !self.take_symbol(',') {
                     break;
                 }
+            }
             }
             plan = match plan {
                 Plan::Project { input, selections } => {
@@ -1325,6 +1413,11 @@ fn rewrite_having(
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
+    let explain = parser.take_word("EXPLAIN");
+    let extended = explain && parser.take_word("EXTENDED");
+    if explain && parser.peek_word("ANALYZE") {
+        return Err(Error::Unsupported("EXPLAIN ANALYZE requires execution metrics".into()));
+    }
     parser.parse_ctes()?;
     let mut plan = parser.select_with_intersections()?;
     loop {
@@ -1354,6 +1447,25 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
             "unsupported SQL syntax near {:?}",
             parser.peek()
         )));
+    }
+    if explain {
+        // Keep EXPLAIN independent of catalog registration and input scans.
+        // It reports the owned native logical plan, not a physical plan or
+        // measured runtime profile.
+        let mut description = format!("Logical plan:\n{plan:#?}");
+        if extended {
+            let optimized = crate::optimizer::optimize(plan.clone());
+            description.push_str(&format!("\nOptimized logical plan:\n{optimized:#?}"));
+        }
+        if description.len() > 1024 * 1024 {
+            return Err(Error::Execution("EXPLAIN output exceeds 1 MiB".into()));
+        }
+        let schema = Schema::new(vec![
+            Field::new("logical_plan", DataType::Text, false),
+        ])?;
+        return Ok(Plan::Values {
+            batch: Batch::from_rows(schema, vec![vec![Value::Text(description)]])?,
+        });
     }
     Ok(plan)
 }
@@ -2112,6 +2224,43 @@ mod spark_boolean_aggregate_tests {
 }
 
 #[cfg(test)]
+mod derived_cross_join_regressions {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    #[test]
+    fn cross_join_accepts_derived_values_on_both_sides() {
+        let sql = "SELECT x, y FROM (VALUES (1), (2)) AS a(x) CROSS JOIN (VALUES (10), (20)) AS b(y) ORDER BY x, y";
+        let result = executor::execute(&parse_sql(sql).unwrap(), &Catalog::new()).unwrap();
+        assert_eq!(result.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(1), Value::Integer(20)],
+            vec![Value::Integer(2), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(20)],
+        ]);
+    }
+
+    #[test]
+    fn comma_join_matches_explicit_cross_join_and_obeys_where() {
+        let explicit = "SELECT x, y FROM (VALUES (1), (2)) AS a(x) CROSS JOIN (VALUES (10), (20)) AS b(y) WHERE x = 2";
+        let comma = "SELECT x, y FROM (VALUES (1), (2)) AS a(x), (VALUES (10), (20)) AS b(y) WHERE x = 2";
+        let catalog = Catalog::new();
+        assert_eq!(executor::execute(&parse_sql(explicit).unwrap(), &catalog).unwrap(),
+                   executor::execute(&parse_sql(comma).unwrap(), &catalog).unwrap());
+    }
+
+    #[test]
+    fn rejects_malformed_or_incomplete_cross_relations() {
+        for query in [
+            "SELECT x FROM (VALUES (1)) AS a(x) CROSS JOIN",
+            "SELECT x FROM (VALUES (1)) AS a(x),",
+        ] {
+            assert!(parse_sql(query).is_err(), "{query}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod spark_minus_alias_sql_tests {
     use super::*;
     use crate::{catalog::Catalog, executor};
@@ -2142,3 +2291,4 @@ mod spark_minus_alias_sql_tests {
         assert!(parse_sql("SELECT 1 MINUS").is_err());
     }
 }
+
