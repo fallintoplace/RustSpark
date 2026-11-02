@@ -415,6 +415,47 @@ impl Batch {
 }
 
 #[cfg(test)]
+mod owned_gather_index_allocation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn input(rows: usize) -> Batch {
+        let schema = Schema::new(vec![Field::new("txt", DataType::Text, true)]).unwrap();
+        Batch::from_rows(schema, (0..rows).map(|i|
+            vec![if i % 7 == 0 { Value::Null }
+                else { Value::Text(format!("{i}-{}", "🙂".repeat(64))) }]
+        ).collect()).unwrap()
+    }
+
+    #[test]
+    fn sorted_and_unique_owned_paths_return_the_same_rows() {
+        let source = input(128);
+        let sorted = [1, 3, 7, 19, 40, 100];
+        let unique = [100, 40, 19, 7, 3, 1];
+        assert_eq!(source.clone().take_sorted_owned(&sorted).unwrap(),
+            source.take(&sorted).unwrap());
+        assert_eq!(source.clone().take_unique_owned(&unique).unwrap(),
+            source.take(&unique).unwrap());
+        assert!(source.clone().take_unique_owned(&[1, 1]).is_err());
+        assert!(source.clone().take_sorted_owned(&[3, 1]).is_err());
+    }
+
+    #[test]
+    fn sparse_and_dense_gathers_preserve_duplicates_nulls_and_order() {
+        let source = input(128);
+        for indices in [vec![126, 3, 126, 0, 50, 3],
+                        (0..90).rev().chain([0, 7, 3, 0]).collect::<Vec<_>>()] {
+            let expected = source.take(&indices).unwrap();
+            assert_eq!(source.clone().take_owned(&indices).unwrap(), expected);
+        }
+        assert!(source.clone().take_owned(&[128]).is_err());
+        let unique = (0..20).rev().collect::<Vec<_>>();
+        assert_eq!(source.clone().take_owned(&unique).unwrap(),
+                   source.take(&unique).unwrap());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::{DataType, Field};
@@ -1127,43 +1168,3 @@ mod ordered_owned_gather_no_index_regressions {
     }
 }
 
-#[cfg(test)]
-mod owned_gather_index_allocation_regressions {
-    use super::*;
-    use crate::schema::{DataType, Field, Schema};
-
-    fn input(rows: usize) -> Batch {
-        let schema = Schema::new(vec![Field::new("txt", DataType::Text, true)]).unwrap();
-        Batch::from_rows(schema, (0..rows).map(|i|
-            vec![if i % 7 == 0 { Value::Null }
-                else { Value::Text(format!("{i}-{}", "🙂".repeat(64))) }]
-        ).collect()).unwrap()
-    }
-
-    #[test]
-    fn sorted_and_unique_owned_paths_return_the_same_rows() {
-        let source = input(128);
-        let sorted = [1, 3, 7, 19, 40, 100];
-        let unique = [100, 40, 19, 7, 3, 1];
-        assert_eq!(source.clone().take_sorted_owned(&sorted).unwrap(),
-            source.take(&sorted).unwrap());
-        assert_eq!(source.clone().take_unique_owned(&unique).unwrap(),
-            source.take(&unique).unwrap());
-        assert!(source.clone().take_unique_owned(&[1, 1]).is_err());
-        assert!(source.clone().take_sorted_owned(&[3, 1]).is_err());
-    }
-
-    #[test]
-    fn sparse_and_dense_gathers_preserve_duplicates_nulls_and_order() {
-        let source = input(128);
-        for indices in [vec![126, 3, 126, 0, 50, 3],
-                        (0..90).rev().chain([0, 7, 3, 0]).collect::<Vec<_>>()] {
-            let expected = source.take(&indices).unwrap();
-            assert_eq!(source.clone().take_owned(&indices).unwrap(), expected);
-        }
-        assert!(source.clone().take_owned(&[128]).is_err());
-        let unique = (0..20).rev().collect::<Vec<_>>();
-        assert_eq!(source.clone().take_owned(&unique).unwrap(),
-                   source.take(&unique).unwrap());
-    }
-}
