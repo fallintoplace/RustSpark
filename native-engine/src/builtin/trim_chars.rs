@@ -4,6 +4,14 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
+fn copy_bounded(text: &str) -> Result<String> {
+    let mut output = String::new();
+    output.try_reserve_exact(text.len())
+        .map_err(|_| Error::Execution("TRIM output allocation failed".into()))?;
+    output.push_str(text);
+    Ok(output)
+}
+
 fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let characters = if args.len() == 2 {
@@ -19,7 +27,7 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
     if text.is_empty() { return Ok(Value::Text(String::new())); }
     // Explicit empty trim sets cannot match any character.
     if characters == Some("") {
-        return Ok(Value::Text(text.to_owned()));
+        return Ok(Value::Text(copy_bounded(text)?));
     }
     // An ASCII input cannot match a non-ASCII trim character. Even with
     // mixed Unicode trim sets, use an ASCII lookup instead of building a
@@ -33,9 +41,22 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
             }
             lookup
         });
-    let unicode_set = characters
+    let unicode_set = if let Some(chars) = characters
         .filter(|chars| chars.len() >= 32 && !chars.is_ascii() && !text.is_ascii())
-        .map(|chars| chars.chars().collect::<HashSet<_>>());
+    {
+        let mut set = HashSet::new();
+        for character in chars.chars() {
+            if !set.contains(&character) {
+                set.try_reserve(1).map_err(|_| Error::Execution(
+                    "TRIM Unicode character set allocation failed".into()
+                ))?;
+                set.insert(character);
+            }
+        }
+        Some(set)
+    } else {
+        None
+    };
     let contains = |ch: char| {
         if let Some(lookup) = &ascii_set {
             ch.is_ascii() && lookup[ch as usize]
@@ -60,7 +81,7 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
     if value.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("TRIM result exceeds native 16 MiB budget".into()));
     }
-    Ok(Value::Text(value.into()))
+    Ok(Value::Text(copy_bounded(value)?))
 }
 
 fn btrim(args: &[Value]) -> Result<Value> { trim(args, true, true) }
@@ -76,7 +97,10 @@ fn normalize_space(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("NORMALIZE_SPACE input exceeds native 16 MiB budget".into()));
     }
     if input.is_ascii() {
-        let mut output = Vec::with_capacity(input.len());
+        let mut output = Vec::new();
+        output.try_reserve_exact(input.len()).map_err(|_| Error::Execution(
+            "NORMALIZE_SPACE output allocation failed".into()
+        ))?;
         let mut pending = false;
         for &byte in input.as_bytes() {
             if byte.is_ascii_whitespace() || byte == b'\x0b' {
@@ -90,7 +114,10 @@ fn normalize_space(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(String::from_utf8(output)
             .expect("normalizing ASCII bytes preserves UTF-8")));
     }
-    let mut output = String::with_capacity(input.len());
+    let mut output = String::new();
+    output.try_reserve_exact(input.len()).map_err(|_| Error::Execution(
+        "NORMALIZE_SPACE output allocation failed".into()
+    ))?;
     let mut pending = false;
     for character in input.chars() {
         if character.is_whitespace() {
@@ -357,5 +384,29 @@ mod spark_trim_character_set_tests {
         let plan = sql::parse_sql("SELECT TRIM('  Spark  ')").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Text("Spark".into())]]);
+    }
+}
+
+#[cfg(test)]
+mod fallible_trim_output_regressions {
+    use super::*;
+
+    #[test]
+    fn unicode_membership_deduplicates_and_preserves_boundary_semantics() {
+        let characters = "é🙂界".repeat(200);
+        let values = [Value::Text("🙂éhello界é🙂".into()), Value::Text(characters)];
+        assert_eq!(btrim(&values).unwrap(), Value::Text("hello".into()));
+        assert_eq!(ltrim(&values).unwrap(), Value::Text("hello界é🙂".into()));
+        assert_eq!(rtrim(&values).unwrap(), Value::Text("🙂éhello".into()));
+    }
+
+    #[test]
+    fn fallible_output_copy_handles_unicode_and_empty_explicit_sets() {
+        assert_eq!(btrim(&[Value::Text("🙂é".into()), Value::Text(String::new())]).unwrap(),
+            Value::Text("🙂é".into()));
+        assert_eq!(btrim(&[Value::Text("  🙂é  ".into())]).unwrap(),
+            Value::Text("🙂é".into()));
+        assert_eq!(normalize_space(&[Value::Text(" é\t🙂  界 ".into())]).unwrap(),
+            Value::Text("é 🙂 界".into()));
     }
 }
