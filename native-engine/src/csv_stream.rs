@@ -399,6 +399,34 @@ impl<R: BufRead> Iterator for CsvStream<R> {
 }
 
 #[cfg(test)]
+mod bom_before_quoted_header_regressions {
+    use super::*;
+    use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn quoted_header_after_bom_matches_eager_reader_across_short_reads() {
+        let input = "\u{feff}\"id\",\"note\"\r\n1,\"hello\"\r\n2,\"world\"\r\n";
+        let eager = crate::csv::from_csv_str(input).unwrap();
+        let reader = BufReader::with_capacity(1, Cursor::new(input.as_bytes()));
+        let streamed = CsvStream::new_typed(reader, 1, 64, eager.schema().clone())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = streamed.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, eager.rows().unwrap());
+        assert_eq!(streamed.len(), 2);
+    }
+
+    #[test]
+    fn other_utf8_prefixes_and_later_bom_are_not_stripped() {
+        let input = "\u{f000},note\nx,\u{feff}kept\n";
+        let eager = crate::csv::from_csv_str(input).unwrap();
+        let streamed = CsvStream::new_typed(Cursor::new(input), 3, 64,
+            eager.schema().clone()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(streamed[0].rows().unwrap(), eager.rows().unwrap());
+        assert_eq!(streamed[0].value(0, 1).unwrap(), &Value::Text("\u{feff}kept".into()));
+    }
+}
+
+#[cfg(test)]
 mod buffered_unquoted_record_scan_tests {
     use super::*;
     use std::io::Cursor;
@@ -877,30 +905,3 @@ mod streamed_validated_columns_perf_tests {
     }
 }
 
-#[cfg(test)]
-mod bom_before_quoted_header_regressions {
-    use super::*;
-    use std::io::{BufReader, Cursor};
-
-    #[test]
-    fn quoted_header_after_bom_matches_eager_reader_across_short_reads() {
-        let input = "\u{feff}\"id\",\"note\"\r\n1,\"hello\"\r\n2,\"world\"\r\n";
-        let eager = crate::csv::from_csv_str(input).unwrap();
-        let reader = BufReader::with_capacity(1, Cursor::new(input.as_bytes()));
-        let streamed = CsvStream::new_typed(reader, 1, 64, eager.schema().clone())
-            .unwrap().collect::<Result<Vec<_>>>().unwrap();
-        let rows = streamed.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
-        assert_eq!(rows, eager.rows().unwrap());
-        assert_eq!(streamed.len(), 2);
-    }
-
-    #[test]
-    fn other_utf8_prefixes_and_later_bom_are_not_stripped() {
-        let input = "\u{f000},note\nx,\u{feff}kept\n";
-        let eager = crate::csv::from_csv_str(input).unwrap();
-        let streamed = CsvStream::new_typed(Cursor::new(input), 3, 64,
-            eager.schema().clone()).unwrap().collect::<Result<Vec<_>>>().unwrap();
-        assert_eq!(streamed[0].rows().unwrap(), eager.rows().unwrap());
-        assert_eq!(streamed[0].value(0, 1).unwrap(), &Value::Text("\u{feff}kept".into()));
-    }
-}
