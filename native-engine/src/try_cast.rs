@@ -1,5 +1,5 @@
 //! Non-throwing conversions for SQL TRY_CAST. Invalid values produce NULL.
-use crate::{scalar::Value, schema::DataType};
+use crate::{scalar::{Value, parse_boolean_text}, schema::DataType};
 
 pub fn convert(value: Value, target: DataType) -> Value {
     if value.is_null() { return Value::Null; }
@@ -42,16 +42,8 @@ pub fn convert(value: Value, target: DataType) -> Value {
             Value::Boolean(n) => Value::Boolean(n),
             Value::Integer(n) => Value::Boolean(n != 0),
             Value::Float(n) if n.is_finite() => Value::Boolean(n != 0.0),
-            Value::Text(n) => {
-                let text = n.trim();
-                if text.eq_ignore_ascii_case("true") || text == "1" {
-                    Value::Boolean(true)
-                } else if text.eq_ignore_ascii_case("false") || text == "0" {
-                    Value::Boolean(false)
-                } else {
-                    Value::Null
-                }
-            },
+            Value::Text(n) => parse_boolean_text(&n)
+                .map(Value::Boolean).unwrap_or(Value::Null),
             _ => Value::Null,
         },
     }
@@ -106,5 +98,22 @@ mod try_cast_float_identity_regressions {
         }
         assert_eq!(convert(Value::Float(f64::NAN), DataType::Integer), Value::Null);
         assert_eq!(convert(Value::Float(f64::INFINITY), DataType::Boolean), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod shared_boolean_text_cast_tests {
+    use super::*;
+
+    #[test]
+    fn both_casts_accept_the_same_boolean_text() {
+        for (text, value) in [(" TRUE ", true), ("false", false), ("1", true), (" 0 ", false)] {
+            let input = Value::Text(text.into());
+            assert_eq!(input.cast_to(DataType::Boolean).unwrap(), Value::Boolean(value));
+            assert_eq!(convert(input, DataType::Boolean), Value::Boolean(value));
+        }
+        let invalid = Value::Text("yes".into());
+        assert!(invalid.cast_to(DataType::Boolean).is_err());
+        assert_eq!(convert(invalid, DataType::Boolean), Value::Null);
     }
 }
