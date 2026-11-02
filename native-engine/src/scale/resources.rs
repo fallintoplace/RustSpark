@@ -28,11 +28,15 @@ impl MemoryBudget {
 
     pub fn remaining(&self) -> usize { self.limit.saturating_sub(self.used()) }
 
+    fn guard(&self, bytes: usize) -> Reservation {
+        Reservation { budget: self.clone(), bytes }
+    }
+
     /// Atomically reserve estimated operator memory. The returned guard releases
     /// the reservation even if the operator exits with an error.
     pub fn reserve(&self, bytes: usize) -> Result<Reservation> {
         self.charge(bytes)?;
-        Ok(Reservation { budget: self.clone(), bytes })
+        Ok(self.guard(bytes))
     }
 
     /// Claim as much of the requested capacity as is currently free, without
@@ -43,14 +47,14 @@ impl MemoryBudget {
         loop {
             let granted = requested.min(self.limit.saturating_sub(used));
             if granted == 0 {
-                return Ok(Reservation { budget: self.clone(), bytes: 0 });
+                return Ok(self.guard(0));
             }
             let next = used.checked_add(granted)
                 .ok_or_else(|| Error::Execution("memory reservation overflow".into()))?;
             match self.used.compare_exchange_weak(
                 used, next, Ordering::AcqRel, Ordering::Acquire
             ) {
-                Ok(_) => return Ok(Reservation { budget: self.clone(), bytes: granted }),
+                Ok(_) => return Ok(self.guard(granted)),
                 Err(observed) => used = observed,
             }
         }
