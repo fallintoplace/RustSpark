@@ -584,6 +584,32 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("EXTRACT")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let part = self.identifier()?;
+                let (start, length) = match part.to_ascii_uppercase().as_str() {
+                    "YEAR" => (1, 4),
+                    "MONTH" => (6, 2),
+                    "DAY" => (9, 2),
+                    _ => return Err(Error::Unsupported(format!("EXTRACT date part: {part}"))),
+                };
+                self.expect_word("FROM")?;
+                let date = self.expression(0)?;
+                self.expect_symbol(')')?;
+                // Native DATE values are currently ISO calendar text. Use
+                // the existing typed substring/cast operators rather than
+                // adding a second date conversion to the row executor.
+                let component = Expr::Call {
+                    name: "substring".into(),
+                    args: vec![date, Expr::Literal(Value::Integer(start)),
+                        Expr::Literal(Value::Integer(length))],
+                };
+                Ok(Expr::Cast {
+                    expression: Box::new(component), target: DataType::Integer,
+                })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("POSITION")
                 && self.peek() == Some(&Token::Symbol('(')) =>
             {
@@ -2455,5 +2481,33 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_extract_calendar_tests {
+    use super::*;
+
+    #[test]
+    fn extract_year_month_day_from_iso_text() {
+        let plan = parse_sql(
+            "SELECT EXTRACT(YEAR FROM '1998-12-01') AS y, \
+             EXTRACT(MONTH FROM '1998-12-01') AS m, \
+             EXTRACT(DAY FROM '1998-12-01') AS d"
+        ).unwrap();
+        let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Integer(1998), Value::Integer(12), Value::Integer(1)
+        ]]);
+        assert!(parse_sql("SELECT EXTRACT(HOUR FROM '1998-12-01')").is_err());
+    }
+
+    #[test]
+    fn extract_preserves_null_values() {
+        let plan = parse_sql("SELECT EXTRACT(YEAR FROM NULL)").unwrap();
+        let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Null]]);
     }
 }
