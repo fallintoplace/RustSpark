@@ -2,6 +2,14 @@
 use std::{collections::HashMap, sync::Arc};
 use crate::{batch::Batch, scalar::Value, schema::DataType, Error, Result};
 
+fn clone_text_fallibly(value: &str) -> Result<String> {
+    let mut owned = String::new();
+    owned.try_reserve_exact(value.len())
+        .map_err(|_| Error::Execution("dictionary text allocation failed".into()))?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
 #[derive(Clone, Debug)]
 pub struct DictionaryColumn {
     dictionary: Arc<Vec<String>>,
@@ -26,7 +34,9 @@ impl DictionaryColumn {
         // Remember the borrowed last value to avoid hashing it once per row.
         let mut previous: Option<(&str, u32)> = None;
         let mut dictionary = Vec::new();
-        let mut indices = Vec::with_capacity(batch.num_rows());
+        let mut indices = Vec::new();
+        indices.try_reserve_exact(batch.num_rows())
+            .map_err(|_| Error::Execution("dictionary index allocation failed".into()))?;
         let mut bytes = 0usize;
         for value in batch.column(index)? {
             match value {
@@ -51,7 +61,11 @@ impl DictionaryColumn {
                             .ok_or_else(|| Error::Execution("dictionary byte limit exceeded".into()))?;
                         let code = u32::try_from(dictionary.len())
                             .map_err(|_| Error::Execution("dictionary ID overflow".into()))?;
-                        dictionary.push(text.clone());
+                        dictionary.try_reserve(1)
+                            .map_err(|_| Error::Execution("dictionary key allocation failed".into()))?;
+                        seen.try_reserve(1)
+                            .map_err(|_| Error::Execution("dictionary hash allocation failed".into()))?;
+                        dictionary.push(clone_text_fallibly(text)?);
                         seen.insert(key, code);
                         code
                     };
@@ -77,7 +91,7 @@ impl DictionaryColumn {
     pub fn value(&self, index: usize) -> Result<Value> {
         match self.indices.get(index) {
             Some(None) => Ok(Value::Null),
-            Some(Some(id)) => Ok(Value::Text(self.lookup_code(*id)?.to_owned())),
+            Some(Some(id)) => Ok(Value::Text(clone_text_fallibly(self.lookup_code(*id)?)?)),
             None => Err(Error::Execution("dictionary index out of bounds".into())),
         }
     }
@@ -119,11 +133,13 @@ impl DictionaryColumn {
                     .ok_or_else(|| Error::Execution("dictionary decode budget exceeded".into()))?;
             }
         }
-        let mut rows = Vec::with_capacity(self.indices.len());
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(self.indices.len())
+            .map_err(|_| Error::Execution("dictionary decoded row allocation failed".into()))?;
         for code in &self.indices {
             let value = match code {
                 None => Value::Null,
-                Some(id) => Value::Text(self.lookup_code(*id)?.to_owned()),
+                Some(id) => Value::Text(clone_text_fallibly(self.lookup_code(*id)?)?),
             };
             rows.push(value);
         }
@@ -149,7 +165,10 @@ impl DictionaryColumn {
         if used > max_bytes {
             return Err(Error::Execution("dictionary decode budget exceeded".into()));
         }
-        let mut references = vec![0usize; self.dictionary.len()];
+        let mut references = Vec::new();
+        references.try_reserve_exact(self.dictionary.len())
+            .map_err(|_| Error::Execution("dictionary reference allocation failed".into()))?;
+        references.resize(self.dictionary.len(), 0usize);
         for index in self.indices.iter().flatten() {
             let code = usize::try_from(*index)
                 .map_err(|_| Error::Execution("invalid dictionary code".into()))?;
@@ -163,8 +182,13 @@ impl DictionaryColumn {
         let Self { dictionary, indices, .. } = self;
         let table = Arc::try_unwrap(dictionary)
             .expect("single-owned dictionary Arc can be unwrapped");
-        let mut available = table.into_iter().map(Some).collect::<Vec<_>>();
-        let mut output = Vec::with_capacity(indices.len());
+        let mut available = Vec::new();
+        available.try_reserve_exact(table.len())
+            .map_err(|_| Error::Execution("dictionary ownership allocation failed".into()))?;
+        available.extend(table.into_iter().map(Some));
+        let mut output = Vec::new();
+        output.try_reserve_exact(indices.len())
+            .map_err(|_| Error::Execution("dictionary decoded row allocation failed".into()))?;
         for index in indices {
             match index {
                 None => output.push(Value::Null),
@@ -174,8 +198,8 @@ impl DictionaryColumn {
                     let text = if references[code] == 0 {
                         available[code].take().expect("final dictionary reference")
                     } else {
-                        available[code].as_ref()
-                            .expect("live dictionary reference").clone()
+                        clone_text_fallibly(available[code].as_ref()
+                            .expect("live dictionary reference"))?
                     };
                     output.push(Value::Text(text));
                 }
@@ -754,5 +778,41 @@ mod clustered_dictionary_encoding_regressions {
         assert_eq!(encoded.decode_with_budget(8 * 1024 * 1024).unwrap(), values);
         assert!(DictionaryColumn::from_batch(&batch, "s", 1, bytes, batch.num_rows()).is_err());
         assert!(DictionaryColumn::from_batch(&batch, "s", 2, bytes - 1, batch.num_rows()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_dictionary_encode_decode_regressions {
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    #[test]
+    fn repeated_and_distinct_wide_unicode_keys_decode_identically() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        let wide = "é🙂東京".repeat(8_192);
+        let original = vec![
+            Value::Text(wide.clone()), Value::Null,
+            Value::Text(wide.clone()), Value::Text("other".into()),
+            Value::Text(wide.clone()),
+        ];
+        let batch = Batch::from_rows(schema, original.iter().cloned()
+            .map(|value| vec![value]).collect()).unwrap();
+        let column = DictionaryColumn::from_batch(&batch, "label", 8,
+            1024 * 1024, 32).unwrap();
+        let budget = original.len() * std::mem::size_of::<Value>()
+            + 3 * wide.len() + "other".len();
+        assert!(column.decode_with_budget(budget - 1).is_err());
+        assert_eq!(column.decode_with_budget(budget).unwrap(), original);
+        assert_eq!(column.clone().into_decoded_with_budget(budget).unwrap(), original);
+        assert_eq!(column.into_decoded_with_budget(budget).unwrap(), original);
+    }
+
+    #[test]
+    fn encoding_enforces_distinct_and_row_limits_before_materialization() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, true)]).unwrap();
+        let batch = Batch::from_rows(schema,
+            vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())]]).unwrap();
+        assert!(DictionaryColumn::from_batch(&batch, "label", 1, 128, 2).is_err());
+        assert!(DictionaryColumn::from_batch(&batch, "label", 2, 128, 1).is_err());
     }
 }
