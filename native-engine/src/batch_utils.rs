@@ -9,6 +9,18 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     crate::batch_chunks::chunks(batch, rows_per_batch)?.collect()
 }
 
+fn checked_concat_rows(schema: &Schema, batch: &Batch, total: usize, max_rows: usize) -> Result<usize> {
+    if batch.schema() != schema {
+        return Err(Error::Schema("cannot concatenate different batch schemas".into()));
+    }
+    let total = total.checked_add(batch.num_rows())
+        .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
+    if total > max_rows {
+        return Err(Error::Execution("batch collection row limit exceeded".into()));
+    }
+    Ok(total)
+}
+
 pub fn concat(
     schema: &Schema,
     batches: impl IntoIterator<Item = Batch>,
@@ -19,46 +31,25 @@ pub fn concat(
     // Inspect at most two owned batches before deciding whether concatenation
     // actually needs to duplicate any column buffers.
     let Some(first) = inputs.next() else { return Ok(Batch::empty(schema.clone())); };
-    if first.schema() != schema {
-        return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-    }
-    if first.num_rows() > max_rows {
-        return Err(Error::Execution("batch collection row limit exceeded".into()));
-    }
+    let mut total = checked_concat_rows(schema, &first, 0, max_rows)?;
     let Some(second) = inputs.next() else { return Ok(first); };
     // A provably exhausted iterator with one empty batch can move its
     // nonempty batch directly instead of duplicating all column values.
     if inputs.size_hint().1 == Some(0) {
-        if second.schema() != schema {
-            return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-        }
+        checked_concat_rows(schema, &second, 0, max_rows)?;
         if second.num_rows() == 0 {
-            if first.num_rows() > max_rows {
-                return Err(Error::Execution("batch collection row limit exceeded".into()));
-            }
             return Ok(first);
         }
         if first.num_rows() == 0 {
-            if second.num_rows() > max_rows {
-                return Err(Error::Execution("batch collection row limit exceeded".into()));
-            }
             return Ok(second);
         }
     }
     // The first owned batch already owns validated column buffers. Use
     // them as accumulation buffers instead of allocating one Vec per column
     // and copying the first batch into those fresh vectors.
-    let mut total = first.num_rows();
     let mut columns = first.into_columns();
     for batch in std::iter::once(second).chain(inputs) {
-        if batch.schema() != schema {
-            return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-        }
-        total = total.checked_add(batch.num_rows())
-            .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
-        if total > max_rows {
-            return Err(Error::Execution("batch collection row limit exceeded".into()));
-        }
+        total = checked_concat_rows(schema, &batch, total, max_rows)?;
         // The iterator owns each batch. Move its column values rather than
         // deep-cloning TEXT payloads for every concatenated row.
         for (output, values) in columns.iter_mut().zip(batch.into_columns()) {
