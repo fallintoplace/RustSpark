@@ -796,7 +796,65 @@ impl Parser {
             // then preserves the outer schema while returning outer rows
             // exactly once if the witness relation is nonempty.
             let negate = self.take_word("NOT");
-            if self.take_word("EXISTS") {
+            // An uncorrelated global aggregate returns exactly one row.
+            // This lets WHERE compare against a scalar aggregate subquery
+            // without permitting arbitrary multi-row scalar relations.
+            let scalar_compare = matches!(self.peek(), Some(Token::Word(_)))
+                && matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Operator(op)) if matches!(op.as_str(),
+                        "=" | "==" | "<>" | "!=" | "<" | "<=" | ">" | ">="))
+                && self.tokens.get(self.index + 2) == Some(&Token::Symbol('('))
+                && matches!(self.tokens.get(self.index + 3),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"));
+            if !negate && scalar_compare {
+                let outer_column = self.identifier()?;
+                let operator = match self.next() {
+                    Some(Token::Operator(op)) => match op.as_str() {
+                        "=" | "==" => BinaryOp::Equal,
+                        "<>" | "!=" => BinaryOp::NotEqual,
+                        "<" => BinaryOp::Less,
+                        "<=" => BinaryOp::LessEqual,
+                        ">" => BinaryOp::Greater,
+                        ">=" => BinaryOp::GreaterEqual,
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                };
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("scalar subquery nesting limit exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let inner = self.select_with_intersections()?;
+                let inner = self.finish_query(inner)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                // A global aggregate with no grouping always has one row.
+                let aggregate = match &inner {
+                    Plan::Project { input, selections } if selections.len() == 1 =>
+                        matches!(input.as_ref(), Plan::Aggregate { group_by, .. } if group_by.is_empty()),
+                    _ => false,
+                };
+                if !aggregate {
+                    return Err(Error::Unsupported(
+                        "scalar subquery requires one global aggregate column".into()
+                    ));
+                }
+                let subquery_alias = match &inner {
+                    Plan::Project { selections, .. } => selections[0].alias.clone(),
+                    _ => unreachable!(),
+                };
+                plan = Plan::CrossJoin {
+                    left: Box::new(plan),
+                    right: Box::new(inner),
+                }.filter(Expr::binary(
+                    Expr::Column(outer_column), operator,
+                    Expr::Column(subquery_alias),
+                ));
+                if self.take_word("AND") {
+                    plan = plan.filter(self.expression(2)?);
+                }
+            } else if self.take_word("EXISTS") {
                 self.expect_symbol('(')?;
                 if self.subquery_depth >= 32 {
                     return Err(Error::Parse("EXISTS subquery nesting limit exceeded".into()));
