@@ -42,30 +42,30 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if !left { result.push_str(text); }
     if let Some(character) = one_char {
         for _ in 0..(target - size) { result.push(character); }
-    } else if pad.is_ascii() {
-        // For multi-character ASCII patterns, copy whole runs using
-        // push_str rather than decoding and appending each scalar.
-        let padding = target - size;
-        let full_runs = padding / pad.len();
-        append_repeated_pattern(&mut result, pad, full_runs)?;
-        result.push_str(&pad[..padding % pad.len()]);
     } else {
-        // Repeat whole UTF-8 patterns instead of pushing every Unicode
-        // scalar individually. The final partial run ends on a char boundary.
-        let pattern_chars = pad.chars().count();
-        let padding = target - size;
-        let complete = padding / pattern_chars;
-        append_repeated_pattern(&mut result, pad, complete)?;
-        let remainder = padding % pattern_chars;
-        if remainder != 0 {
-            let end = pad.char_indices().nth(remainder)
-                .expect("partial pattern has an interior UTF-8 boundary").0;
-            result.push_str(&pad[..end]);
-        }
+        append_pattern_padding(&mut result, pad, target - size)?;
     }
     if left { result.push_str(text); }
     Ok(Value::Text(result))
 }
+// Append full patterns followed by a UTF-8-safe partial pattern.
+fn append_pattern_padding(output: &mut String, pattern: &str, count: usize) -> Result<()> {
+    let width = if pattern.is_ascii() { pattern.len() } else { pattern.chars().count() };
+    let full_runs = count / width;
+    append_repeated_pattern(output, pattern, full_runs)?;
+    let remainder = count % width;
+    if remainder != 0 {
+        let end = if pattern.is_ascii() {
+            remainder
+        } else {
+            pattern.char_indices().nth(remainder)
+                .expect("partial pattern has an interior UTF-8 boundary").0
+        };
+        output.push_str(&pattern[..end]);
+    }
+    Ok(())
+}
+
 // Append a whole pad pattern in logarithmically many chunks rather than
 // making one push_str call per run. The caller has bounded output length.
 fn append_repeated_pattern(output: &mut String, pattern: &str, count: usize) -> Result<()> {
@@ -91,6 +91,21 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "lpad", min_args: 2, max_args: 3, result_type: output, call: lpad },
     Function { name: "rpad", min_args: 2, max_args: 3, result_type: output, call: rpad },
 ];
+#[cfg(test)]
+mod shared_padding_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_padding_preserves_multibyte_character_boundaries() {
+        assert_eq!(rpad(&[
+            Value::Text("A".into()), Value::Integer(8), Value::Text("🙂!".into()),
+        ]).unwrap(), Value::Text("A🙂!🙂!🙂!🙂".into()));
+        assert_eq!(lpad(&[
+            Value::Text("x".into()), Value::Integer(6), Value::Text("ab".into()),
+        ]).unwrap(), Value::Text("ababax".into()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
