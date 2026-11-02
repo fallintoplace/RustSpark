@@ -316,11 +316,10 @@ mod base32_utf8_decoder_tests {
     #[test]
     fn rejects_corruption_and_noncanonical_padding() {
         for input in [
-            "MZXW6", "MZXW6===", "MY=======", "MZ======",
+            "MZXW6", "MY=======", "MZ======",
             "MZXW6==A", "MY==Y===", "MZXW6===MZXW6===",
             "74======", "MZXW6===\n",
         ] {
-            if input == "MZXW6===" { continue; }
             assert!(from_base32_utf8(&[Value::Text(input.into())]).is_err(), "{input:?}");
         }
         assert!(from_base32_utf8(&[Value::Text("A".repeat(MAX_INPUT_BYTES * 2 + 8))]).is_err());
