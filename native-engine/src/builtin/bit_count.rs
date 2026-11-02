@@ -38,8 +38,10 @@ fn getbit(args: &[Value]) -> Result<Value> {
 
 fn bitmap_bit_position(args: &[Value]) -> Result<Value> {
     let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null); };
-    let offset = (i128::from(value) - 1).rem_euclid(32_768);
-    Ok(Value::Integer(offset as i64))
+    // The bucket size is a power of two. Wrapping arithmetic preserves
+    // Euclidean modulo for negative values, including i64::MIN.
+    let offset = value.wrapping_sub(1) & 32_767;
+    Ok(Value::Integer(offset))
 }
 
 fn bitmap_bit_position_type(types: &[DataType]) -> Result<DataType> {
@@ -125,5 +127,24 @@ mod spark_bitmap_position_tests {
         let plan = sql::parse_sql("SELECT BITMAP_BIT_POSITION(1), BITMAP_BIT_POSITION(123)").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(0), Value::Integer(122)]]);
+    }
+}
+
+#[cfg(test)]
+mod bitmap_masked_position_tests {
+    use super::*;
+
+    #[test]
+    fn masked_offsets_match_wide_euclidean_modulo() {
+        for value in -65_536_i64..=65_536 {
+            let expected = (i128::from(value) - 1).rem_euclid(32_768) as i64;
+            assert_eq!(bitmap_bit_position(&[Value::Integer(value)]).unwrap(),
+                Value::Integer(expected));
+        }
+        for value in [i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX] {
+            let expected = (i128::from(value) - 1).rem_euclid(32_768) as i64;
+            assert_eq!(bitmap_bit_position(&[Value::Integer(value)]).unwrap(),
+                Value::Integer(expected));
+        }
     }
 }
