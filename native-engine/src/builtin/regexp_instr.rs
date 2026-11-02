@@ -5,6 +5,14 @@ fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Integer)
 }
+fn sql_position(text: &str, byte_offset: usize) -> Result<Value> {
+    let characters = super::char_length::character_count(&text[..byte_offset]);
+    let position = characters.checked_add(1)
+        .and_then(|count| i64::try_from(count).ok())
+        .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
+    Ok(Value::Integer(position))
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -30,45 +38,40 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
         let Some(index) = text.find(pattern) else { return Ok(Value::Integer(0)); };
-        let prefix = &text[..index];
-        let count = super::char_length::character_count(prefix);
-        return i64::try_from(count + 1).map(Value::Integer)
-            .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()));
+        return sql_position(text, index);
     }
     if pattern == "[A-Za-z]" || pattern == "[A-Za-z]+" {
         // ASCII matches are UTF-8 boundaries; convert byte offsets to SQL
         // one-based Unicode scalar positions only for the matched prefix.
         let Some(byte_index) = text.bytes().position(|byte| byte.is_ascii_alphabetic())
             else { return Ok(Value::Integer(0)); };
-        let position = super::char_length::character_count(&text[..byte_index])
-            .checked_add(1)
-            .and_then(|count| i64::try_from(count).ok())
-            .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
-        return Ok(Value::Integer(position));
+        return sql_position(text, byte_index);
     }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
         // An ASCII digit is a UTF-8 scalar boundary, but SQL positions
         // count Unicode characters rather than bytes.
         let Some(byte_index) = text.bytes().position(|byte| byte.is_ascii_digit())
             else { return Ok(Value::Integer(0)); };
-        let position = super::char_length::character_count(&text[..byte_index])
-            .checked_add(1)
-            .and_then(|n| i64::try_from(n).ok())
-            .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
-        return Ok(Value::Integer(position));
+        return sql_position(text, byte_index);
     }
     let pattern = regex_support::compile(pattern)?;
     let Some(matched) = pattern.find(text) else { return Ok(Value::Integer(0)) };
-    let prefix = &text[..matched.start()];
-    let offset = super::char_length::character_count(prefix);
-    let position = offset.checked_add(1)
-        .and_then(|n| i64::try_from(n).ok())
-        .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
-    Ok(Value::Integer(position))
+    sql_position(text, matched.start())
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "regexp_instr", min_args: 2, max_args: 2, result_type: output, call: evaluate,
 }];
+
+#[cfg(test)]
+mod unicode_position_helper_tests {
+    use super::*;
+
+    #[test]
+    fn byte_offsets_convert_to_one_based_unicode_positions() {
+        assert_eq!(sql_position("é🙂a", 0).unwrap(), Value::Integer(1));
+        assert_eq!(sql_position("é🙂a", "é🙂".len()).unwrap(), Value::Integer(3));
+    }
+}
 
 #[cfg(test)]
 mod tests {
