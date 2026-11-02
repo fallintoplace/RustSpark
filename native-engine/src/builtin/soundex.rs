@@ -23,22 +23,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
     else { Err(Error::Type("SOUNDEX has incompatible SQL argument types".into())) }
 }
 
-fn evaluate(args: &[Value]) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    // Enforce the same resource limit regardless of the first character.
-    if text.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("SOUNDEX input exceeds native 16 MiB budget".into()));
-    }
-    let mut characters = text.chars();
-    let Some(first) = characters.next() else { return Ok(Value::Text(String::new())); };
-    if !first.is_ascii_alphabetic() {
-        // Non-letter prefixes return the whole input, not the four-byte code.
-        let mut preserved = String::new();
-        preserved.try_reserve_exact(text.len())
-            .map_err(|_| Error::Execution("SOUNDEX output allocation failed".into()))?;
-        preserved.push_str(text);
-        return Ok(Value::Text(preserved));
-    }
+fn encode_soundex(text: &str, first: char) -> String {
     let mut result = String::with_capacity(4);
     result.push(first.to_ascii_uppercase());
     let mut last = soundex_digit(first);
@@ -60,7 +45,26 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         }
     }
     while result.len() < 4 { result.push('0'); }
-    Ok(Value::Text(result))
+    result
+}
+
+fn evaluate(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    // Enforce the same resource limit regardless of the first character.
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(Error::Execution("SOUNDEX input exceeds native 16 MiB budget".into()));
+    }
+    let mut characters = text.chars();
+    let Some(first) = characters.next() else { return Ok(Value::Text(String::new())); };
+    if !first.is_ascii_alphabetic() {
+        // Non-letter prefixes return the whole input, not the four-byte code.
+        let mut preserved = String::new();
+        preserved.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("SOUNDEX output allocation failed".into()))?;
+        preserved.push_str(text);
+        return Ok(Value::Text(preserved));
+    }
+    Ok(Value::Text(encode_soundex(text, first)))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -165,5 +169,23 @@ mod fallible_soundex_passthrough_tests {
         let oversized = format!("🙂{}", "a".repeat(16 * 1024 * 1024));
         assert!(matches!(evaluate(&[Value::Text(oversized)]),
             Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod soundex_encoder_separation_tests {
+    use super::*;
+
+    #[test]
+    fn encoder_preserves_ascii_and_unicode_suffixes() {
+        for (source, expected) in [
+            ("Robert", "R163"), ("Pfister", "P236"),
+            ("R🙂obert", "R163"), ("AéB", "A100"),
+        ] {
+            let first = source.chars().next().unwrap();
+            assert_eq!(encode_soundex(source, first), expected);
+            assert_eq!(evaluate(&[Value::Text(source.into())]).unwrap(),
+                Value::Text(expected.into()));
+        }
     }
 }
