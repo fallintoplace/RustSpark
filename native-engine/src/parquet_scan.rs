@@ -714,7 +714,7 @@ mod streaming_parquet_schema_tests {
 #[cfg(test)]
 mod parquet_scan_terminal_decode_errors_tests {
     use super::*;
-    use arrow_array::{ArrayRef, Date32Array, RecordBatch};
+    use arrow_array::{ArrayRef, Date64Array, RecordBatch};
     use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
 
@@ -726,7 +726,7 @@ mod parquet_scan_terminal_decode_errors_tests {
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
         ));
         let record = RecordBatch::try_from_iter(vec![
-            ("date", Arc::new(Date32Array::from(vec![1, 2])) as ArrayRef),
+            ("date", Arc::new(Date64Array::from(vec![1, 2])) as ArrayRef),
         ]).unwrap();
         let mut writer = ArrowWriter::try_new(
             File::create(&path).unwrap(), record.schema(), None,
