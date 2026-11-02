@@ -27,6 +27,19 @@ pub(super) fn decode(text: &str) -> Result<String> {
         copy.push_str(text);
         return Ok(copy);
     };
+    // Form-encoded values often contain only '+' substitutions, not percent
+    // escapes. Make one copy, then replace ASCII bytes in place.
+    if bytes[first_escape] == b'+' && !bytes[first_escape..].contains(&b'%') {
+        let mut decoded = Vec::new();
+        decoded.try_reserve_exact(bytes.len())
+            .map_err(|_| Error::Execution("URL_DECODE output allocation failed".into()))?;
+        decoded.extend_from_slice(bytes);
+        for byte in &mut decoded[first_escape..] {
+            if *byte == b'+' { *byte = b' '; }
+        }
+        return Ok(String::from_utf8(decoded)
+            .expect("replacing ASCII '+' preserves UTF-8"));
+    }
     let mut decoded = Vec::new();
     decoded.try_reserve_exact(bytes.len())
         .map_err(|_| Error::Execution("URL_DECODE output allocation failed".into()))?;
@@ -153,5 +166,28 @@ mod fallible_url_decode_buffer_tests {
         assert_eq!(decode("%2B+%25").unwrap(), "+ %");
         assert!(matches!(decode(&"a".repeat(16 * 1024 * 1024 + 1)),
             Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod plus_only_url_decode_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn plus_only_inputs_preserve_long_utf8_and_empty_segments() {
+        for (input, expected) in [
+            ("+", " "), ("++", "  "), ("a+b+c", "a b c"),
+            ("é🙂+東京++ok+", "é🙂 東京  ok "),
+            ("a%2Bb+c", "a+b c"), ("a+b%20c", "a b c"),
+            ("%2B", "+"),
+        ] {
+            assert_eq!(decode(input).unwrap(), expected);
+        }
+        assert!(decode("a+b%GG").is_err());
+        let text = format!("{}+{}++", "é🙂".repeat(5000), "東京".repeat(5000));
+        assert_eq!(decode(&text).unwrap(), text.replace('+', " "));
+        assert_eq!(decode("no special characters").unwrap(),
+            "no special characters");
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
