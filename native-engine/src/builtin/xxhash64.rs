@@ -66,6 +66,28 @@ fn hash_bytes(bytes: &[u8], seed: u64) -> u64 {
         hash ^= u64::from(byte).wrapping_mul(PRIME5);
         hash = hash.rotate_left(11).wrapping_mul(PRIME1);
     }
+    avalanche(hash)
+}
+
+// Fixed-width SQL scalars need neither chunk iterators nor a dynamic tail.
+#[inline]
+fn hash_u32(value: u32, seed: u64) -> u64 {
+    let mut hash = seed.wrapping_add(PRIME5).wrapping_add(4);
+    hash ^= u64::from(value).wrapping_mul(PRIME1);
+    hash = hash.rotate_left(23).wrapping_mul(PRIME2).wrapping_add(PRIME3);
+    avalanche(hash)
+}
+
+#[inline]
+fn hash_u64(value: u64, seed: u64) -> u64 {
+    let mut hash = seed.wrapping_add(PRIME5).wrapping_add(8);
+    hash ^= round(0, value);
+    hash = hash.rotate_left(27).wrapping_mul(PRIME1).wrapping_add(PRIME4);
+    avalanche(hash)
+}
+
+#[inline]
+fn avalanche(mut hash: u64) -> u64 {
     hash ^= hash >> 33;
     hash = hash.wrapping_mul(PRIME2);
     hash ^= hash >> 29;
@@ -88,14 +110,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     for value in args {
         seed = match value {
             Value::Null => seed,
-            Value::Boolean(value) => hash_bytes(&u32::from(*value).to_le_bytes(), seed),
-            Value::Integer(value) => hash_bytes(&value.to_le_bytes(), seed),
+            Value::Boolean(value) => hash_u32(u32::from(*value), seed),
+            Value::Integer(value) => hash_u64(*value as u64, seed),
             Value::Float(value) => {
                 // Spark hashes -0.0 like +0.0 and canonicalizes NaN payloads.
                 let bits = if *value == 0.0 { 0 }
                     else if value.is_nan() { 0x7ff8_0000_0000_0000 }
                     else { value.to_bits() };
-                hash_bytes(&bits.to_le_bytes(), seed)
+                hash_u64(bits, seed)
             }
             Value::Text(value) => hash_bytes(value.as_bytes(), seed),
         };
@@ -144,5 +166,42 @@ mod tests {
         let plan = sql::parse_sql("SELECT XXHASH64('Spark', 2) AS digest").unwrap();
         let batch = executor::execute(&plan, &Catalog::new()).unwrap();
         assert_eq!(batch.row(0).unwrap()[0], Value::Integer(6174828680566760385));
+    }
+}
+
+#[cfg(test)]
+mod fixed_width_xxhash_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_hashes_match_byte_hashing_for_multiple_seeds() {
+        for seed in [0, SPARK_SEED, u64::MAX, 0x0123_4567_89ab_cdef] {
+            for value in [0_u32, 1, 42, u32::MAX, 0x8000_0000] {
+                assert_eq!(hash_u32(value, seed),
+                    hash_bytes(&value.to_le_bytes(), seed));
+            }
+            for value in [0_u64, 1, 42, u64::MAX, 0x8000_0000_0000_0000,
+                0x0123_4567_89ab_cdef] {
+                assert_eq!(hash_u64(value, seed),
+                    hash_bytes(&value.to_le_bytes(), seed));
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_scalar_sql_hash_matches_reference_byte_chain() {
+        let values = [Value::Integer(i64::MIN), Value::Boolean(true),
+            Value::Float(-0.0), Value::Text("é🙂".into())];
+        let mut seed = SPARK_SEED;
+        for value in &values {
+            seed = match value {
+                Value::Integer(n) => hash_bytes(&n.to_le_bytes(), seed),
+                Value::Boolean(b) => hash_bytes(&u32::from(*b).to_le_bytes(), seed),
+                Value::Float(_) => hash_bytes(&0_u64.to_le_bytes(), seed),
+                Value::Text(text) => hash_bytes(text.as_bytes(), seed),
+                Value::Null => seed,
+            };
+        }
+        assert_eq!(evaluate(&values).unwrap(), Value::Integer(seed as i64));
     }
 }
