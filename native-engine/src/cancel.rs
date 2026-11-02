@@ -5,6 +5,19 @@ use std::{
 
 use crate::{Error, Result};
 
+/// Common monotonic clock checks for every query cancellation context.
+pub(crate) fn deadline_expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+pub(crate) fn deadline_remaining(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
+
+pub(crate) fn inherited_deadline(parent: Option<Instant>, local: Instant) -> Instant {
+    parent.map_or(local, |parent| parent.min(local))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Cancellation {
     cancelled: Arc<AtomicBool>,
@@ -50,20 +63,20 @@ impl QueryGuard {
     pub fn child_with_timeout(&self, timeout: Duration) -> Result<Self> {
         let local = Instant::now().checked_add(timeout)
             .ok_or_else(|| Error::Execution("query timeout overflow".into()))?;
-        let deadline = self.deadline.map_or(local, |parent| parent.min(local));
+        let deadline = inherited_deadline(self.deadline, local);
         Ok(Self { cancellation: self.cancellation.clone(), deadline: Some(deadline) })
     }
 
     /// Monotonic time left before the deadline, or None for unbounded queries.
     pub fn remaining_time(&self) -> Option<Duration> {
-        self.deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        deadline_remaining(self.deadline)
     }
 
     pub fn check(&self) -> Result<()> {
         if self.cancellation.is_cancelled() {
             return Err(Error::Execution("query cancelled".into()));
         }
-        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if deadline_expired(self.deadline) {
             return Err(Error::Execution("query deadline exceeded".into()));
         }
         Ok(())
