@@ -46,7 +46,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .and_then(|n| n.checked_add(text.len() - end))
         .filter(|&n| n <= MAX_BYTES)
         .ok_or_else(|| Error::Execution("OVERLAY output exceeds native 16 MiB budget".into()))?;
-    let mut result = String::with_capacity(result_len);
+    let mut result = String::new();
+    result.try_reserve_exact(result_len)
+        .map_err(|_| Error::Execution("OVERLAY output allocation failed".into()))?;
     result.push_str(&text[..begin]);
     result.push_str(replacement);
     result.push_str(&text[end..]);
@@ -244,5 +246,24 @@ mod common_suffix_memory_budget_tests {
             Err(Error::Execution(_))));
         assert_eq!(common_suffix(&[Value::Null, Value::Text("x".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod fallible_overlay_reservation_tests {
+    use super::*;
+    #[test]
+    fn replacement_and_insertion_keep_unicode_boundaries() {
+        assert_eq!(evaluate(&[
+            Value::Text("aéz".into()), Value::Text("🦀".into()),
+            Value::Integer(2),
+        ]).unwrap(), Value::Text("a🦀z".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("abc".into()), Value::Text("XY".into()),
+            Value::Integer(2), Value::Integer(0),
+        ]).unwrap(), Value::Text("aXYbc".into()));
+        assert_eq!(evaluate(&[
+            Value::Null, Value::Text("x".into()), Value::Integer(1),
+        ]).unwrap(), Value::Null);
     }
 }
