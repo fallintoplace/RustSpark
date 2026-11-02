@@ -212,6 +212,14 @@ fn validate_row_groups(indices: &[usize], available: usize) -> Result<()> {
 pub fn scan_with_options(
     path: impl AsRef<Path>, batch_size: usize, options: ParquetScanOptions<'_>,
 ) -> Result<ParquetScan> {
+    // Reject invalid requests before opening or touching the filesystem.
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    if let Some(limit) = options.limit {
+        options.offset.checked_add(limit)
+            .ok_or_else(|| Error::Execution("Parquet OFFSET + LIMIT overflow".into()))?;
+    }
     scan_with_options_open_file(File::open(path)?, batch_size, options, None)
 }
 
