@@ -150,7 +150,7 @@ impl CommitLedger {
         }
 
         let new_partitions = staged.states.keys()
-            .filter(|key| !self.states.contains_key(key)).count();
+            .filter(|&&key| !self.states.contains_key(&key)).count();
         if new_partitions > self.max_partitions.saturating_sub(self.states.len()) {
             return Err(Error::Execution("shuffle partition tracking budget exceeded".into()));
         }
