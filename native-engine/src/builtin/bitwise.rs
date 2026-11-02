@@ -18,9 +18,9 @@ fn not(args: &[Value]) -> Result<Value> {
 }
 
 fn rotate_right(args: &[Value]) -> Result<Value> {
-    let Some(number) = super::integer(&args[0])? else { return Ok(Value::Null); };
-    let Some(count) = super::integer(&args[1])? else { return Ok(Value::Null); };
-    Ok(Value::Integer(number.rotate_right(count.rem_euclid(64) as u32)))
+    Ok(super::bitshift::parts(args)?.map_or(Value::Null, |(number, count)| {
+        Value::Integer(number.rotate_right(count))
+    }))
 }
 
 fn bitmap_bucket_number(args: &[Value]) -> Result<Value> {
@@ -95,5 +95,20 @@ mod spark_bitmap_bucket_number_tests {
         let plan = sql::parse_sql("SELECT BITMAP_BUCKET_NUMBER(123), BITMAP_BUCKET_NUMBER(0)").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1), Value::Integer(0)]]);
+    }
+}
+
+#[cfg(test)]
+mod masked_rotate_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn rotate_right_uses_the_same_six_bit_count_as_shifts() {
+        for count in [-65_i64, -1, 0, 63, 64, 129] {
+            let args = [Value::Integer(0x1234), Value::Integer(count)];
+            assert_eq!(rotate_right(&args).unwrap(),
+                Value::Integer(0x1234_i64.rotate_right((count as u32) & 63)));
+        }
+        assert_eq!(rotate_right(&[Value::Null, Value::Integer(7)]).unwrap(), Value::Null);
     }
 }
