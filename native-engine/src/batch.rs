@@ -15,6 +15,42 @@ fn validate_value(value: &Value, field: &Field) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod fallible_row_to_column_build_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn rejects_ragged_input_before_materializing_columns() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, false),
+            Field::new("note", DataType::Text, true),
+        ]).unwrap();
+        assert!(matches!(Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Text("ok".into())],
+            vec![Value::Integer(2)],
+        ]), Err(Error::Schema(_))));
+        assert!(matches!(Batch::from_rows(schema.clone(), vec![
+            vec![Value::Null, Value::Text("invalid".into())],
+        ]), Err(Error::Type(_))));
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(7), Value::Text("é🙂".repeat(1024))],
+            vec![Value::Integer(8), Value::Null],
+        ]).unwrap();
+        assert_eq!(batch.row(0).unwrap()[0], Value::Integer(7));
+        assert_eq!(batch.num_rows(), 2);
+    }
+
+    #[test]
+    fn zero_column_batches_keep_explicit_rows() {
+        let schema = Schema::new(vec![]).unwrap();
+        let batch = Batch::from_rows(schema, vec![vec![], vec![], vec![]]).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert!(batch.schema().is_empty());
+        assert!(batch.rows().unwrap().iter().all(Vec::is_empty));
+    }
+}
+
 /// A compact, typed columnar batch. Each column has the same row count.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Batch {
@@ -1101,38 +1137,3 @@ mod ordered_owned_gather_no_index_regressions {
     }
 }
 
-#[cfg(test)]
-mod fallible_row_to_column_build_regressions {
-    use super::*;
-    use crate::schema::{DataType, Field, Schema};
-
-    #[test]
-    fn rejects_ragged_input_before_materializing_columns() {
-        let schema = Schema::new(vec![
-            Field::new("id", DataType::Integer, false),
-            Field::new("note", DataType::Text, true),
-        ]).unwrap();
-        assert!(matches!(Batch::from_rows(schema.clone(), vec![
-            vec![Value::Integer(1), Value::Text("ok".into())],
-            vec![Value::Integer(2)],
-        ]), Err(Error::Schema(_))));
-        assert!(matches!(Batch::from_rows(schema.clone(), vec![
-            vec![Value::Null, Value::Text("invalid".into())],
-        ]), Err(Error::Type(_))));
-        let batch = Batch::from_rows(schema, vec![
-            vec![Value::Integer(7), Value::Text("é🙂".repeat(1024))],
-            vec![Value::Integer(8), Value::Null],
-        ]).unwrap();
-        assert_eq!(batch.row(0).unwrap()[0], Value::Integer(7));
-        assert_eq!(batch.num_rows(), 2);
-    }
-
-    #[test]
-    fn zero_column_batches_keep_explicit_rows() {
-        let schema = Schema::new(vec![]).unwrap();
-        let batch = Batch::from_rows(schema, vec![vec![], vec![], vec![]]).unwrap();
-        assert_eq!(batch.num_rows(), 3);
-        assert!(batch.schema().is_empty());
-        assert!(batch.rows().unwrap().iter().all(Vec::is_empty));
-    }
-}
