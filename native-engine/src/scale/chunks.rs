@@ -3,26 +3,20 @@ use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
 
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
-fn validate_row(schema: &Schema, row: &[Value]) -> Result<()> {
+fn validated_row_bytes(schema: &Schema, row: &[Value], base: usize) -> Result<usize> {
     if row.len() != schema.len() {
         return Err(Error::Schema("row width does not match schema".into()));
     }
-    if let Some(field) = schema.fields().iter().zip(row).find_map(|(field, value)| {
-        (!field.data_type.accepts(value) || (!field.nullable && value.is_null()))
-            .then_some(field)
-    }) {
-        return Err(Error::Type(format!("invalid value in column {}", field.name)));
+    let mut bytes = base;
+    for (field, value) in schema.fields().iter().zip(row) {
+        if !field.data_type.accepts(value) || (!field.nullable && value.is_null()) {
+            return Err(Error::Type(format!("invalid value in column {}", field.name)));
+        }
+        if let Value::Text(text) = value {
+            bytes = bytes.saturating_add(text.capacity());
+        }
     }
-    Ok(())
-}
-
-fn estimated_row_bytes(row: &[Value], base: usize) -> usize {
-    row.iter().fold(base, |used, value| {
-        used.saturating_add(match value {
-            Value::Text(text) => text.capacity(),
-            _ => 0,
-        })
-    })
+    Ok(bytes)
 }
 
 // Trust a size-hint lower bound, but never a speculative upper bound
@@ -121,15 +115,17 @@ where I: Iterator<Item = Result<Vec<Value>>>
                 Some(Ok(row)) => {
                     // Validate before admission. A later malformed row must
                     // not discard an already completed prefix of the batch.
-                    if let Err(error) = validate_row(&self.schema, &row) {
-                        if row_count == 0 {
-                            self.finished = true;
-                            return Some(Err(error));
+                    let row_bytes = match validated_row_bytes(&self.schema, &row, row_width) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            if row_count == 0 {
+                                self.finished = true;
+                                return Some(Err(error));
+                            }
+                            self.pending_error = Some(error);
+                            break;
                         }
-                        self.pending_error = Some(error);
-                        break;
-                    }
-                    let row_bytes = estimated_row_bytes(&row, row_width);
+                    };
                     if row_bytes > self.max_batch_bytes {
                         let error = Error::Execution("row exceeds native batch byte budget".into());
                         if row_count == 0 {
@@ -812,5 +808,45 @@ mod row_batch_wide_descriptor_regressions {
             std::iter::empty::<Result<Vec<Value>>>(), schema, 128,
         ).unwrap();
         assert!(batches.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod combined_row_validation_accounting_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn mixed_nullable_text_keeps_valid_prefix_before_invalid_cell() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("label", DataType::Text, true),
+        ]).unwrap();
+        let input = vec![
+            Ok(vec![Value::Integer(1), Value::Text("é".into())]),
+            Ok(vec![Value::Integer(2), Value::Null]),
+            Ok(vec![Value::Integer(3), Value::Boolean(true)]),
+        ];
+        let mut stream = RowBatcher::new(input.into_iter(), schema, 8).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Text("é".into())],
+            vec![Value::Integer(2), Value::Null],
+        ]);
+        assert!(matches!(stream.next(), Some(Err(Error::Type(_)))));
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn retained_string_capacity_still_enforces_batch_budget() {
+        let schema = Schema::new(vec![
+            Field::new("name", DataType::Text, false),
+        ]).unwrap();
+        let mut large = String::with_capacity(4_096);
+        large.push('x');
+        let input = vec![Ok(vec![Value::Text(large)])];
+        let mut stream = RowBatcher::with_byte_budget(
+            input.into_iter(), schema, 8, 256,
+        ).unwrap();
+        assert!(matches!(stream.next(), Some(Err(Error::Execution(_)))));
     }
 }
