@@ -635,15 +635,13 @@ fn lower(
                     selections.push(Selection::new(key.expression.clone(), hidden.clone()));
                     key.expression = Expr::Column(hidden);
                 }
-                let fields = selections.iter().map(|selection| {
-                    Ok(Field::new(
-                        &selection.alias,
-                        selection.expression.output_type(&schema)?,
-                        true,
-                    ))
-                }).collect::<Result<Vec<_>>>()?;
+                // Match ProjectStream's nullability exactly, including
+                // nonnullable source columns and IS NULL expressions.
+                let projected_schema = crate::project::project(
+                    &Batch::empty(schema.clone()), &selections
+                )?.schema().clone();
                 source = Box::new(ProjectStream::new(source, selections, control.clone()));
-                Schema::new(fields)?
+                projected_schema
             } else {
                 schema
             };
