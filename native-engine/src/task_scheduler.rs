@@ -331,6 +331,42 @@ impl TaskScheduler {
         true
     }
 
+    /// Commit a window of completed task attempts atomically.
+    ///
+    /// If any lease is stale, unknown, or already expired, do not publish
+    /// *any* completion in the batch. Duplicate task IDs are rejected.
+    /// An explicit failed task still uses the existing retry/exhaustion rules.
+    pub fn finish_many_atomic(
+        &mut self, completed: &[(Lease, bool)], now: Instant,
+    ) -> Result<bool> {
+        let mut seen = HashSet::new();
+        seen.try_reserve(completed.len())
+            .map_err(|_| Error::Execution("completion window allocation failed".into()))?;
+        for (lease, _) in completed {
+            if !seen.insert(lease.task) {
+                return Err(Error::Execution("duplicate task in completion window".into()));
+            }
+            let valid = matches!(
+                self.tasks.get(&lease.task).map(|task| &task.status),
+                Some(TaskStatus::Leased { worker, attempt, until })
+                    if *worker == lease.worker
+                        && *attempt == lease.attempt
+                        && *until > now
+            );
+            if !valid {
+                return Ok(false);
+            }
+        }
+        // All leases are distinct, active and unexpired. No callback runs
+        // between validation and application, so the same mutable scheduler
+        // exclusively owns all state transitions.
+        for (lease, success) in completed {
+            let accepted = self.finish_at(lease, *success, now);
+            debug_assert!(accepted, "validated task completion became stale");
+        }
+        Ok(true)
+    }
+
     /// Reclaim one disconnected worker's leases without scanning unrelated
     /// tasks. Retry attempts stay consumed and stale completions are rejected.
     pub fn reclaim_worker(&mut self, worker: u64) -> usize {
