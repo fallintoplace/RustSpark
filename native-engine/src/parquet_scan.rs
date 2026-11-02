@@ -222,9 +222,16 @@ fn projection_indices(
     let mut selected = Vec::new();
     selected.try_reserve_exact(columns.len())
         .map_err(|_| Error::Execution("Parquet projection allocation failed".into()))?;
-    let mut seen = std::collections::HashSet::new();
-    seen.try_reserve(columns.len())
-        .map_err(|_| Error::Execution("Parquet projection index allocation failed".into()))?;
+    // Small projections already have a bounded list of selected indices.
+    // Avoid allocating and hashing a set for the common narrow case.
+    let mut seen = if columns.len() > 16 {
+        let mut indices = std::collections::HashSet::new();
+        indices.try_reserve(columns.len())
+            .map_err(|_| Error::Execution("Parquet projection index allocation failed".into()))?;
+        Some(indices)
+    } else {
+        None
+    };
     for &name in columns {
         let position = if let Some(indices) = &indexed {
             match indices.get(&name.to_ascii_lowercase()) {
@@ -243,7 +250,11 @@ fn projection_indices(
             }
             first
         }.ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
-        if !seen.insert(position) {
+        let duplicate = match &mut seen {
+            Some(indices) => !indices.insert(position),
+            None => selected.contains(&position),
+        };
+        if duplicate {
             return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
         }
         selected.push(position);
