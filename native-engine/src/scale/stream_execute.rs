@@ -392,11 +392,9 @@ fn infer(
             let source = child(input)?;
             let mut fields = Vec::new();
             for (expr, alias) in group_by {
-                let Expr::Column(name) = expr else {
-                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
-                };
-                let source_field = source.field(source.column(name)?)?;
-                fields.push(Field::new(alias, source_field.data_type, true));
+                // The spill operator receives computed grouping expressions
+                // through hidden projected columns. Infer their original type.
+                fields.push(Field::new(alias, expr.output_type(&source)?, true));
             }
             for item in aggregates {
                 let kind = match &item.op {
@@ -580,14 +578,53 @@ fn lower(
                 return Ok(Box::new(std::iter::once(Ok(result))));
             }
             let mut groups = Vec::with_capacity(group_by.len());
-            for (expr, alias) in group_by {
-                let Expr::Column(name) = expr else {
-                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
-                };
-                groups.push((name.clone(), alias.clone()));
+            let mut projections = Vec::new();
+            let needs_projection = group_by.iter().any(|(expr, _)|
+                !matches!(expr, Expr::Column(_)));
+            if needs_projection {
+                // Keep all original input columns so aggregate expressions can
+                // still reference them. Hidden keys are evaluated once per row,
+                // rather than repeatedly inside each spill partition.
+                for field in schema.fields() {
+                    projections.push(Selection::new(
+                        Expr::Column(field.name.clone()), field.name.clone()));
+                }
             }
+            for (index, (expr, alias)) in group_by.iter().enumerate() {
+                let source_key = match expr {
+                    Expr::Column(name) => name.clone(),
+                    _ => {
+                        let mut name = format!("__rustspark_spill_key_{index}");
+                        while schema.fields().iter().any(|field|
+                            field.name.eq_ignore_ascii_case(&name))
+                            || groups.iter().any(|(source, _): &(String, String)|
+                                source.eq_ignore_ascii_case(&name))
+                        {
+                            name.push('_');
+                        }
+                        projections.push(Selection::new(expr.clone(), name.clone()));
+                        name
+                    }
+                };
+                groups.push((source_key, alias.clone()));
+            }
+            let source = child(input)?;
+            let (source, schema): (BatchStream, Schema) = if needs_projection {
+                let fields = projections.iter().map(|selection| {
+                    Ok(Field::new(
+                        &selection.alias,
+                        selection.expression.output_type(&schema)?,
+                        true,
+                    ))
+                }).collect::<Result<Vec<_>>>()?;
+                let projected_schema = Schema::new(fields)?;
+                (Box::new(ProjectStream::new(source, projections, control.clone())),
+                 projected_schema)
+            } else {
+                (source, schema)
+            };
             let files = grouped_aggregate(
-                child(input)?, schema, &groups, aggregates,
+                source, schema, &groups, aggregates,
                 &options.scratch_directory, 16, 200_000, options.batch_rows, control
             )?;
             Ok(Box::new(GroupedOutput {
