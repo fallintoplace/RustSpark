@@ -845,7 +845,7 @@ mod bound_arithmetic_projection_tests {
             vec![Value::Integer(4), Value::Float(2.5), Value::Text("a".into())],
             vec![Value::Null, Value::Float(3.0), Value::Text("🙂".into())],
             vec![Value::Integer(-8), Value::Null, Value::Null],
-            vec![Value::Integer(0), Value::Float(10.0), Value::Text("z".into())],
+            vec![Value::Integer(1), Value::Float(10.0), Value::Text("z".into())],
         ]).unwrap()
     }
 
