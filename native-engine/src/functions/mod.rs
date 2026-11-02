@@ -117,6 +117,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
     match uppercase_name(name).as_ref() {
         "COALESCE" => coalesce::output_type(args, schema),
         "TO_DATE" => date::output_type(args, schema),
+        "DATE_ADD" => date::shift_output_type(args, schema),
         "NVL" | "IFNULL" => {
             check_arity(name, args, 2, 2)?;
             coalesce::output_type(args, schema)
@@ -163,6 +164,7 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
     match uppercase_name(name).as_ref() {
         "COALESCE" => coalesce::eval(args, batch, row),
         "TO_DATE" => date::eval(args, batch, row),
+        "DATE_ADD" => date::eval_add(args, batch, row),
         "NVL" | "IFNULL" => coalesce::eval(args, batch, row),
         "NULLIF" => nullif::eval(args, batch, row),
         "IF" => if_expr::eval(args, batch, row),
