@@ -683,6 +683,25 @@ impl Parser {
                     Ok(Expr::Call { name: "locate".into(), args })
                 }
             }
+            // Spark supports ANSI OVERLAY(text PLACING replacement FROM pos [FOR len]).
+            // Keep the existing comma-separated scalar call as well.
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("OVERLAY")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let value = self.expression(0)?;
+                let ansi = self.take_word("PLACING");
+                if !ansi { self.expect_symbol(',')?; }
+                let replacement = self.expression(0)?;
+                if ansi { self.expect_word("FROM")?; } else { self.expect_symbol(',')?; }
+                let position = self.expression(0)?;
+                let mut args = vec![value, replacement, position];
+                if ansi && self.take_word("FOR") || !ansi && self.take_symbol(',') {
+                    args.push(self.expression(0)?);
+                }
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: word, args })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("SUBSTRING")
                 && self.peek() == Some(&Token::Symbol('(')) =>
             {
