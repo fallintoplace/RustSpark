@@ -130,8 +130,69 @@ fn locate(args: &[Value]) -> Result<Value> {
     locate_values(&args[0], &args[1], args.get(2))
 }
 
+fn instr_type(types: &[DataType]) -> Result<DataType> {
+    if !(2..=4).contains(&types.len())
+        || types[0] != DataType::Text
+        || types[1] != DataType::Text
+        || types[2..].iter().any(|kind| *kind != DataType::Integer)
+    {
+        return Err(Error::Type(
+            "INSTR requires text, substring, optional integer start and occurrence".into()
+        ));
+    }
+    Ok(DataType::Integer)
+}
+
 fn instr(args: &[Value]) -> Result<Value> {
-    locate_values(&args[1], &args[0], None)
+    // Keep the original two-argument path unchanged.
+    if args.len() == 2 {
+        return locate_values(&args[1], &args[0], None);
+    }
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(needle) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let Some(start) = super::integer(&args[2])? else { return Ok(Value::Null); };
+    let mut occurrence = if let Some(arg) = args.get(3) {
+        let Some(count) = super::integer(arg)? else { return Ok(Value::Null); };
+        count
+    } else {
+        1
+    };
+    if occurrence <= 0 {
+        return Err(Error::Execution("INSTR occurrence must be positive".into()));
+    }
+    // Spark treats the empty needle as matching position one, for either
+    // search direction. It checks this before the zero-start sentinel.
+    if needle.is_empty() { return Ok(Value::Integer(1)); }
+    if start == 0 { return Ok(Value::Integer(0)); }
+
+    let match_position = if start > 0 {
+        let first = usize::try_from(start - 1).unwrap_or(usize::MAX);
+        text.char_indices().enumerate().find_map(|(index, (byte, _))| {
+            if index >= first && text[byte..].starts_with(needle) {
+                occurrence -= 1;
+                (occurrence == 0).then_some(index)
+            } else {
+                None
+            }
+        })
+    } else {
+        let from_end = usize::try_from(start.unsigned_abs()).unwrap_or(usize::MAX);
+        let char_count = text.chars().count();
+        // Step back by one Unicode scalar after every candidate, so
+        // overlapping substrings count as separate occurrences.
+        text.char_indices().rev().enumerate().find_map(|(reverse_index, (byte, _))| {
+            if reverse_index + 1 >= from_end && text[byte..].starts_with(needle) {
+                occurrence -= 1;
+                (occurrence == 0).then_some(char_count - reverse_index - 1)
+            } else {
+                None
+            }
+        })
+    };
+    let Some(position) = match_position else { return Ok(Value::Integer(0)); };
+    let one_based = position.checked_add(1).and_then(|n| i64::try_from(n).ok())
+        .ok_or_else(|| Error::Execution("INSTR position overflow".into()))?;
+    Ok(Value::Integer(one_based))
 }
 fn strcmp_type(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
@@ -153,7 +214,7 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "split_part", min_args: 3, max_args: 3, result_type: split_type, call: split_part },
     Function { name: "locate", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
     Function { name: "position", min_args: 2, max_args: 3, result_type: locate_type, call: locate },
-    Function { name: "instr", min_args: 2, max_args: 2, result_type: locate_type, call: instr },
+    Function { name: "instr", min_args: 2, max_args: 4, result_type: instr_type, call: instr },
 ];
 #[cfg(test)]
 mod tests {
@@ -437,5 +498,56 @@ mod medium_tail_split_part_ring_tests {
                     "delimiter={delimiter:?} from_end={from_end}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod spark_instr_occurrence_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    fn check(text: &str, needle: &str, start: i64, occurrence: i64) -> Result<Value> {
+        instr(&[Value::Text(text.into()), Value::Text(needle.into()),
+            Value::Integer(start), Value::Integer(occurrence)])
+    }
+
+    #[test]
+    fn finds_overlapping_occurrences_in_both_directions() {
+        assert_eq!(check("abcabc", "b", 1, 2).unwrap(), Value::Integer(5));
+        assert_eq!(check("abcabc", "b", -1, 2).unwrap(), Value::Integer(2));
+        assert_eq!(check("aaaa", "aa", 1, 3).unwrap(), Value::Integer(3));
+        assert_eq!(check("aaaa", "aa", -1, 2).unwrap(), Value::Integer(2));
+        assert_eq!(check("aaaa", "aa", -2, 3).unwrap(), Value::Integer(1));
+        assert_eq!(check("aaaa", "aa", -1, 4).unwrap(), Value::Integer(0));
+        assert_eq!(check("你好世界你好", "你好", -2, 2).unwrap(),
+            Value::Integer(1));
+        assert_eq!(check("abcde", "cd", -3, 1).unwrap(), Value::Integer(0));
+        assert_eq!(check("abcde", "cd", -4, 1).unwrap(), Value::Integer(3));
+    }
+
+    #[test]
+    fn validates_start_occurrence_and_null_arguments() {
+        assert_eq!(check("abc", "b", 0, 1).unwrap(), Value::Integer(0));
+        assert_eq!(check("abc", "", 0, 1).unwrap(), Value::Integer(1));
+        assert_eq!(check("abc", "b", 99, 1).unwrap(), Value::Integer(0));
+        assert_eq!(check("abc", "b", -99, 1).unwrap(), Value::Integer(0));
+        assert!(check("abc", "b", 1, 0).is_err());
+        assert!(check("abc", "b", 1, -1).is_err());
+        assert!(instr_type(&[DataType::Text, DataType::Text, DataType::Integer,
+            DataType::Integer]).is_ok());
+        assert!(instr_type(&[DataType::Text, DataType::Text, DataType::Float]).is_err());
+        assert_eq!(instr(&[Value::Null, Value::Text("b".into()),
+            Value::Integer(1)]).unwrap(), Value::Null);
+        assert_eq!(instr(&[Value::Text("abc".into()), Value::Text("b".into()),
+            Value::Integer(1), Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn executes_four_argument_calls_from_native_sql() {
+        let plan = sql::parse_sql(
+            "SELECT INSTR('abcabc', 'b', 1, 2), INSTR('aaaa', 'aa', -1, 2)"
+        ).unwrap();
+        let rows = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(5), Value::Integer(2)]]);
     }
 }

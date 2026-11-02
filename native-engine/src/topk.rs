@@ -181,6 +181,26 @@ fn top_two_column_indices(column: &[Value], descending: bool, nulls_first: bool)
     [first, second]
 }
 
+
+ // For two rows and several direct sort keys, retain the best two indices
+ // without allocating or maintaining a candidate heap. The existing
+ // ColumnCandidate ordering includes the original row index for stable ties.
+ fn top_two_composite_indices(columns: &[&[Value]], options: &[(bool, bool)]) -> [usize; 2] {
+     debug_assert!(!columns.is_empty() && columns[0].len() >= 2);
+     let less = |row, other| ColumnCandidate { row, columns, options }
+         < ColumnCandidate { row: other, columns, options };
+     let (mut first, mut second) = if less(1, 0) { (1, 0) } else { (0, 1) };
+     for row in 2..columns[0].len() {
+         if less(row, first) {
+             second = first;
+             first = row;
+         } else if less(row, second) {
+             second = row;
+         }
+     }
+     [first, second]
+ }
+
 pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
     for key in keys {
         key.expression.validate_budget()?;
@@ -200,6 +220,16 @@ pub fn top_k(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
                 column, keys[0].descending, keys[0].nulls_first,
             ));
         }
+    }
+    if k == 2 && keys.len() > 1 &&
+        keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        let columns = keys.iter().map(|key| match &key.expression {
+            Expr::Column(name) => batch.column(batch.schema().column(name)?),
+            _ => unreachable!("checked direct keys"),
+        }).collect::<Result<Vec<_>>>()?;
+        let options = keys.iter().map(|key| (key.descending, key.nulls_first))
+            .collect::<Vec<_>>();
+        return batch.take(&top_two_composite_indices(&columns, &options));
     }
     if k == 1 && keys.len() == 1 {
         if let Expr::Column(name) = &keys[0].expression {
@@ -299,6 +329,17 @@ pub fn top_k_owned(batch: Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
             );
             return batch.take_unique_owned(&chosen);
         }
+    }
+    if k == 2 && keys.len() > 1 &&
+        keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
+        let columns = keys.iter().map(|key| match &key.expression {
+            Expr::Column(name) => batch.column(batch.schema().column(name)?),
+            _ => unreachable!("checked direct keys"),
+        }).collect::<Result<Vec<_>>>()?;
+        let options = keys.iter().map(|key| (key.descending, key.nulls_first))
+            .collect::<Vec<_>>();
+        let chosen = top_two_composite_indices(&columns, &options);
+        return batch.take_unique_owned(&chosen);
     }
     if k == 1 && keys.iter().all(|key| matches!(&key.expression, Expr::Column(_))) {
         // LIMIT 1 never needs a heap, even with composite ORDER BY keys.
@@ -1086,6 +1127,40 @@ mod direct_topk_expression_budget_tests {
             top_k_offset(&empty, &keys, 4, 1),
         ] {
             assert!(result.unwrap_err().to_string().contains("complexity budget"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod composite_top_two_regressions {
+    use super::*;
+    use crate::{expr::Expr, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn composite_direct_limit_two_matches_stable_sort_with_nulls_and_ties() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, true),
+            Field::new("name", DataType::Text, true),
+            Field::new("id", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, vec![
+            vec![Value::Integer(7), Value::Text("zz".repeat(1000)), Value::Integer(0)],
+            vec![Value::Null, Value::Text("alpha".into()), Value::Integer(1)],
+            vec![Value::Integer(7), Value::Text("aa".repeat(1000)), Value::Integer(2)],
+            vec![Value::Integer(7), Value::Text("aa".repeat(1000)), Value::Integer(3)],
+            vec![Value::Integer(8), Value::Null, Value::Integer(4)],
+            vec![Value::Null, Value::Null, Value::Integer(5)],
+        ]).unwrap();
+        for (descending, nulls_first) in [(false, false), (false, true), (true, false), (true, true)] {
+            let keys = [
+                SortKey { expression: Expr::Column("score".into()), descending, nulls_first },
+                SortKey { expression: Expr::Column("name".into()),
+                    descending: !descending, nulls_first: !nulls_first },
+            ];
+            let sorted = crate::sort::sort(&batch, &keys).unwrap();
+            let expected = sorted.slice_rows(0, 2).unwrap();
+            assert_eq!(top_k(&batch, &keys, 2).unwrap(), expected);
+            assert_eq!(top_k_owned(batch.clone(), &keys, 2).unwrap(), expected);
         }
     }
 }

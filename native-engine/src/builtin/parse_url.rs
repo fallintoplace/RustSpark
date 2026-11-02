@@ -8,6 +8,17 @@ fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)
 }
 
+fn copy_part(value: &str) -> Result<Value> {
+    if value.len() > MAX_URL_BYTES {
+        return Err(Error::Execution("PARSE_URL output exceeds 16 MiB budget".into()));
+    }
+    let mut output = String::new();
+    output.try_reserve_exact(value.len())
+        .map_err(|_| Error::Execution("PARSE_URL output allocation failed".into()))?;
+    output.push_str(value);
+    Ok(Value::Text(output))
+}
+
 fn find_authority(input: &str) -> Option<&str> {
     let (_, remainder) = input.split_once("://")?;
     Some(remainder.split(['/', '?', '#']).next().unwrap_or(""))
@@ -59,41 +70,55 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
             None => without_query,
         })
     };
-    // Avoid allocating an uppercased component name for each input row.
-    let result = if part.eq_ignore_ascii_case("PROTOCOL") {
-        parsed.as_ref().map(|parsed| parsed.scheme().to_owned())
+    if part.eq_ignore_ascii_case("FILE") {
+        let Some(path) = raw_path else { return Ok(Value::Null); };
+        let extra = query.map_or(0, |value| value.len() + 1);
+        let size = path.len().checked_add(extra)
+            .filter(|&bytes| bytes <= MAX_URL_BYTES)
+            .ok_or_else(|| Error::Execution("PARSE_URL FILE output exceeds 16 MiB budget".into()))?;
+        let mut output = String::new();
+        output.try_reserve_exact(size)
+            .map_err(|_| Error::Execution("PARSE_URL output allocation failed".into()))?;
+        output.push_str(path);
+        if let Some(query) = query {
+            output.push('?');
+            output.push_str(query);
+        }
+        return Ok(Value::Text(output));
+    }
+    // Borrow URL components until the final output copy.
+    let result: Option<&str> = if part.eq_ignore_ascii_case("PROTOCOL") {
+        parsed.as_ref().map(|parsed| parsed.scheme())
     } else if part.eq_ignore_ascii_case("HOST") {
-        parsed.as_ref().and_then(|parsed| parsed.host_str().map(str::to_owned))
+        parsed.as_ref().and_then(|parsed| parsed.host_str())
     } else if part.eq_ignore_ascii_case("AUTHORITY") {
-        find_authority(without_query).map(str::to_owned)
+        find_authority(without_query)
     } else if part.eq_ignore_ascii_case("USERINFO") {
         find_authority(without_query)
-            .and_then(|authority| authority.rsplit_once('@').map(|(user, _)| user.to_owned()))
+            .and_then(|authority| authority.rsplit_once('@').map(|(user, _)| user))
     } else if part.eq_ignore_ascii_case("PATH") {
-        raw_path.map(str::to_owned)
+        raw_path
     } else if part.eq_ignore_ascii_case("QUERY") {
         if let Some(key) = key {
             query.and_then(|query| query.split('&').find_map(|param| {
                 let (name, value) = param.split_once('=')?;
-                (name == key).then(|| value.to_owned())
+                (name == key).then_some(value)
             }))
         } else {
-            query.map(str::to_owned)
+            query
         }
     } else if part.eq_ignore_ascii_case("REF") {
-        fragment.map(str::to_owned)
-    } else if part.eq_ignore_ascii_case("FILE") {
-        raw_path.map(|path| match query {
-            Some(query) => format!("{path}?{query}"),
-            None => path.to_owned(),
-        })
+        fragment
     } else {
         return Err(Error::Type(format!(
             "unsupported PARSE_URL component: {}",
             part.to_ascii_uppercase()
         )));
     };
-    Ok(result.map(Value::Text).unwrap_or(Value::Null))
+    match result {
+        Some(value) => copy_part(value),
+        None => Ok(Value::Null),
+    }
 }
 
 fn evaluate_inner(args: &[Value]) -> Result<Value> {
@@ -277,5 +302,26 @@ mod oversized_component_budget_tests {
             Value::Text("https://example.com".into()),
             Value::Text("UNKNOWN".into()),
         ]), Err(Error::Type(_))));
+    }
+}
+
+#[cfg(test)]
+mod fallible_url_part_tests {
+    use super::*;
+
+    #[test]
+    fn file_and_query_parts_preserve_uri_semantics() {
+        let url = "https://u:p@example.org:8080/é/🙂?k=one&k=two#frag";
+        assert_eq!(extract(url, "HOST", None).unwrap(), Value::Text("example.org".into()));
+        assert_eq!(extract(url, "QUERY", Some("k")).unwrap(), Value::Text("one".into()));
+        assert_eq!(extract(url, "FILE", None).unwrap(),
+            Value::Text("/é/🙂?k=one&k=two".into()));
+        assert_eq!(extract(url, "USERINFO", None).unwrap(), Value::Text("u:p".into()));
+        assert_eq!(extract(url, "REF", None).unwrap(), Value::Text("frag".into()));
+        assert_eq!(extract("file:/tmp/sales.csv?q=1", "FILE", None).unwrap(),
+            Value::Text("/tmp/sales.csv?q=1".into()));
+        assert_eq!(extract("relative/path?q=", "FILE", None).unwrap(),
+            Value::Text("relative/path?q=".into()));
+        assert_eq!(extract("mailto:user@example.org", "FILE", None).unwrap(), Value::Null);
     }
 }

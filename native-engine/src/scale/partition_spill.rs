@@ -360,7 +360,7 @@ impl PartitionWriter {
         }
         let mut owned = self.owned.take().expect("active partition writer");
         if !include_empty {
-            owned.paths = owned.paths.into_iter().enumerate()
+            owned.paths = std::mem::take(&mut owned.paths).into_iter().enumerate()
                 .filter_map(|(index, path)| self.initialized[index].then_some(path))
                 .collect();
         }
@@ -930,6 +930,8 @@ mod partition_writer_transactional_failure_tests {
 #[cfg(test)]
 mod sparse_partition_finalization_regressions {
     use super::*;
+    use super::super::spill::SpillReader;
+    use std::io::BufReader;
     use crate::schema::{DataType, Field};
     use std::sync::atomic::{AtomicU64, Ordering};
     static CASE_ID: AtomicU64 = AtomicU64::new(1);

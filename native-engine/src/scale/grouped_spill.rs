@@ -70,6 +70,7 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::AvgDistinct(_) => Ok(State::AvgDistinct {
             keys: HashSet::new(), bytes: 0, sum: 0.0, compensation: 0.0, count: 0,
         }),
+        _ => Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     }
 }
 
@@ -169,6 +170,7 @@ fn add_to_state(
             Some(index) => Cow::Borrowed(batch.value(row, index)?),
             None => Cow::Owned(expr.evaluate(batch, row)?),
         },
+        _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -215,6 +217,7 @@ fn bind_aggregate_column(op: &AggregateOp, schema: &Schema) -> Result<Option<usi
         AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) |
         AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) |
         AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr,
+        _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     };
     match expression {
         Expr::Column(name) => Ok(Some(schema.column(name)?)),
@@ -242,6 +245,7 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
                 DataType::Integer | DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("AVG requires numeric input".into())),
             },
+            _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
         };
         let nullable = !matches!(&item.op, AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
         fields.push(Field::new(&item.alias, ty, nullable));
@@ -254,6 +258,32 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
 fn matches_group_row(key: &[Value], columns: &[&[Value]], row: usize) -> bool {
     key.len() == columns.len() &&
         key.iter().zip(columns).all(|(value, column)| value == &column[row])
+}
+
+
+fn admit_cloned_group_key(
+    columns: &[&[Value]], row: usize, states: usize,
+    retained_bytes: usize, limit: usize,
+) -> Result<(Vec<Value>, usize)> {
+    let state_bytes = states.saturating_mul(std::mem::size_of::<State>());
+    // Source strings can have arbitrarily large spare capacity. Check the
+    // minimum owned footprint before cloning, then charge the actual clone.
+    let minimum = super::row_footprint::minimum_cloned_footprint(
+        columns.iter().map(|column| &column[row]),
+    ).saturating_add(state_bytes);
+    retained_bytes.checked_add(minimum)
+        .filter(|&total| total <= limit)
+        .ok_or_else(|| Error::Execution("group key state byte budget exceeded".into()))?;
+    let mut key = Vec::new();
+    key.try_reserve_exact(columns.len())
+        .map_err(|_| Error::Execution("group key allocation failed".into()))?;
+    key.extend(columns.iter().map(|column| column[row].clone()));
+    let footprint = super::row_footprint::footprint(key.iter())
+        .saturating_add(state_bytes);
+    let next_bytes = retained_bytes.checked_add(footprint)
+        .filter(|&total| total <= limit)
+        .ok_or_else(|| Error::Execution("group key state byte budget exceeded".into()))?;
+    Ok((key, next_bytes))
 }
 
 fn aggregate_shard(
@@ -314,18 +344,14 @@ fn aggregate_shard_with_budget(
                     if groups.len() >= max_groups {
                         return Err(Error::Execution("group state count exceeds partition budget".into()));
                     }
-                    // Charge only unique group keys before cloning any TEXT values.
-                    let footprint = super::row_footprint::footprint(
-                        key_columns.iter().map(|column| &column[row])
-                    ).saturating_add(items.len().saturating_mul(std::mem::size_of::<State>()));
-                    let next_bytes = retained_key_state_bytes.checked_add(footprint)
-                        .filter(|total| *total <= max_key_state_bytes)
-                        .ok_or_else(|| Error::Execution(
-                            "group key state byte budget exceeded".into()))?;
+                    // Admit the actual owned key, not spare capacity in a
+                    // borrowed input String that is about to be cloned.
+                    let (key, next_bytes) = admit_cloned_group_key(
+                        &key_columns, row, items.len(),
+                        retained_key_state_bytes, max_key_state_bytes,
+                    )?;
                     let initial = items.iter().map(|item| new_state(&item.op))
                         .collect::<Result<Vec<_>>>()?;
-                    let key = key_columns.iter().map(|column| column[row].clone())
-                        .collect::<Vec<_>>();
                     let position = groups.len();
                     groups.push((key, initial));
                     by_hash.entry(fingerprint).or_default().push(position);
@@ -1161,5 +1187,46 @@ mod cross_chunk_group_cache_regressions {
             Value::Null, Value::Integer(0),
         ]));
         fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod owned_group_key_footprint_regressions {
+    use super::*;
+
+    #[test]
+    fn charged_cloned_key_ignores_unused_source_string_capacity() {
+        let mut oversized = String::with_capacity(64 * 1024);
+        oversized.push_str("small-group");
+        let cell = [Value::Text(oversized)];
+        let columns: [&[Value]; 1] = [&cell];
+        let (key, charge) = admit_cloned_group_key(&columns, 0, 1, 0, 256).unwrap();
+        assert_eq!(key, vec![Value::Text("small-group".into())]);
+        assert!(charge <= 256);
+        assert_eq!(charge, super::super::row_footprint::footprint(key.iter())
+            + std::mem::size_of::<State>());
+
+        let (another, next) =
+            admit_cloned_group_key(&columns, 0, 1, charge, 512).unwrap();
+        assert_eq!(another, key);
+        assert_eq!(next, charge * 2);
+    }
+
+    #[test]
+    fn too_large_owned_keys_are_rejected_before_mutating_state() {
+        let cell = [Value::Text("x".repeat(4096))];
+        let columns: [&[Value]; 1] = [&cell];
+        assert!(matches!(
+            admit_cloned_group_key(&columns, 0, 1, 0, 256),
+            Err(Error::Execution(_))
+        ));
+        assert!(matches!(
+            admit_cloned_group_key(&columns, 0, 1, usize::MAX, usize::MAX),
+            Err(Error::Execution(_))
+        ));
+        let empty: [&[Value]; 0] = [];
+        let (key, charge) = admit_cloned_group_key(&empty, 0, 0, 0, 64).unwrap();
+        assert!(key.is_empty());
+        assert_eq!(charge, 64);
     }
 }

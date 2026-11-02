@@ -33,13 +33,25 @@ fn getbit(args: &[Value]) -> Result<Value> {
     let bit = u32::try_from(position)
         .ok().filter(|bit| *bit < 64)
         .ok_or_else(|| Error::Execution("GETBIT position must be within [0, 63]".into()))?;
-    Ok(Value::Integer(i64::from(((value as u64) >> bit) & 1)))
+    Ok(Value::Integer(((value as u64) >> bit & 1) as i64))
+}
+
+fn bitmap_bit_position(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let offset = (i128::from(value) - 1).rem_euclid(32_768);
+    Ok(Value::Integer(offset as i64))
+}
+
+fn bitmap_bit_position_type(types: &[DataType]) -> Result<DataType> {
+    output(types)
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "getbit", min_args: 2, max_args: 2, result_type: getbit_type, call: getbit },
     Function { name: "bit_reverse", min_args: 1, max_args: 1, result_type: bit_reverse_type, call: bit_reverse },
     Function { name: "bit_count", min_args: 1, max_args: 1, result_type: output, call: bit_count },
+    Function { name: "bitmap_bit_position", min_args: 1, max_args: 1,
+        result_type: bitmap_bit_position_type, call: bitmap_bit_position },
 ];
 #[cfg(test)]
 mod tests {
@@ -84,5 +96,34 @@ mod spark_getbit_sql_tests {
         let plan = sql::parse_sql("SELECT GETBIT(11, 0), GETBIT(11, 2)").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(1), Value::Integer(0)]]);
+    }
+}
+
+#[cfg(test)]
+mod spark_bitmap_position_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn computes_offsets_without_overflow_on_bigint_extremes() {
+        for (input, expected) in [
+            (1, 0), (123, 122), (32_768, 32_767),
+            (32_769, 0), (0, 32_767), (-1, 32_766),
+            (i64::MAX, ((i128::from(i64::MAX) - 1) % 32_768) as i64),
+        ] {
+            assert_eq!(bitmap_bit_position(&[Value::Integer(input)]).unwrap(),
+                Value::Integer(expected));
+        }
+        assert_eq!(bitmap_bit_position(&[Value::Integer(i64::MIN)]).unwrap(),
+            Value::Integer((i128::from(i64::MIN) - 1).rem_euclid(32_768) as i64));
+        assert_eq!(bitmap_bit_position(&[Value::Null]).unwrap(), Value::Null);
+        assert!(bitmap_bit_position_type(&[DataType::Text]).is_err());
+    }
+
+    #[test]
+    fn native_sql_uses_spark_bucket_offsets() {
+        let plan = sql::parse_sql("SELECT BITMAP_BIT_POSITION(1), BITMAP_BIT_POSITION(123)").unwrap();
+        assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(0), Value::Integer(122)]]);
     }
 }

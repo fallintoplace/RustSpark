@@ -50,6 +50,13 @@ pub(crate) fn compare_values(left: &Value, right: &Value, descending: bool, null
     }
 }
 
+
+fn computed_key_starter_capacity(rows: usize) -> usize {
+    // A large input can exceed the 64 MiB computed-key budget after just
+    // one evaluated row. Do not reserve slots for every input row first.
+    rows.min(1_024)
+}
+
 pub fn sort(batch: &Batch, keys: &[SortKey]) -> Result<Batch> {
     if keys.is_empty() { return Ok(batch.clone()); }
     sort_range(batch, keys, 0, batch.num_rows())
@@ -133,7 +140,11 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
             let column = batch.column(batch.schema().column(name)?)?;
             key_columns.push(std::borrow::Cow::Borrowed(&column[start..end]));
         } else {
-            let mut values = Vec::with_capacity(end - start);
+            let mut values = Vec::new();
+            values.try_reserve_exact(computed_key_starter_capacity(end - start))
+                .map_err(|_| crate::Error::Execution(
+                    "computed sort key allocation failed".into(),
+                ))?;
             for row in start..end {
                 let value = key.expression.evaluate(batch, row)?;
                 let payload = match &value {
@@ -145,6 +156,11 @@ fn sort_indices(batch: &Batch, keys: &[SortKey], start: usize, end: usize) -> Re
                 computed_key_bytes = computed_key_bytes.checked_add(bytes)
                     .filter(|&used| used <= MAX_COMPUTED_SORT_KEY_BYTES)
                     .ok_or_else(|| crate::Error::Execution("computed sort key memory budget exceeded".into()))?;
+                if values.len() == values.capacity() {
+                    values.try_reserve(1).map_err(|_| crate::Error::Execution(
+                        "computed sort key allocation failed".into(),
+                    ))?;
+                }
                 values.push(value);
             }
             key_columns.push(std::borrow::Cow::Owned(values));
@@ -602,5 +618,41 @@ mod direct_sort_expression_budget_tests {
         ] {
             assert!(result.unwrap_err().to_string().contains("complexity budget"));
         }
+    }
+}
+
+#[cfg(test)]
+mod incremental_computed_sort_reservations_tests {
+    use super::*;
+    use crate::{expr::BinaryOp, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn computed_key_reservations_stay_small_before_evaluation() {
+        assert_eq!(computed_key_starter_capacity(0), 0);
+        assert_eq!(computed_key_starter_capacity(17), 17);
+        assert_eq!(computed_key_starter_capacity(1_000_000_000), 1_024);
+    }
+
+    #[test]
+    fn multi_window_sort_matches_direct_key_after_reallocation() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema, (0..2049).map(|i| vec![
+            Value::Integer(((i * 37) % 257) as i64),
+            if i % 5 == 0 { Value::Null }
+            else { Value::Text(format!("row-{i}-🙂")) },
+        ]).collect()).unwrap();
+        let direct = [SortKey::ascending(Expr::Column("n".into()))];
+        let computed = [SortKey::ascending(Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add, Expr::Literal(Value::Integer(1)),
+        ))];
+        let expected = sort(&batch, &direct).unwrap();
+        assert_eq!(sort(&batch, &computed).unwrap(), expected);
+        assert_eq!(sort_owned(batch.clone(), &computed).unwrap(), expected);
+        let range = sort_range(&batch, &computed, 100, 1500).unwrap();
+        let direct_range = sort_range(&batch, &direct, 100, 1500).unwrap();
+        assert_eq!(range, direct_range);
     }
 }

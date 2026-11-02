@@ -4,6 +4,26 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
+fn reserve_output(input: &str) -> Result<String> {
+    let mut output = String::new();
+    output.try_reserve_exact(input.len())
+        .map_err(|_| Error::Execution("TRANSLATE output allocation failed".into()))?;
+    Ok(output)
+}
+
+fn append_output(output: &mut String, character: char) -> Result<()> {
+    let bytes = character.len_utf8();
+    if bytes > (16 * 1024 * 1024_usize).saturating_sub(output.len()) {
+        return Err(Error::Execution("TRANSLATE output exceeds 16 MiB".into()));
+    }
+    if output.capacity().saturating_sub(output.len()) < bytes {
+        output.try_reserve(bytes)
+            .map_err(|_| Error::Execution("TRANSLATE output allocation failed".into()))?;
+    }
+    output.push(character);
+    Ok(())
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(from) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -20,11 +40,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         }
         return Ok(Value::Text(String::new()));
     }
-    if from.is_empty() { return Ok(Value::Text(text.to_owned())); }
+    if from.is_empty() { return Ok(Value::Text({ let mut copy = reserve_output(text)?; copy.push_str(text); copy })); }
     // Identical source and replacement positions cannot change output.
     // Preserve the Unicode mapping cardinality budget for oversized patterns.
     if from == to && (from.is_ascii() || from.chars().count() <= 4096) {
-        return Ok(Value::Text(text.to_owned()));
+        return Ok(Value::Text({ let mut copy = reserve_output(text)?; copy.push_str(text); copy }));
     }
     if text.is_ascii() && from.is_ascii() && to.is_ascii() {
         const UNMAPPED: i16 = -1;
@@ -36,7 +56,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
                     .map_or(REMOVE, |replacement| i16::from(*replacement));
             }
         }
-        let mut output = Vec::with_capacity(text.len());
+        let mut output = Vec::new();
+        output.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("TRANSLATE output allocation failed".into()))?;
         for &byte in text.as_bytes() {
             match mapping[usize::from(byte)] {
                 UNMAPPED => output.push(byte),
@@ -60,7 +82,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
                     .map_or(REMOVE, |replacement| i16::from(*replacement));
             }
         }
-        let mut output = String::with_capacity(text.len());
+        let mut output = reserve_output(text)?;
         for character in text.chars() {
             if character.is_ascii() {
                 match mapping[character as usize] {
@@ -94,40 +116,36 @@ fn evaluate(args: &[Value]) -> Result<Value> {
                 mapping[character as usize] = Some(replacement);
             }
         }
-        let mut output = String::with_capacity(text.len());
+        let mut output = reserve_output(text)?;
         for &byte in text.as_bytes() {
             let character = match mapping[usize::from(byte)] {
                 None => Some(char::from(byte)),
                 Some(mapped) => mapped,
             };
             if let Some(character) = character {
-                if character.len_utf8() > (16 * 1024 * 1024_usize).saturating_sub(output.len()) {
-                    return Err(Error::Execution("TRANSLATE output exceeds 16 MiB".into()));
-                }
-                output.push(character);
+                append_output(&mut output, character)?;
             }
         }
         return Ok(Value::Text(output));
     }
     let mut mapping: HashMap<char, Option<char>> = HashMap::new();
+    mapping.try_reserve(from.chars().count().min(4096))
+        .map_err(|_| Error::Execution("TRANSLATE map allocation failed".into()))?;
     let mut replacement = to.chars();
     for character in from.chars() {
         let replacement_char = replacement.next();
-        mapping.entry(character).or_insert(replacement_char);
-        if mapping.len() > 4096 {
+        if mapping.len() == 4096 && !mapping.contains_key(&character) {
             return Err(Error::Execution("TRANSLATE map exceeds 4096 characters".into()));
         }
+        mapping.entry(character).or_insert(replacement_char);
     }
     // Most mappings keep byte width unchanged; reserve source length up front.
-    let mut output = String::with_capacity(text.len());
+    let mut output = reserve_output(text)?;
     for character in text.chars() {
         match mapping.get(&character) {
-            Some(Some(replacement)) => output.push(*replacement),
+            Some(Some(replacement)) => append_output(&mut output, *replacement)?,
             Some(None) => {},
-            None => output.push(character),
-        }
-        if output.len() > 16 * 1024 * 1024 {
-            return Err(Error::Execution("TRANSLATE output exceeds 16 MiB".into()));
+            None => append_output(&mut output, character)?,
         }
     }
     Ok(Value::Text(output))
@@ -292,5 +310,33 @@ mod unicode_text_ascii_mapping_regressions {
             Value::Text("XY".into())]).unwrap(), Value::Text(expected));
         assert_eq!(evaluate(&[Value::Null, Value::Text("ab".into()),
             Value::Text("XY".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod fallible_translate_growth_tests {
+    use super::*;
+
+    #[test]
+    fn respects_ascii_unicode_and_deletion_mappings() {
+        let translate = |text: &str, from: &str, to: &str| {
+            evaluate(&[Value::Text(text.into()), Value::Text(from.into()),
+                Value::Text(to.into())]).unwrap()
+        };
+        assert_eq!(translate("abc", "ab", "界🙂"), Value::Text("界🙂c".into()));
+        assert_eq!(translate("é🙂a", "éa", "xyz"), Value::Text("x🙂y".into()));
+        assert_eq!(translate("abc", "b", ""), Value::Text("ac".into()));
+        assert_eq!(translate("é🙂", "", "ignored"), Value::Text("é🙂".into()));
+        assert_eq!(translate("é🙂", "é🙂", "é🙂"), Value::Text("é🙂".into()));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("a".into()),
+            Value::Text("b".into())]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn rejects_unicode_expansion_over_result_budget() {
+        let large = "a".repeat(16 * 1024 * 1024 / 3 + 1);
+        assert!(matches!(evaluate(&[Value::Text(large),
+            Value::Text("a".into()), Value::Text("界".into())]),
+            Err(Error::Execution(_))));
     }
 }
