@@ -1087,6 +1087,39 @@ impl Parser {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
+            if self.take_word("ALL") {
+                let selected = match &plan {
+                    Plan::Project { selections, .. } => Some(selections.as_slice()),
+                    Plan::Distinct { input } => match input.as_ref() {
+                        Plan::Project { selections, .. } => Some(selections.as_slice()),
+                        _ => None,
+                    },
+                    _ => None,
+                }.ok_or_else(|| Error::Unsupported(
+                    "ORDER BY ALL requires explicit projected columns".into()
+                ))?;
+                let descending = if self.take_word("DESC") {
+                    true
+                } else {
+                    self.take_word("ASC");
+                    false
+                };
+                let nulls_first = if self.take_word("NULLS") {
+                    if self.take_word("FIRST") {
+                        true
+                    } else {
+                        self.expect_word("LAST")?;
+                        false
+                    }
+                } else { !descending };
+                for item in selected {
+                    keys.push(SortKey {
+                        expression: Expr::Column(item.alias.clone()),
+                        descending,
+                        nulls_first,
+                    });
+                }
+            } else {
             loop {
                 let is_ordinal = match self.peek() {
                     Some(Token::Number(number)) if number.chars().all(|ch| ch.is_ascii_digit()) => {
@@ -1142,6 +1175,7 @@ impl Parser {
                 if !self.take_symbol(',') {
                     break;
                 }
+            }
             }
             plan = match plan {
                 Plan::Project { input, selections } => {
@@ -2108,5 +2142,40 @@ mod spark_boolean_aggregate_tests {
         nulls.register("n", Batch::from_rows(all_null, vec![vec![Value::Null]]).unwrap()).unwrap();
         assert_eq!(executor::execute(&parse_sql("SELECT EVERY(flag), SOME(flag) FROM n").unwrap(), &nulls)
             .unwrap().rows().unwrap(), vec![vec![Value::Null, Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod spark_order_by_all_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    fn run(query: &str) -> Vec<Vec<Value>> {
+        executor::execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn sorts_by_all_projected_columns_in_select_list_order() {
+        let source = "FROM VALUES (2, 'b'), (1, 'a'), (2, 'a')";
+        assert_eq!(run(&format!("SELECT col1 AS id, col2 AS tag {source} ORDER BY ALL")), vec![
+            vec![Value::Integer(1), Value::Text("a".into())],
+            vec![Value::Integer(2), Value::Text("a".into())],
+            vec![Value::Integer(2), Value::Text("b".into())],
+        ]);
+        assert_eq!(run(&format!("SELECT col1 AS id, col2 AS tag {source} ORDER BY ALL DESC")), vec![
+            vec![Value::Integer(2), Value::Text("b".into())],
+            vec![Value::Integer(2), Value::Text("a".into())],
+            vec![Value::Integer(1), Value::Text("a".into())],
+        ]);
+    }
+
+    #[test]
+    fn all_resolves_expressions_aliases_and_distinct_output() {
+        assert_eq!(run("SELECT col1 + 1 AS next FROM VALUES (2), (1) ORDER BY ALL"),
+            vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
+        assert_eq!(run("SELECT DISTINCT col1 AS n FROM VALUES (2), (1), (2) ORDER BY ALL"),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+        assert!(parse_sql("SELECT * FROM t ORDER BY ALL").is_err());
     }
 }
