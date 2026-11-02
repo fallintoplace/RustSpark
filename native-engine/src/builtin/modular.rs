@@ -45,9 +45,23 @@ fn gcd(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Execution("GCD result exceeds BIGINT range".into()))
 }
 
+fn try_mod(args: &[Value]) -> Result<Value> {
+    if args.iter().any(Value::is_null) { return Ok(Value::Null); }
+    if let (Value::Integer(left), Value::Integer(right)) = (&args[0], &args[1]) {
+        return Ok(left.checked_rem(*right)
+            .map(Value::Integer).unwrap_or(Value::Null));
+    }
+    let Some(left) = super::number(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::number(&args[1])? else { return Ok(Value::Null); };
+    if right == 0.0 { return Ok(Value::Null); }
+    let result = left % right;
+    Ok(if result.is_finite() { Value::Float(result) } else { Value::Null })
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "gcd", min_args: 2, max_args: 2, result_type: gcd_type, call: gcd },
     Function { name: "mod", min_args: 2, max_args: 2, result_type: output, call: modulo },
+    Function { name: "try_mod", min_args: 2, max_args: 2, result_type: output, call: try_mod },
     Function { name: "pmod", min_args: 2, max_args: 2, result_type: output, call: pmod },
 ];
 #[cfg(test)]
@@ -78,5 +92,27 @@ mod gcd_extension_tests {
         assert_eq!(gcd(&[Value::Integer(i64::MIN), Value::Integer(2)]).unwrap(), Value::Integer(2));
         assert!(gcd_type(&[DataType::Text, DataType::Integer]).is_err());
         assert_eq!(gcd(&[Value::Null, Value::Integer(5)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod spark_try_mod_native_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+    #[test]
+    fn invalid_remainders_are_nullable_instead_of_errors() {
+        assert_eq!(try_mod(&[Value::Integer(7), Value::Integer(3)]).unwrap(), Value::Integer(1));
+        assert_eq!(try_mod(&[Value::Integer(-7), Value::Integer(3)]).unwrap(), Value::Integer(-1));
+        assert_eq!(try_mod(&[Value::Integer(1), Value::Integer(0)]).unwrap(), Value::Null);
+        assert_eq!(try_mod(&[Value::Integer(i64::MIN), Value::Integer(-1)]).unwrap(), Value::Null);
+        assert_eq!(try_mod(&[Value::Float(3.5), Value::Integer(2)]).unwrap(), Value::Float(1.5));
+        assert_eq!(try_mod(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
+        assert!(output(&[DataType::Text, DataType::Integer]).is_err());
+    }
+    #[test]
+    fn executes_through_native_sql() {
+        let query = sql::parse_sql("SELECT TRY_MOD(7, 3), TRY_MOD(1, 0)").unwrap();
+        assert_eq!(executor::execute(&query, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1), Value::Null]]);
     }
 }
