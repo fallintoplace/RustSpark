@@ -864,7 +864,51 @@ impl Parser {
             // then preserves the outer schema while returning outer rows
             // exactly once if the witness relation is nonempty.
             let negate = self.take_word("NOT");
-            if self.take_word("EXISTS") {
+            if !negate && matches!(self.peek(), Some(Token::Word(_)))
+                && matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"))
+                && self.tokens.get(self.index + 2) == Some(&Token::Symbol('('))
+                && matches!(self.tokens.get(self.index + 3),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"))
+            {
+                let outer_key = self.identifier()?;
+                self.expect_word("IN")?;
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("IN subquery nesting limit exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let subquery = self.select_with_intersections()?;
+                let subquery = self.finish_query(subquery)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                let projected = match &subquery {
+                    Plan::Project { selections, .. } => selections.as_slice(),
+                    Plan::Distinct { input } => match input.as_ref() {
+                        Plan::Project { selections, .. } => selections.as_slice(),
+                        _ => return Err(Error::Unsupported(
+                            "IN subquery requires one projected column".into()
+                        )),
+                    },
+                    _ => return Err(Error::Unsupported(
+                        "IN subquery requires one projected column".into()
+                    )),
+                };
+                if projected.len() != 1 {
+                    return Err(Error::Parse("IN subquery must return one column".into()));
+                }
+                let right_key = projected[0].alias.clone();
+                plan = Plan::Join {
+                    left: Box::new(plan),
+                    right: Box::new(subquery),
+                    left_key: outer_key,
+                    right_key,
+                    kind: JoinKind::Semi,
+                };
+                if self.take_word("AND") {
+                    plan = plan.filter(self.expression(2)?);
+                }
+            } else if self.take_word("EXISTS") {
                 self.expect_symbol('(')?;
                 if self.subquery_depth >= 32 {
                     return Err(Error::Parse("EXISTS subquery nesting limit exceeded".into()));
