@@ -546,7 +546,12 @@ impl Parser {
         }
         if self.peek() == Some(&Token::Operator("+".into())) {
             let _ = self.next();
-            return self.expression(10);
+            let operand = self.expression(10)?;
+            // Keep numeric literals as literals, including in VALUES rows.
+            return match operand {
+                Expr::Literal(Value::Integer(_) | Value::Float(_) | Value::Null) => Ok(operand),
+                other => Ok(Expr::Call { name: "positive".into(), args: vec![other] }),
+            };
         }
         if self.peek() == Some(&Token::Operator("-".into())) {
             let _ = self.next();
