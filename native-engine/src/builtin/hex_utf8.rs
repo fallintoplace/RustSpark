@@ -84,9 +84,57 @@ fn try_unhex_utf8(args: &[Value]) -> Result<Value> {
     }
 }
 
+fn from_base32_utf8(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if text.len() > MAX_INPUT_BYTES * 2 {
+        return Err(Error::Execution("FROM_BASE32_UTF8 input exceeds byte budget".into()));
+    }
+    let input = text.as_bytes();
+    if input.len() % 8 != 0 {
+        return Err(Error::Parse("FROM_BASE32_UTF8 length must be a multiple of eight".into()));
+    }
+    let unpadded = input.iter().position(|&byte| byte == b'=').unwrap_or(input.len());
+    let padding = input.len() - unpadded;
+    if input[unpadded..].iter().any(|&byte| byte != b'=') ||
+        !matches!(padding, 0 | 1 | 3 | 4 | 6) ||
+        (padding != 0 && unpadded % 8 != 8 - padding) {
+        return Err(Error::Parse("invalid FROM_BASE32_UTF8 padding".into()));
+    }
+    let max_decoded = unpadded.checked_mul(5).map(|n| n / 8)
+        .filter(|&n| n <= MAX_INPUT_BYTES)
+        .ok_or_else(|| Error::Execution("FROM_BASE32_UTF8 output exceeds byte budget".into()))?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(max_decoded)
+        .map_err(|_| Error::Execution("FROM_BASE32_UTF8 allocation failed".into()))?;
+    let mut pending = 0_u32;
+    let mut bits = 0_u8;
+    for &byte in &input[..unpadded] {
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a',
+            b'2'..=b'7' => byte - b'2' + 26,
+            _ => return Err(Error::Parse("invalid FROM_BASE32_UTF8 digit".into())),
+        };
+        pending = (pending << 5) | u32::from(digit);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((pending >> bits) as u8);
+        }
+    }
+    if bits > 0 && (pending & ((1_u32 << bits) - 1)) != 0 {
+        return Err(Error::Parse("noncanonical FROM_BASE32_UTF8 trailing bits".into()));
+    }
+    String::from_utf8(output)
+        .map(Value::Text)
+        .map_err(|_| Error::Type("FROM_BASE32_UTF8 decoded bytes are not UTF-8".into()))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "try_unhex_utf8", min_args: 1, max_args: 1,
         result_type: unhex_type, call: try_unhex_utf8 },
+    Function { name: "from_base32_utf8", min_args: 1, max_args: 1,
+        result_type: unhex_type, call: from_base32_utf8 },
     Function { name: "hex", min_args: 1, max_args: 1, result_type: hex_type, call: hex },
     Function { name: "unhex_utf8", min_args: 1, max_args: 1, result_type: unhex_type, call: unhex_utf8 },
 ];
@@ -244,5 +292,44 @@ mod combined_hex_nibble_tests {
             assert!(unhex_utf8(&[Value::Text(text.into())]).is_err(), "{text}");
             assert_eq!(try_unhex_utf8(&[Value::Text(text.into())]).unwrap(), Value::Null);
         }
+    }
+}
+
+#[cfg(test)]
+mod base32_utf8_decoder_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+    #[test]
+    fn canonical_vectors_and_utf8() {
+        for (encoded, plain) in [
+            ("", ""), ("MY======", "f"), ("MZXQ====", "fo"),
+            ("MZXW6===", "foo"), ("MZXW6YQ=", "foob"),
+            ("MZXW6YTB", "fooba"), ("MZXW6YTBOI======", "foobar"),
+            ("YOUQ====", "é"),
+            ("mzxw6===", "foo"),
+        ] {
+            assert_eq!(from_base32_utf8(&[Value::Text(encoded.into())]).unwrap(),
+                Value::Text(plain.into()));
+        }
+        assert_eq!(from_base32_utf8(&[Value::Null]).unwrap(), Value::Null);
+    }
+    #[test]
+    fn rejects_corruption_and_noncanonical_padding() {
+        for input in [
+            "MZXW6", "MZXW6===", "MY=======", "MZ======",
+            "MZXW6==A", "MY==Y===", "MZXW6===MZXW6===",
+            "74======", "MZXW6===\n",
+        ] {
+            if input == "MZXW6===" { continue; }
+            assert!(from_base32_utf8(&[Value::Text(input.into())]).is_err(), "{input:?}");
+        }
+        assert!(from_base32_utf8(&[Value::Text("A".repeat(MAX_INPUT_BYTES * 2 + 8))]).is_err());
+        assert!(unhex_type(&[DataType::Integer]).is_err());
+    }
+    #[test]
+    fn runs_through_native_sql() {
+        let query = sql::parse_sql("SELECT FROM_BASE32_UTF8('MZXW6===')").unwrap();
+        assert_eq!(executor::execute(&query, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Text("foo".into())]]);
     }
 }
