@@ -791,6 +791,41 @@ impl Parser {
             };
         }
         if self.take_word("WHERE") {
+            // TPC-H Q18 uses WHERE key IN (SELECT key ... GROUP BY ... HAVING ...).
+            // A positive membership predicate in WHERE is a semi join: it
+            // preserves the outer rows without multiplying by subquery duplicates.
+            let is_in_subquery = matches!(self.tokens.get(self.index), Some(Token::Word(_)))
+                && matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("IN"))
+                && self.tokens.get(self.index + 2) == Some(&Token::Symbol('('))
+                && matches!(self.tokens.get(self.index + 3),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"));
+            if is_in_subquery {
+                let left_key = self.identifier()?;
+                self.expect_word("IN")?;
+                self.expect_symbol('(')?;
+                if self.subquery_depth >= 32 {
+                    return Err(Error::Parse("IN subquery nesting limit exceeded".into()));
+                }
+                self.subquery_depth += 1;
+                let inner = self.select_with_intersections()?;
+                let inner = self.finish_query(inner)?;
+                self.expect_symbol(')')?;
+                self.subquery_depth -= 1;
+                let right_key = match &inner {
+                    Plan::Project { selections, .. } if selections.len() == 1 =>
+                        selections[0].alias.clone(),
+                    _ => return Err(Error::Unsupported(
+                        "IN subquery must project one named column".into())),
+                };
+                plan = Plan::Join {
+                    left: Box::new(plan), right: Box::new(inner),
+                    left_key, right_key, kind: JoinKind::Semi,
+                };
+                if self.take_word("AND") {
+                    plan = plan.filter(self.expression(2)?);
+                }
+            } else {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
             // subquery down to zero columns and at most one row. CROSS JOIN
             // then preserves the outer schema while returning outer rows
@@ -832,6 +867,7 @@ impl Parser {
             } else {
                 if negate { self.index -= 1; }
                 plan = plan.filter(self.expression(0)?);
+            }
             }
         }
 
