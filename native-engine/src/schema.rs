@@ -127,6 +127,13 @@ mod tests {
 
  
 impl Schema {
+    fn project_fields(&self, indices: impl IntoIterator<Item = Result<usize>>) -> Result<Self> {
+        let fields = indices.into_iter()
+            .map(|index| Ok(self.field(index?)?.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        Self::new(fields)
+    }
+
     /// Retain named fields in the requested order; reject unknown and duplicate names.
     /// Build a projection from already resolved column indices. Avoid name
     /// normalization and hash lookups on the physical planning path.
@@ -135,9 +142,7 @@ impl Schema {
             indices.iter().copied().eq(0..self.len()) {
             return Ok(self.clone());
         }
-        Self::new(indices.iter().map(|&index| {
-            Ok(self.field(index)?.clone())
-        }).collect::<Result<Vec<_>>>()?)
+        self.project_fields(indices.iter().copied().map(Ok))
     }
 
     pub fn project_columns(&self, names: &[&str]) -> Result<Self> {
@@ -147,9 +152,7 @@ impl Schema {
             .all(|(index, name)| self.column(name).ok() == Some(index)) {
             return Ok(self.clone());
         }
-        Self::new(names.iter().map(|name| {
-            Ok(self.field(self.column(name)?)?.clone())
-        }).collect::<Result<Vec<_>>>()?)
+        self.project_fields(names.iter().map(|name| self.column(name)))
     }
 }
 
