@@ -54,6 +54,43 @@ pub(crate) fn shift_days(date: &str, amount: i64) -> Result<String> {
     Ok(format!("{y:04}-{m:02}-{d:02}"))
 }
 
+/// Signed days since the Unix epoch, for validated ISO calendar dates.
+fn date_ordinal(date: &str) -> Result<i64> {
+    let (year, month, day) = parse_iso_date(date)
+        .ok_or_else(|| Error::Execution("invalid ISO calendar date".into()))?;
+    let mut y = i64::from(year);
+    let month = i64::from(month);
+    let day = i64::from(day);
+    if month <= 2 { y -= 1; }
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    Ok(era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468)
+}
+
+pub(crate) fn datediff_output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
+    if args.len() != 2 {
+        return Err(Error::Parse("DATEDIFF expects end date and start date".into()));
+    }
+    if args[0].output_type(schema)? != DataType::Text
+        || args[1].output_type(schema)? != DataType::Text {
+        return Err(Error::Type("DATEDIFF requires two ISO dates".into()));
+    }
+    Ok(DataType::Integer)
+}
+
+pub(crate) fn eval_datediff(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
+    let end = args[0].evaluate(batch, row)?;
+    let start = args[1].evaluate(batch, row)?;
+    match (end, start) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Text(end), Value::Text(start)) =>
+            Ok(Value::Integer(date_ordinal(&end)? - date_ordinal(&start)?)),
+        _ => Err(Error::Type("DATEDIFF requires two ISO dates".into())),
+    }
+}
+
 pub(crate) fn shift_output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
     if args.len() != 2 {
         return Err(Error::Parse("DATE_ADD expects date and days".into()));
@@ -143,5 +180,25 @@ mod date_add_tpch_tests {
         let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
             .unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("1999-03-01".into()), Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod tpch_datediff_tests {
+    use super::*;
+
+    #[test]
+    fn computes_signed_calendar_day_differences() {
+        let run = |q: &str| crate::executor::execute(
+            &crate::sql::parse_sql(q).unwrap(), &crate::catalog::Catalog::new(),
+        ).unwrap().rows().unwrap()[0][0].clone();
+        assert_eq!(run("SELECT DATEDIFF('1996-03-01', '1996-02-28')"),
+            Value::Integer(2));
+        assert_eq!(run("SELECT DATEDIFF('1998-01-01', '1997-12-31')"),
+            Value::Integer(1));
+        assert_eq!(run("SELECT DATEDIFF('1997-12-31', '1998-01-01')"),
+            Value::Integer(-1));
+        assert_eq!(run("SELECT DATEDIFF(NULL, '1998-01-01')"), Value::Null);
+        assert_eq!(date_ordinal("1970-01-01").unwrap(), 0);
     }
 }
