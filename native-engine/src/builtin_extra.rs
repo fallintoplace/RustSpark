@@ -11,6 +11,52 @@ fn normalized_uppercase(name: &str) -> Cow<'_, str> {
 }
 
 
+/// Add whole days to a native ISO date without depending on a timezone.
+fn shift_iso_days(date: &str, delta: i64) -> Result<String> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || bytes.iter().enumerate().any(|(i, byte)|
+            i != 4 && i != 7 && !byte.is_ascii_digit()) {
+        return Err(Error::Type("DATE_ADD requires YYYY-MM-DD".into()));
+    }
+    let year: i64 = date[0..4].parse().expect("checked ISO year");
+    let month: i64 = date[5..7].parse().expect("checked ISO month");
+    let day: i64 = date[8..10].parse().expect("checked ISO day");
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || day == 0 || day > max_day {
+        return Err(Error::Type("invalid date in DATE_ADD".into()));
+    }
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let epoch_days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    let z = epoch_days.checked_add(delta)
+        .and_then(|n| n.checked_add(719468))
+        .ok_or_else(|| Error::Execution("DATE_ADD arithmetic overflow".into()))?;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    if !(1..=9999).contains(&year) {
+        return Err(Error::Execution("DATE_ADD date outside ISO range".into()));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
@@ -64,6 +110,18 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if args.len() < 2 { return Err(Error::Parse("CONCAT requires at least two arguments".into())); }
             for arg in args {
                 if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("CONCAT requires text".into())); }
+            }
+            Ok(DataType::Text)
+        },
+        "DATE_ADD" | "DATE_SUB" => {
+            if args.len() != 2 {
+                return Err(Error::Parse("DATE_ADD and DATE_SUB expect two arguments".into()));
+            }
+            if (!matches!(&args[0], Expr::Literal(Value::Null))
+                && args[0].output_type(schema)? != DataType::Text)
+                || (!matches!(&args[1], Expr::Literal(Value::Null))
+                    && args[1].output_type(schema)? != DataType::Integer) {
+                return Err(Error::Type("DATE_ADD requires a date and integer days".into()));
             }
             Ok(DataType::Text)
         },
@@ -331,6 +389,17 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
             Ok(Value::Text(text))
+        },
+        "DATE_ADD" | "DATE_SUB" => match args {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [Value::Text(date), Value::Integer(days)] => {
+                let change = if name.eq_ignore_ascii_case("DATE_SUB") {
+                    days.checked_neg().ok_or_else(||
+                        Error::Execution("DATE_SUB integer overflow".into()))?
+                } else { *days };
+                Ok(Value::Text(shift_iso_days(date, change)?))
+            }
+            _ => Err(Error::Type("DATE_ADD requires a date and integer days".into())),
         },
         "SUBSTRING" | "SUBSTR" => match args {
             [Value::Text(text), Value::Integer(start)] => {
@@ -680,5 +749,34 @@ mod spark_format_string_tests {
         assert!(evaluate("printf", &[Value::Text("a".repeat(4097))]).is_err());
         assert!(evaluate("printf", &[Value::Text("%s".into()),
             Value::Text("x".repeat(1024 * 1024 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_date_add_sub_tests {
+    use super::*;
+
+    #[test]
+    fn shifts_leap_days_and_year_boundaries() {
+        assert_eq!(evaluate("date_sub", &[
+            Value::Text("1998-12-01".into()), Value::Integer(90),
+        ]).unwrap(), Value::Text("1998-09-02".into()));
+        assert_eq!(evaluate("date_add", &[
+            Value::Text("2000-02-28".into()), Value::Integer(1),
+        ]).unwrap(), Value::Text("2000-02-29".into()));
+        assert_eq!(evaluate("date_add", &[
+            Value::Text("1999-12-31".into()), Value::Integer(1),
+        ]).unwrap(), Value::Text("2000-01-01".into()));
+        assert_eq!(evaluate("date_sub", &[Value::Null, Value::Integer(1)]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn validates_bad_dates_and_overflows() {
+        assert!(evaluate("date_add", &[Value::Text("1995-02-29".into()), Value::Integer(1)]).is_err());
+        assert!(evaluate("date_sub", &[Value::Text("1995-01-01".into()), Value::Integer(i64::MIN)]).is_err());
+        assert!(evaluate("date_add", &[Value::Text("9999-12-31".into()), Value::Integer(1)]).is_err());
+        let schema = Schema::new(vec![]).unwrap();
+        assert!(return_type("DATE_ADD", &[Expr::Literal(Value::Integer(3)),
+            Expr::Literal(Value::Integer(5))], &schema).is_err());
     }
 }
