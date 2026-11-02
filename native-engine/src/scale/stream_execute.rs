@@ -498,20 +498,9 @@ fn infer(
         Plan::ExceptAll { left, right } =>
             set_schema(&child(left)?, &child(right)?),
         Plan::UnionAll { left, right } => {
-            let left_schema = child(left)?;
-            let right_schema = child(right)?;
-            if left_schema.len() != right_schema.len() {
-                return Err(Error::Schema("UNION ALL column counts differ".into()));
-            }
-            let fields = left_schema.fields().iter().zip(right_schema.fields())
-                .map(|(left, right)| {
-                    if left.data_type != right.data_type {
-                        return Err(Error::Type("UNION ALL column types differ".into()));
-                    }
-                    Ok(Field::new(&left.name, left.data_type,
-                        left.nullable || right.nullable))
-                }).collect::<Result<Vec<_>>>()?;
-            Schema::new(fields)
+            // UnionAllStream already widens INTEGER to FLOAT by position.
+            // Share its set schema so preflight does not reject valid unions.
+            set_schema(&child(left)?, &child(right)?)
         }
     }?;
     cache.schemas.borrow_mut().insert(plan as *const Plan, schema.clone());
