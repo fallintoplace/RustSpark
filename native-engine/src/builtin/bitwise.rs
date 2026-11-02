@@ -23,8 +23,21 @@ fn rotate_right(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer(number.rotate_right(count.rem_euclid(64) as u32)))
 }
 
+fn bitmap_bucket_number(args: &[Value]) -> Result<Value> {
+    let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    let bucket = (i128::from(value) - 1).div_euclid(32_768) + 1;
+    Ok(Value::Integer(bucket as i64))
+}
+
+fn bitmap_bucket_number_type(types: &[DataType]) -> Result<DataType> {
+    if types[0] == DataType::Integer { Ok(DataType::Integer) }
+    else { Err(Error::Type("BITMAP_BUCKET_NUMBER expects integer input".into())) }
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "rotate_right", min_args: 2, max_args: 2, result_type: output, call: rotate_right },
+    Function { name: "bitmap_bucket_number", min_args: 1, max_args: 1,
+        result_type: bitmap_bucket_number_type, call: bitmap_bucket_number },
     Function { name: "bitwise_and", min_args: 2, max_args: 2, result_type: output, call: and },
     Function { name: "bitwise_or", min_args: 2, max_args: 2, result_type: output, call: or },
     Function { name: "bitwise_xor", min_args: 2, max_args: 2, result_type: output, call: xor },
@@ -53,5 +66,34 @@ mod rotate_right_extension_tests {
         assert_eq!(rotate_right(&[Value::Integer(2), Value::Integer(65)]).unwrap(), Value::Integer(1));
         assert_eq!(rotate_right(&[Value::Integer(-1), Value::Integer(7)]).unwrap(), Value::Integer(-1));
         assert_eq!(rotate_right(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod spark_bitmap_bucket_number_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn handles_positive_and_negative_bucket_boundaries() {
+        for (input, expected) in [
+            (0, 0), (1, 1), (123, 1),
+            (32_768, 1), (32_769, 2), (-1, 0),
+            (-32_768, -1), (i64::MAX, (i128::from(i64::MAX) - 1).div_euclid(32_768) as i64 + 1),
+        ] {
+            assert_eq!(bitmap_bucket_number(&[Value::Integer(input)]).unwrap(),
+                Value::Integer(expected));
+        }
+        assert_eq!(bitmap_bucket_number(&[Value::Integer(i64::MIN)]).unwrap(),
+            Value::Integer(((i128::from(i64::MIN) - 1).div_euclid(32_768) + 1) as i64));
+        assert_eq!(bitmap_bucket_number(&[Value::Null]).unwrap(), Value::Null);
+        assert!(bitmap_bucket_number_type(&[DataType::Float]).is_err());
+    }
+
+    #[test]
+    fn sql_exposes_bucket_number() {
+        let plan = sql::parse_sql("SELECT BITMAP_BUCKET_NUMBER(123), BITMAP_BUCKET_NUMBER(0)").unwrap();
+        assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(1), Value::Integer(0)]]);
     }
 }
