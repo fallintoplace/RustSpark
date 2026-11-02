@@ -595,8 +595,31 @@ fn lower(
                 control: control.clone(), stopped: false,
             }))
         }
-        Plan::Project { input, selections } =>
-            Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone()))),
+        Plan::Project { input, selections } => {
+            // For a direct Parquet projection, decode only referenced physical
+            // fields. Keep ProjectStream to restore SELECT order and aliases.
+            if let Plan::Scan { table } = input.as_ref() {
+                if let Some(parquet) = catalog.get_parquet(table)? {
+                    let mut columns = Vec::new();
+                    for selection in selections {
+                        let Expr::Column(name) = &selection.expression else {
+                            return Ok(Box::new(ProjectStream::new(
+                                child(input)?, selections.clone(), control.clone())));
+                        };
+                        if !columns.iter().any(|existing: &&str|
+                            existing.eq_ignore_ascii_case(name)) {
+                            columns.push(name.as_str());
+                        }
+                    }
+                    if !columns.is_empty() {
+                        let source = parquet.open_columns(options.batch_rows, &columns)?;
+                        return Ok(Box::new(ProjectStream::new(
+                            source, selections.clone(), control.clone())));
+                    }
+                }
+            }
+            Ok(Box::new(ProjectStream::new(child(input)?, selections.clone(), control.clone())))
+        },
         Plan::Limit { input, offset, count: Some(count) }
             if matches!(input.as_ref(), Plan::Filter { .. }) => {
             let Plan::Filter { input: source, predicate } = input.as_ref() else {
