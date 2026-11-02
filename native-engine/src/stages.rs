@@ -89,6 +89,39 @@ impl StageGraph {
 
     pub fn stages(&self) -> &[Stage] { &self.stages }
 
+    /// Stable, human-readable execution order for diagnostics and EXPLAIN.
+    pub fn explain_text(&self) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::new();
+        for &id in &self.order {
+            if let Some(stage) = self.stages.iter().find(|stage| stage.id == id) {
+                let _ = writeln!(&mut text,
+                    "stage {id}: {:?} inputs={:?} blocking={}",
+                    stage.kind, stage.inputs, stage.kind.is_blocking());
+            }
+        }
+        text
+    }
+
+    /// A dependency-oriented Graphviz representation. IDs are numeric and
+    /// operator names are fixed variants, so no user strings enter DOT labels.
+    pub fn to_dot(&self) -> String {
+        use std::fmt::Write as _;
+        let mut dot = String::from("digraph rustspark {\n");
+        for stage in &self.stages {
+            let _ = writeln!(&mut dot,
+                "  s{} [label=\"{}: {:?}\", shape={}];",
+                stage.id, stage.id, stage.kind,
+                if stage.kind.is_blocking() { "box" } else { "ellipse" });
+            for &input in &stage.inputs {
+                let _ = writeln!(&mut dot, "  s{input} -> s{};", stage.id);
+            }
+        }
+        dot.push_str("}\n");
+        dot
+    }
+
+
     pub fn root(&self) -> Option<usize> {
         self.root
     }
@@ -387,5 +420,34 @@ mod cached_physical_dag_perf_tests {
         assert_eq!(ordered.root(), Some(2));
         assert_eq!(ordered.execution_order().unwrap(), [0, 1, 2]);
         assert_eq!(ordered.execution_order().unwrap(), [0, 1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod physical_explain_regressions {
+    use super::*;
+    #[test]
+    fn explain_preserves_execution_order_and_blocking_boundaries() {
+        let graph = StageGraph::from_plan(
+            &Plan::scan("events").filter(crate::expr::Expr::Literal(
+                crate::scalar::Value::Boolean(true))).distinct(),
+        ).unwrap();
+        let text = graph.explain_text();
+        assert!(text.contains("Scan"));
+        assert!(text.contains("Filter"));
+        assert!(text.contains("Distinct"));
+        assert!(text.contains("blocking=true"));
+        let dot = graph.to_dot();
+        assert!(dot.starts_with("digraph rustspark {"));
+        assert!(dot.contains("->"));
+        assert!(dot.contains("shape=box"));
+    }
+
+    #[test]
+    fn dot_has_one_root_and_deterministic_labels() {
+        let graph = StageGraph::from_plan(&Plan::scan("t")).unwrap();
+        assert_eq!(graph.to_dot(), graph.to_dot());
+        assert_eq!(graph.root(), Some(0));
+        assert!(graph.explain_text().contains("stage 0: Scan"));
     }
 }
