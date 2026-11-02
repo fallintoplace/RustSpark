@@ -379,12 +379,6 @@ fn infer(
         Plan::Aggregate { input, group_by, aggregates } => {
             if group_by.is_empty() {
                 let schema = child(input)?;
-                if aggregates.iter().any(|item| matches!(&item.op,
-                    AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
-                    AggregateOp::AvgDistinct(_))) {
-                    return Err(Error::Unsupported(
-                        "stream global DISTINCT aggregates require a spill path".into()));
-                }
                 let result = aggregate::global_output_schema(&schema, aggregates)?;
                 cache.schemas.borrow_mut().insert(plan as *const Plan, result.clone());
                 return Ok(result);
