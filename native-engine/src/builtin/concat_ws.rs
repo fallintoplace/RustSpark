@@ -3,14 +3,19 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
+fn reserved_output(length: usize) -> Result<String> {
+    let mut output = String::new();
+    output.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("CONCAT_WS output allocation failed".into()))?;
+    Ok(output)
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(separator) = super::string(&args[0])? else { return Ok(Value::Null); };
     if args.len() == 2 {
         return match super::string(&args[1])? {
             Some(value) if value.len() <= 16 * 1024 * 1024 => {
-                let mut output = String::new();
-                output.try_reserve_exact(value.len())
-                    .map_err(|_| Error::Execution("CONCAT_WS output allocation failed".into()))?;
+                let mut output = reserved_output(value.len())?;
                 output.push_str(value);
                 Ok(Value::Text(output))
             },
@@ -36,9 +41,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
 
     // The first pass validates the bound; the second writes once into the result.
-    let mut output = String::new();
-    output.try_reserve_exact(length)
-        .map_err(|_| Error::Execution("CONCAT_WS output allocation failed".into()))?;
+    let mut output = reserved_output(length)?;
     let mut first = true;
     // The sizing pass already checked every argument's type and NULL state.
     for arg in &args[1..] {
