@@ -748,7 +748,7 @@ impl Parser {
         }
         let function = match self.peek() {
             Some(Token::Word(word))
-                if ["COUNT", "COUNT_IF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST", "LAST"]
+                if ["COUNT", "COUNT_IF", "COUNTIF", "SUM", "MIN", "MAX", "AVG", "MEAN", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST", "LAST"]
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
                     && self.tokens.get(self.index + 1) == Some(&Token::Symbol('(')) =>
@@ -778,7 +778,7 @@ impl Parser {
                 match function.as_str() {
                     "COUNT" if distinct => AggregateOp::CountDistinct(expr),
                     "COUNT" => AggregateOp::Count(expr),
-                    "COUNT_IF" => count_if_aggregate(expr),
+                    "COUNT_IF" | "COUNTIF" => count_if_aggregate(expr),
                     "SUM" if distinct => AggregateOp::SumDistinct(expr),
                     "SUM" => AggregateOp::Sum(expr),
                     "AVG" | "MEAN" if distinct => AggregateOp::AvgDistinct(expr),
@@ -1530,7 +1530,7 @@ fn rewrite_having(
             Err(Error::Parse(format!("HAVING column {name} is not grouped or aggregated")))
         }
         Expr::Call { name, args } if
-            ["COUNT", "COUNT_IF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST", "LAST"]
+            ["COUNT", "COUNT_IF", "COUNTIF", "SUM", "AVG", "MEAN", "MIN", "MAX", "BOOL_AND", "EVERY", "BOOL_OR", "ANY", "SOME", "__spark_count_star", "BIT_AND", "BIT_OR", "BIT_XOR", "FIRST", "LAST"]
                 .iter().any(|f| name.eq_ignore_ascii_case(f)) =>
         {
             let op = if name.eq_ignore_ascii_case("__spark_count_star") {
@@ -1550,7 +1550,7 @@ fn rewrite_having(
                 };
                 match name.to_ascii_uppercase().as_str() {
                     "COUNT" => AggregateOp::Count(argument),
-                    "COUNT_IF" => count_if_aggregate(argument),
+                    "COUNT_IF" | "COUNTIF" => count_if_aggregate(argument),
                     "SUM" => AggregateOp::Sum(argument),
                     "AVG" | "MEAN" => AggregateOp::Avg(argument),
                     "BOOL_AND" | "EVERY" => AggregateOp::Min(boolean_aggregate_expr(argument)),
