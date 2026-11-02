@@ -15,6 +15,39 @@ const maxNDJSONRowBytes = 16 * 1024 * 1024
 
 // scanNDJSONRows checks complete JSON object rows before calling the visitor.
 // The line bound prevents a single untrusted result from exhausting memory.
+// decodeNDJSONRow validates one SQL result object without invoking a visitor.
+// The byte limit is checked before building the JSON decoder.
+func decodeNDJSONRow(raw []byte, index int) (map[string]any, error) {
+    if len(raw) > maxNDJSONRowBytes {
+        return nil, fmt.Errorf("RustSpark NDJSON row %d exceeds %d bytes", index, maxNDJSONRowBytes)
+    }
+    // JSON permits only space, tab, LF and CR outside values.
+    // bytes.TrimSpace would also remove Unicode whitespace, hiding invalid data.
+    line := bytes.Trim(raw, " \t\r\n")
+    if !utf8.Valid(line) {
+        return nil, fmt.Errorf("RustSpark NDJSON row %d is not valid UTF-8", index)
+    }
+    if len(line) == 0 {
+        return nil, fmt.Errorf("RustSpark NDJSON row %d is blank", index)
+    }
+    decoder := json.NewDecoder(bytes.NewReader(line))
+    decoder.UseNumber()
+    item, err := decodeUniqueValue(decoder, 0)
+    if err != nil {
+        return nil, fmt.Errorf("invalid RustSpark NDJSON row %d: %w", index, err)
+    }
+    row, ok := item.(map[string]any)
+    if !ok {
+        return nil, fmt.Errorf("RustSpark NDJSON row %d must be an object", index)
+    }
+    if _, err := decoder.Token(); err == nil {
+        return nil, fmt.Errorf("RustSpark NDJSON row %d contains trailing JSON", index)
+    } else if !errors.Is(err, io.EOF) {
+        return nil, fmt.Errorf("invalid RustSpark NDJSON row %d: %w", index, err)
+    }
+    return row, nil
+}
+
 func scanNDJSONRows(input io.Reader, visit func(map[string]any) error) error {
     scanner := bufio.NewScanner(input)
     // Scanner needs room for the line ending in addition to row bytes.
@@ -22,32 +55,9 @@ func scanNDJSONRows(input io.Reader, visit func(map[string]any) error) error {
     index := 0
     for scanner.Scan() {
         index++
-        if len(scanner.Bytes()) > maxNDJSONRowBytes {
-            return fmt.Errorf("RustSpark NDJSON row %d exceeds %d bytes", index, maxNDJSONRowBytes)
-        }
-        // JSON permits only space, tab, LF and CR outside values.
-        // bytes.TrimSpace also removes Unicode whitespace, hiding invalid data.
-        line := bytes.Trim(scanner.Bytes(), " \t\r\n")
-        if !utf8.Valid(line) {
-            return fmt.Errorf("RustSpark NDJSON row %d is not valid UTF-8", index)
-        }
-        if len(line) == 0 {
-            return fmt.Errorf("RustSpark NDJSON row %d is blank", index)
-        }
-        decoder := json.NewDecoder(bytes.NewReader(line))
-        decoder.UseNumber()
-        item, err := decodeUniqueValue(decoder, 0)
+        row, err := decodeNDJSONRow(scanner.Bytes(), index)
         if err != nil {
-            return fmt.Errorf("invalid RustSpark NDJSON row %d: %w", index, err)
-        }
-        row, ok := item.(map[string]any)
-        if !ok {
-            return fmt.Errorf("RustSpark NDJSON row %d must be an object", index)
-        }
-        if _, err := decoder.Token(); err == nil {
-            return fmt.Errorf("RustSpark NDJSON row %d contains trailing JSON", index)
-        } else if !errors.Is(err, io.EOF) {
-            return fmt.Errorf("invalid RustSpark NDJSON row %d: %w", index, err)
+            return err
         }
         if err := visit(row); err != nil {
             return err
