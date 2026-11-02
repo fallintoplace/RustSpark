@@ -1087,6 +1087,39 @@ impl Parser {
         if self.take_word("ORDER") {
             self.expect_word("BY")?;
             let mut keys = Vec::new();
+            if self.take_word("ALL") {
+                let selected = match &plan {
+                    Plan::Project { selections, .. } => Some(selections.as_slice()),
+                    Plan::Distinct { input } => match input.as_ref() {
+                        Plan::Project { selections, .. } => Some(selections.as_slice()),
+                        _ => None,
+                    },
+                    _ => None,
+                }.ok_or_else(|| Error::Unsupported(
+                    "ORDER BY ALL requires explicit projected columns".into()
+                ))?;
+                let descending = if self.take_word("DESC") {
+                    true
+                } else {
+                    self.take_word("ASC");
+                    false
+                };
+                let nulls_first = if self.take_word("NULLS") {
+                    if self.take_word("FIRST") {
+                        true
+                    } else {
+                        self.expect_word("LAST")?;
+                        false
+                    }
+                } else { !descending };
+                for item in selected {
+                    keys.push(SortKey {
+                        expression: Expr::Column(item.alias.clone()),
+                        descending,
+                        nulls_first,
+                    });
+                }
+            } else {
             loop {
                 let is_ordinal = match self.peek() {
                     Some(Token::Number(number)) if number.chars().all(|ch| ch.is_ascii_digit()) => {
@@ -1142,6 +1175,7 @@ impl Parser {
                 if !self.take_symbol(',') {
                     break;
                 }
+            }
             }
             plan = match plan {
                 Plan::Project { input, selections } => {
