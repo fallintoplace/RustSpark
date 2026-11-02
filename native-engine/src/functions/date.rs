@@ -22,6 +22,36 @@ pub(crate) fn parse_iso_date(input: &str) -> Option<(i32, u32, u32)> {
     Some((year, month, day))
 }
 
+pub(crate) fn component_output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
+    if args.len() != 1 {
+        return Err(Error::Parse("calendar component expects one argument".into()));
+    }
+    if args[0].output_type(schema)? != DataType::Text {
+        return Err(Error::Type("calendar component requires ISO date text".into()));
+    }
+    Ok(DataType::Integer)
+}
+
+pub(crate) fn eval_component(
+    component: &str, args: &[Expr], batch: &Batch, row: usize,
+) -> Result<Value> {
+    match args[0].evaluate(batch, row)? {
+        Value::Null => Ok(Value::Null),
+        Value::Text(date) => {
+            let (year, month, day) = parse_iso_date(&date).ok_or_else(||
+                Error::Execution("invalid ISO calendar date".into()))?;
+            let value = match component {
+                "YEAR" => i64::from(year),
+                "MONTH" => i64::from(month),
+                "DAY" | "DAYOFMONTH" => i64::from(day),
+                _ => return Err(Error::Unsupported("unsupported date component".into())),
+            };
+            Ok(Value::Integer(value))
+        }
+        _ => Err(Error::Type("calendar component requires ISO date text".into())),
+    }
+}
+
 pub(crate) fn output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
     if args.len() != 1 {
         return Err(Error::Parse("TO_DATE expects one argument".into()));
@@ -64,5 +94,31 @@ mod tests {
         let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
             .unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("1998-12-01".into()), Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod tpch_date_components_tests {
+    use super::*;
+
+    #[test]
+    fn year_month_day_extract_parts_of_valid_dates() {
+        let query = "SELECT YEAR('1998-12-01'), MONTH('1998-12-01'), \
+            DAY('1998-12-01'), DAYOFMONTH('1998-12-01')";
+        let rows = crate::executor::execute(&crate::sql::parse_sql(query).unwrap(),
+            &crate::catalog::Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Integer(1998), Value::Integer(12),
+            Value::Integer(1), Value::Integer(1),
+        ]]);
+    }
+
+    #[test]
+    fn invalid_dates_and_nulls_are_handled() {
+        let invalid = crate::sql::parse_sql("SELECT YEAR('1998-02-30')").unwrap();
+        assert!(crate::executor::execute(&invalid, &crate::catalog::Catalog::new()).is_err());
+        let nullable = crate::sql::parse_sql("SELECT MONTH(NULL)").unwrap();
+        assert_eq!(crate::executor::execute(&nullable, &crate::catalog::Catalog::new())
+            .unwrap().rows().unwrap(), vec![vec![Value::Null]]);
     }
 }
