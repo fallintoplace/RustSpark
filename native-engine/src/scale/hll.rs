@@ -935,7 +935,7 @@ mod empty_wire_fast_path_tests {
     fn empty_sketch_uses_the_canonical_sparse_wire_header() {
         let empty = HyperLogLog::new();
         let bytes = empty.to_wire_bytes();
-        assert_eq!(bytes, b"RSH2\0\0");
+        assert_eq!(bytes.as_slice(), b"RSH2\0\0");
         assert_eq!(bytes.len(), SPARSE_HEADER_BYTES);
         assert_eq!(HyperLogLog::from_wire_bytes(&bytes).unwrap(), empty);
 
