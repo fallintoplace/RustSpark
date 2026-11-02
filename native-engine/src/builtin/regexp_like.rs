@@ -6,6 +6,11 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Boolean)
 }
 
+fn is_literal_identifier(pattern: &str, max_bytes: usize) -> bool {
+    pattern.len() <= max_bytes && pattern.chars().all(|ch|
+        ch.is_alphanumeric() || ch == '_')
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -20,14 +25,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     // test. Patterns with $, escapes, groups or modifiers use the regex
     // compiler so their full semantics remain intact.
     if let Some(prefix) = pattern.strip_prefix('^') {
-        if prefix.len() <= 4095 && prefix.chars().all(|ch|
-            ch.is_alphanumeric() || ch == '_') {
+        if is_literal_identifier(prefix, 4095) {
             return Ok(Value::Boolean(text.starts_with(prefix)));
         }
     }
     // Plain ASCII identifiers have no regex metacharacters.
-    if pattern.len() <= 4096 && pattern.chars().all(|ch|
-        ch.is_alphanumeric() || ch == '_') {
+    if is_literal_identifier(pattern, 4096) {
         return Ok(Value::Boolean(text.contains(pattern)));
     }
     Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(text)))
@@ -233,5 +236,19 @@ mod recovered_regex_prefix_parser_regressions {
         assert_eq!(evaluate(&[Value::Null, Value::Text("^foo".into())]).unwrap(),
             Value::Null);
         assert!(evaluate(&[Value::Text("hello".into()), Value::Text("(".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod literal_identifier_classification_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_unicode_metacharacter_and_byte_boundaries() {
+        assert!(is_literal_identifier("é_9", 4095));
+        assert!(!is_literal_identifier("a.b", 4096));
+        assert!(is_literal_identifier(&"a".repeat(4095), 4095));
+        assert!(!is_literal_identifier(&"a".repeat(4096), 4095));
+        assert!(!is_literal_identifier(&"é".repeat(2048), 4095));
     }
 }
