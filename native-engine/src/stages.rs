@@ -122,6 +122,7 @@ impl StageGraph {
     }
 
 
+
     pub fn root(&self) -> Option<usize> {
         self.root
     }
@@ -428,10 +429,9 @@ mod physical_explain_regressions {
     use super::*;
     #[test]
     fn explain_preserves_execution_order_and_blocking_boundaries() {
-        let graph = StageGraph::from_plan(
-            &Plan::scan("events").filter(crate::expr::Expr::Literal(
-                crate::scalar::Value::Boolean(true))).distinct(),
-        ).unwrap();
+        let input = Plan::scan("events").filter(crate::expr::Expr::Literal(
+            crate::scalar::Value::Boolean(true)));
+        let graph = StageGraph::from_plan(&Plan::Distinct { input: Box::new(input) }).unwrap();
         let text = graph.explain_text();
         assert!(text.contains("Scan"));
         assert!(text.contains("Filter"));
