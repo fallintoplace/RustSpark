@@ -93,8 +93,14 @@ where I: Iterator<Item = Result<Vec<Value>>>
         // Do not allocate a potential 256-row buffer for every field until
         // the first validated row arrives. Empty streams and a malformed
         // first record should leave all column vectors unallocated.
-        let mut columns = (0..self.schema.len())
-            .map(|_| Vec::new()).collect::<Vec<Vec<Value>>>();
+        let mut columns = Vec::new();
+        if columns.try_reserve_exact(self.schema.len()).is_err() {
+            self.finished = true;
+            return Some(Err(Error::Execution(
+                "row batch column descriptor allocation failed".into(),
+            )));
+        }
+        columns.resize_with(self.schema.len(), Vec::new);
         let mut row_count = 0usize;
         while row_count < limit {
             let next = self.pending_row.take().map(Ok).or_else(|| self.input.next());
@@ -773,5 +779,41 @@ mod fallible_row_batch_growth_tests {
         assert_eq!(stream.next().unwrap().unwrap().num_rows(), 10);
         assert!(matches!(stream.next().unwrap(), Err(Error::Type(_))));
         assert!(stream.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod row_batch_wide_descriptor_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn batches_wide_nullable_rows_without_dropping_columns() {
+        let width = 512;
+        let schema = Schema::new((0..width).map(|index|
+            Field::new(format!("c{index}"), DataType::Integer, true)
+        ).collect()).unwrap();
+        let first = vec![Value::Null; width];
+        let second = (0..width).map(|index| Value::Integer(index as i64))
+            .collect::<Vec<_>>();
+        let rows = [Ok(first.clone()), Ok(second.clone())].into_iter();
+        let mut batches = RowBatcher::with_byte_budget(rows, schema, 16, 128 * 1024)
+            .unwrap();
+        let batch = batches.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.row(0).unwrap(), first);
+        assert_eq!(batch.row(1).unwrap(), second);
+        assert!(batches.next().is_none());
+    }
+
+    #[test]
+    fn empty_wide_stream_emits_no_artificial_rows() {
+        let schema = Schema::new((0..256).map(|n|
+            Field::new(format!("c{n}"), DataType::Text, true)
+        ).collect()).unwrap();
+        let mut batches = RowBatcher::new(
+            std::iter::empty::<Result<Vec<Value>>>(), schema, 128,
+        ).unwrap();
+        assert!(batches.next().is_none());
     }
 }
