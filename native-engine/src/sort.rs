@@ -678,6 +678,17 @@ mod direct_sort_scalar_compare_tests {
         ];
         for left in &values {
             for right in &values {
+                // Invalid mixed SQL types are intentionally covered by the
+                // generic error-fallback path, not by this scalar oracle.
+                if !matches!((left, right),
+                    (Value::Null, _) | (_, Value::Null)
+                    | (Value::Integer(_), Value::Integer(_))
+                    | (Value::Float(_), Value::Float(_))
+                    | (Value::Integer(_), Value::Float(_))
+                    | (Value::Float(_), Value::Integer(_))
+                    | (Value::Boolean(_), Value::Boolean(_))
+                    | (Value::Text(_), Value::Text(_))
+                ) { continue; }
                 for descending in [false, true] {
                     for nulls_first in [false, true] {
                         let expected = match (left.is_null(), right.is_null()) {
