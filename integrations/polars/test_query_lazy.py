@@ -235,3 +235,19 @@ class ExportDiagnosticsBudgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedPathValidationTests(unittest.TestCase):
+    def test_pathlike_objects_preserve_text_only_cli_arguments(self):
+        class BinaryPath(os.PathLike):
+            def __fspath__(self):
+                return b"/tmp/bytes.csv"
+
+        for option in ("csv", "parquet", "json_input", "database_dir"):
+            with self.subTest(option=option), self.assertRaises(ValueError):
+                build_command("SELECT 1", Path("out.arrow"), **{option: BinaryPath()})
+        args = build_command("SELECT 1", Path("out.arrow"),
+                             parquet=Path("/tmp/input table.parquet"),
+                             database_dir=Path("/tmp/catalog"))
+        self.assertIn("/tmp/input table.parquet", args)
+        self.assertIn("/tmp/catalog", args)
