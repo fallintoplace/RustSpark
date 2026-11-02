@@ -142,6 +142,14 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
         "BIT_COUNT" => bit_count::output_type(args, schema),
         "BIT_GET" | "GETBIT" => bit_get::output_type(args, schema),
         "YEAR" => year::output_type(args, schema),
+        "IS_UNKNOWN" | "IS_NOT_UNKNOWN" => {
+            check_arity(name, args, 1, 1)?;
+            if !matches!(args[0], Expr::Literal(Value::Null))
+                && args[0].output_type(schema)? != DataType::Boolean {
+                return Err(Error::Type("IS UNKNOWN requires boolean input".into()));
+            }
+            Ok(DataType::Boolean)
+        },
         "TYPEOF" => {
             check_arity(name, args, 1, 1)?;
             if !matches!(&args[0], Expr::Literal(Value::Null)) {
@@ -185,6 +193,12 @@ pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> 
         "BIT_COUNT" => bit_count::eval(args, batch, row),
         "BIT_GET" | "GETBIT" => bit_get::eval(args, batch, row),
         "YEAR" => year::eval(args, batch, row),
+        "IS_UNKNOWN" | "IS_NOT_UNKNOWN" => {
+            let is_unknown = args[0].evaluate(batch, row)?.is_null();
+            Ok(Value::Boolean(if name.eq_ignore_ascii_case("is_unknown") {
+                is_unknown
+            } else { !is_unknown }))
+        },
         "TYPEOF" => {
             let kind = match &args[0] {
                 Expr::Literal(Value::Null) => "void",

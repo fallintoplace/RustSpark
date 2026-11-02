@@ -296,8 +296,14 @@ impl Parser {
                         args: vec![condition, Expr::Literal(Value::Boolean(false))],
                     };
                     if negate { left = Expr::Not(Box::new(left)); }
+                } else if self.take_word("UNKNOWN") {
+                    // Spark only permits IS [NOT] UNKNOWN on boolean expressions.
+                    left = Expr::Call {
+                        name: if negate { "is_not_unknown" } else { "is_unknown" }.into(),
+                        args: vec![left],
+                    };
                 } else {
-                    if !self.take_word("UNKNOWN") { self.expect_word("NULL")?; }
+                    self.expect_word("NULL")?;
                     left = Expr::IsNull(Box::new(left));
                     if negate { left = Expr::Not(Box::new(left)); }
                 }
