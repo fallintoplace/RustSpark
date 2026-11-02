@@ -612,25 +612,68 @@ fn lower(
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
-            for key in keys {
-                let crate::expr::Expr::Column(name) = &key.expression else {
-                    return Err(Error::Unsupported("external sort requires column keys".into()));
+            let computed = keys.iter().any(|key|
+                !matches!(key.expression, Expr::Column(_)));
+            let mut sort_keys = keys.clone();
+            let mut source = child(input)?;
+            let original_schema = schema.clone();
+            let sort_schema = if computed {
+                // External sorting accepts column keys. Evaluate complex
+                // expressions once per input row into bounded hidden columns,
+                // and remove them after the final merge pass.
+                let mut selections: Vec<Selection> = schema.fields().iter()
+                    .map(|field| Selection::new(
+                        Expr::Column(field.name.clone()), field.name.clone()))
+                    .collect();
+                for (index, key) in sort_keys.iter_mut().enumerate() {
+                    if matches!(key.expression, Expr::Column(_)) { continue; }
+                    let mut hidden = format!("__rustspark_sort_key_{index}");
+                    while selections.iter().any(|selection|
+                        selection.alias.eq_ignore_ascii_case(&hidden)) {
+                        hidden.push('_');
+                    }
+                    selections.push(Selection::new(key.expression.clone(), hidden.clone()));
+                    key.expression = Expr::Column(hidden);
+                }
+                let fields = selections.iter().map(|selection| {
+                    Ok(Field::new(
+                        &selection.alias,
+                        selection.expression.output_type(&schema)?,
+                        true,
+                    ))
+                }).collect::<Result<Vec<_>>>()?;
+                source = Box::new(ProjectStream::new(source, selections, control.clone()));
+                Schema::new(fields)?
+            } else {
+                schema
+            };
+            for key in &sort_keys {
+                let Expr::Column(name) = &key.expression else {
+                    unreachable!("computed sort keys are materialized");
                 };
-                schema.column(name)?;
+                sort_schema.column(name)?;
             }
             let runs = write_sorted_runs(
-                child(input)?, schema.clone(), keys, &options.scratch_directory,
+                source, sort_schema.clone(), &sort_keys, &options.scratch_directory,
                 options.sort_run_rows, control
             )?;
             let files = merge_to_fan_in(
-                runs, &options.scratch_directory, schema.clone(), keys,
+                runs, &options.scratch_directory, sort_schema.clone(), &sort_keys,
                 options.merge_fan_in, options.sort_run_rows, control
             )?;
             let reader = RunMerger::new(
-                files.files(), schema, keys,
+                files.files(), sort_schema, &sort_keys,
                 options.sort_run_rows, options.batch_rows, control.clone()
             )?;
-            Ok(Box::new(SortedOutput { reader, _files: files }))
+            let sorted: BatchStream = Box::new(SortedOutput { reader, _files: files });
+            if computed {
+                let selections = original_schema.fields().iter().map(|field|
+                    Selection::new(Expr::Column(field.name.clone()), field.name.clone())
+                ).collect();
+                Ok(Box::new(ProjectStream::new(sorted, selections, control.clone())))
+            } else {
+                Ok(sorted)
+            }
         }
         Plan::Intersect { left, right } |
         Plan::IntersectAll { left, right } |
