@@ -32,7 +32,9 @@ fn hex(args: &[Value]) -> Result<Value> {
     }
     // Append both hexadecimal digits in one bulk copy, without converting
     // bytes to char or performing two UTF-8 pushes for each input byte.
-    let mut output = Vec::with_capacity(input.len() * 2);
+    let mut output = Vec::new();
+    output.try_reserve_exact(input.len() * 2)
+        .map_err(|_| Error::Execution("HEX output allocation failed".into()))?;
     for &byte in input {
         output.extend_from_slice(&HEX_PAIRS[usize::from(byte)]);
     }
@@ -63,7 +65,9 @@ fn unhex_utf8(args: &[Value]) -> Result<Value> {
     if text.len() % 2 != 0 {
         return Err(Error::Parse("UNHEX_UTF8 requires even-length hexadecimal text".into()));
     }
-    let mut bytes = Vec::with_capacity(text.len() / 2);
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(text.len() / 2)
+        .map_err(|_| Error::Execution("UNHEX_UTF8 output allocation failed".into()))?;
     for pair in text.as_bytes().chunks_exact(2) {
         let upper = UNHEX_DIGITS[usize::from(pair[0])];
         let lower = UNHEX_DIGITS[usize::from(pair[1])];
@@ -244,5 +248,19 @@ mod combined_hex_nibble_tests {
             assert!(unhex_utf8(&[Value::Text(text.into())]).is_err(), "{text}");
             assert_eq!(try_unhex_utf8(&[Value::Text(text.into())]).unwrap(), Value::Null);
         }
+    }
+}
+
+#[cfg(test)]
+mod fallible_hex_reservation_tests {
+    use super::*;
+    #[test]
+    fn empty_and_unicode_roundtrips_keep_exact_results() {
+        for text in ["", "A", "é", "🦀", "RustSpark"] {
+            let input = Value::Text(text.into());
+            let encoded = hex(&[input.clone()]).unwrap();
+            assert_eq!(unhex_utf8(&[encoded]).unwrap(), input);
+        }
+        assert_eq!(try_unhex_utf8(&[Value::Text("ZZ".into())]).unwrap(), Value::Null);
     }
 }
