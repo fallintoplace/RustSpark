@@ -604,6 +604,26 @@ impl Parser {
                     Ok(Expr::Call { name: "locate".into(), args })
                 }
             }
+            // TPC-H Q22 uses the SQL-standard SUBSTRING(value FROM start FOR length).
+            // Keep the comma form supported by Spark and other native queries.
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("SUBSTRING")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let mut args = vec![self.expression(0)?];
+                if self.take_word("FROM") {
+                    args.push(self.expression(0)?);
+                    if self.take_word("FOR") {
+                        args.push(self.expression(0)?);
+                    }
+                } else {
+                    while self.take_symbol(',') {
+                        args.push(self.expression(0)?);
+                    }
+                }
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: word, args })
+            }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
                 if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
