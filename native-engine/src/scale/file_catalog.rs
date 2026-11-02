@@ -48,6 +48,14 @@ impl ParquetTable {
         let file = open_regular_source(&self.path)?;
         crate::parquet_scan::scan_checked_open_file(file, batch_rows, &self.schema)
     }
+    pub fn open_pruned(
+        &self, batch_rows: usize, predicate: &crate::expr::Expr,
+    ) -> Result<crate::parquet_scan::ParquetScan> {
+        let file = open_regular_source(&self.path)?;
+        crate::parquet_scan::scan_checked_open_file_pruned(
+            file, batch_rows, &self.schema, predicate,
+        )
+    }
 }
 
 /// Source descriptor for an all-or-nothing catalog registration window.
