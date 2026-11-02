@@ -1,17 +1,17 @@
 use super::{float_type, float_result, Function};
 use crate::{scalar::Value, Result};
 
-fn radians(args: &[Value]) -> Result<Value> {
+fn convert_angle(args: &[Value], convert: fn(f64) -> f64) -> Result<Value> {
     match super::number(&args[0])? {
-        Some(n) => super::finite(n.to_radians()),
+        Some(value) => super::finite(convert(value)),
         None => Ok(Value::Null),
     }
 }
+fn radians(args: &[Value]) -> Result<Value> {
+    convert_angle(args, f64::to_radians)
+}
 fn degrees(args: &[Value]) -> Result<Value> {
-    match super::number(&args[0])? {
-        Some(n) => super::finite(n.to_degrees()),
-        None => Ok(Value::Null),
-    }
+    convert_angle(args, f64::to_degrees)
 }
 fn pi(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::PI)) }
 fn e(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::E)) }
