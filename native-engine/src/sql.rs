@@ -243,6 +243,42 @@ impl Parser {
     fn parse_expression(&mut self, min_precedence: u8) -> Result<Expr> {
         let mut left = self.prefix()?;
         loop {
+            // For a date column, INTERVAL arithmetic is evaluated per row.
+            // This supports SQL date windows without losing month semantics.
+            let interval_sign = if min_precedence <= 8
+                && matches!(self.tokens.get(self.index + 1),
+                    Some(Token::Word(word)) if word.eq_ignore_ascii_case("INTERVAL")) {
+                match self.peek() {
+                    Some(Token::Operator(op)) if op == "+" => Some(1_i64),
+                    Some(Token::Operator(op)) if op == "-" => Some(-1_i64),
+                    _ => None,
+                }
+            } else { None };
+            if let Some(sign) = interval_sign {
+                self.next();
+                self.expect_word("INTERVAL")?;
+                let raw = match self.next() {
+                    Some(Token::Text(raw) | Token::Number(raw)) => raw,
+                    _ => return Err(Error::Parse("INTERVAL requires an integer".into())),
+                };
+                let amount = raw.parse::<i64>()
+                    .map_err(|_| Error::Parse("invalid interval amount".into()))?
+                    .checked_mul(sign)
+                    .ok_or_else(|| Error::Parse("interval amount overflow".into()))?;
+                let unit = self.identifier()?;
+                let (name, count) = match unit.to_ascii_uppercase().as_str() {
+                    "DAY" | "DAYS" => ("date_add", amount),
+                    "MONTH" | "MONTHS" => ("add_months", amount),
+                    "YEAR" | "YEARS" => ("add_months", amount.checked_mul(12)
+                        .ok_or_else(|| Error::Parse("year interval overflow".into()))?),
+                    _ => return Err(Error::Unsupported(format!("date interval unit: {unit}"))),
+                };
+                left = Expr::Call {
+                    name: name.into(),
+                    args: vec![left, Expr::Literal(Value::Integer(count))],
+                };
+                continue;
+            }
             if min_precedence <= 3 && self.peek() == Some(&Token::Operator("<=>".into())) {
                 self.next();
                 left = Expr::IsDistinctFrom {
@@ -2455,5 +2491,44 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_per_row_interval_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    fn run(query: &str) -> Vec<Vec<Value>> {
+        let mut catalog = Catalog::new();
+        catalog.register("lineitem", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("l_shipdate", DataType::Text, true),
+            ]).unwrap(),
+            vec![
+                vec![Value::Text("1996-02-29".into())],
+                vec![Value::Null],
+            ],
+        ).unwrap()).unwrap();
+        execute(&parse_sql(query).unwrap(), &catalog).unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn day_month_year_intervals_apply_to_date_columns() {
+        assert_eq!(run("SELECT l_shipdate + INTERVAL '1' YEAR FROM lineitem"), vec![
+            vec![Value::Text("1997-02-28".into())], vec![Value::Null]
+        ]);
+        assert_eq!(run("SELECT l_shipdate + INTERVAL '1' DAY FROM lineitem"), vec![
+            vec![Value::Text("1996-03-01".into())], vec![Value::Null]
+        ]);
+        assert_eq!(run("SELECT l_shipdate - INTERVAL '1' MONTH FROM lineitem"), vec![
+            vec![Value::Text("1996-01-29".into())], vec![Value::Null]
+        ]);
+    }
+
+    #[test]
+    fn malformed_and_unsupported_intervals_are_rejected() {
+        assert!(parse_sql("SELECT '1998-01-01' + INTERVAL '2' HOURS").is_err());
+        assert!(parse_sql("SELECT '1998-01-01' + INTERVAL 'bad' DAY").is_err());
     }
 }
