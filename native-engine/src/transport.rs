@@ -152,9 +152,47 @@ impl AttemptTracker {
                 }
             }
         }
+        // Reserve both lookup indexes before publishing any attempt changes.
+        // HashMap/HashSet insertions below cannot grow after these admissions.
+        self.attempts.try_reserve(new_tasks).map_err(|_| Error::Execution(
+            "exchange attempt index allocation failed".into()
+        ))?;
+        let mut stage_additions: std::collections::HashMap<
+            u64, std::collections::HashSet<u64>
+        > = std::collections::HashMap::new();
+        for &(stage, task) in staged.keys() {
+            if self.attempts.contains_key(&(stage, task)) { continue; }
+            if !stage_additions.contains_key(&stage) {
+                stage_additions.try_reserve(1).map_err(|_| Error::Execution(
+                    "exchange stage staging allocation failed".into()
+                ))?;
+            }
+            let tasks = stage_additions.entry(stage).or_default();
+            tasks.try_reserve(1).map_err(|_| Error::Execution(
+                "exchange stage task staging allocation failed".into()
+            ))?;
+            tasks.insert(task);
+        }
+        let new_stages = stage_additions.keys()
+            .filter(|&&stage| !self.by_stage.contains_key(&stage)).count();
+        self.by_stage.try_reserve(new_stages).map_err(|_| Error::Execution(
+            "exchange stage index allocation failed".into()
+        ))?;
+        for (&stage, tasks) in &stage_additions {
+            if let Some(existing) = self.by_stage.get_mut(&stage) {
+                existing.try_reserve(tasks.len()).map_err(|_| Error::Execution(
+                    "exchange stage task index allocation failed".into()
+                ))?;
+            }
+        }
         for (key, attempt) in staged {
-            if self.attempts.insert(key, attempt).is_none() {
-                self.by_stage.entry(key.0).or_default().insert(key.1);
+            self.attempts.insert(key, attempt);
+        }
+        for (stage, additions) in stage_additions {
+            if let Some(existing) = self.by_stage.get_mut(&stage) {
+                existing.extend(additions);
+            } else {
+                self.by_stage.insert(stage, additions);
             }
         }
         Ok(accepted)
@@ -1146,5 +1184,46 @@ mod fallible_exchange_batch_admission_regressions {
         assert!(gate.accept(&frame(1, 5)).unwrap());
         assert!(!gate.accept(&frame(2, 0)).unwrap());
         assert_eq!(gate.accept_batch(&[]).unwrap(), Vec::<bool>::new());
+    }
+}
+
+#[cfg(test)]
+mod transactional_attempt_index_reservations {
+    use super::*;
+
+    #[test]
+    fn repeated_stage_windows_and_retries_keep_both_indexes_in_sync() {
+        let mut tracker = AttemptTracker::new(256).unwrap();
+        let make = |stage, task, attempt| Frame {
+            stage, task, attempt, payload: Vec::new()
+        };
+        let initial = (0..96u64).map(|task| make(task % 4, task, 1))
+            .collect::<Vec<_>>();
+        assert_eq!(tracker.accept_batch(&initial).unwrap(), vec![true; 96]);
+        assert_eq!(tracker.attempts.len(), 96);
+        let second = (0..96u64).map(|task| make(task % 4, task, 2))
+            .chain((96..192u64).map(|task| make(task % 4, task, 1)))
+            .collect::<Vec<_>>();
+        assert_eq!(tracker.accept_batch(&second).unwrap(), vec![true; 192]);
+        assert_eq!(tracker.attempts.len(), 192);
+        let stale = (0..96u64).map(|task| make(task % 4, task, 1))
+            .collect::<Vec<_>>();
+        assert_eq!(tracker.accept_batch(&stale).unwrap(), vec![false; 96]);
+        for stage in 0..4u64 { assert_eq!(tracker.retire_stage(stage), 48); }
+        assert!(tracker.attempts.is_empty());
+        assert!(tracker.by_stage.is_empty());
+    }
+
+    #[test]
+    fn budget_failure_does_not_publish_earlier_retry_advances() {
+        let mut tracker = AttemptTracker::new(1).unwrap();
+        let make = |task, attempt| Frame {
+            stage: 7, task, attempt, payload: Vec::new()
+        };
+        assert!(tracker.accept(&make(1, 1)).unwrap());
+        assert!(tracker.accept_batch(&[make(1, 4), make(2, 1)]).is_err());
+        assert!(!tracker.accept(&make(1, 0)).unwrap());
+        assert!(tracker.accept(&make(1, 2)).unwrap());
+        assert_eq!(tracker.attempts.get(&(7, 1)), Some(&2));
     }
 }
