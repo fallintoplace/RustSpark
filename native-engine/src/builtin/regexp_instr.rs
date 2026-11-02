@@ -5,6 +5,21 @@ fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Integer)
 }
+fn sql_position(text: &str, byte_index: usize) -> Result<Value> {
+    let offset = super::char_length::character_count(&text[..byte_index]);
+    let position = offset.checked_add(1)
+        .and_then(|n| i64::try_from(n).ok())
+        .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
+    Ok(Value::Integer(position))
+}
+
+fn first_ascii_class_position(text: &str, matches: impl Fn(u8) -> bool) -> Result<Value> {
+    let Some(index) = text.bytes().position(matches) else {
+        return Ok(Value::Integer(0));
+    };
+    sql_position(text, index)
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -36,35 +51,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .map_err(|_| Error::Execution("REGEXP_INSTR position overflow".into()));
     }
     if pattern == "[A-Za-z]" || pattern == "[A-Za-z]+" {
-        // ASCII matches are UTF-8 boundaries; convert byte offsets to SQL
-        // one-based Unicode scalar positions only for the matched prefix.
-        let Some(byte_index) = text.bytes().position(|byte| byte.is_ascii_alphabetic())
-            else { return Ok(Value::Integer(0)); };
-        let position = super::char_length::character_count(&text[..byte_index])
-            .checked_add(1)
-            .and_then(|count| i64::try_from(count).ok())
-            .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
-        return Ok(Value::Integer(position));
+        return first_ascii_class_position(text, |byte| byte.is_ascii_alphabetic());
     }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
-        // An ASCII digit is a UTF-8 scalar boundary, but SQL positions
-        // count Unicode characters rather than bytes.
-        let Some(byte_index) = text.bytes().position(|byte| byte.is_ascii_digit())
-            else { return Ok(Value::Integer(0)); };
-        let position = super::char_length::character_count(&text[..byte_index])
-            .checked_add(1)
-            .and_then(|n| i64::try_from(n).ok())
-            .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
-        return Ok(Value::Integer(position));
+        return first_ascii_class_position(text, |byte| byte.is_ascii_digit());
     }
     let pattern = regex_support::compile(pattern)?;
     let Some(matched) = pattern.find(text) else { return Ok(Value::Integer(0)) };
-    let prefix = &text[..matched.start()];
-    let offset = super::char_length::character_count(prefix);
-    let position = offset.checked_add(1)
-        .and_then(|n| i64::try_from(n).ok())
-        .ok_or_else(|| Error::Execution("REGEXP_INSTR position overflow".into()))?;
-    Ok(Value::Integer(position))
+    sql_position(text, matched.start())
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "regexp_instr", min_args: 2, max_args: 2, result_type: output, call: evaluate,
@@ -267,5 +261,24 @@ mod ascii_alpha_instr_regressions {
             }
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text("[A-Za-z]".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod sql_character_position_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn byte_fast_paths_and_regex_fallback_share_unicode_positions() {
+        for text in ["", "abc123", "é🙂ab99", "٩a٣2", "\n東京7", "one\ntwo"] {
+            for pattern in ["[A-Za-z]", "[A-Za-z]+", "[0-9]", "[0-9]+", "a.", "東京"] {
+                let expected = regex_support::compile(pattern).unwrap().find(text)
+                    .map_or(0, |hit| text[..hit.start()].chars().count() as i64 + 1);
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), Value::Integer(expected),
+                    "text={text:?} pattern={pattern:?}");
+            }
+        }
     }
 }
