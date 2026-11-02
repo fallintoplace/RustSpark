@@ -125,7 +125,7 @@ fn valid_iso_date(text: &str) -> bool {
 
 /// Add an interval to an ISO date at parse time for literal TPC-H bounds.
 fn add_iso_date_interval(date: &str, amount: i64, unit: &str) -> Result<String> {
-    if !valid_iso_date(date) || amount.abs() > 1_000_000 {
+    if !valid_iso_date(date) || !(-1_000_000..=1_000_000).contains(&amount) {
         return Err(Error::Parse("DATE interval is out of supported range".into()));
     }
     let year = date[..4].parse::<i64>().expect("validated year");
