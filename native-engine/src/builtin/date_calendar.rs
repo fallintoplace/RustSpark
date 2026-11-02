@@ -99,6 +99,16 @@ fn last_day(args: &[Value]) -> Result<Value> {
     })))
 }
 
+fn dayname(args: &[Value]) -> Result<Value> {
+    let Some(date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    const NAMES: &[&str; 7] = &[
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+    ];
+    let index = (days_since_epoch(date) + 3).rem_euclid(7) as usize;
+    Ok(Value::Text(NAMES[index].into()))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
@@ -110,6 +120,8 @@ pub(super) const FUNCTIONS: &[Function] = &[
         result_type: date_integer_type, call: weekday },
     Function { name: "last_day", min_args: 1, max_args: 1,
         result_type: date_text_type, call: last_day },
+    Function { name: "dayname", min_args: 1, max_args: 1,
+        result_type: date_text_type, call: dayname },
 ];
 
 #[cfg(test)]
@@ -201,5 +213,18 @@ mod last_day_tests {
         assert_eq!(last_day(&[Value::Text("9999-12-01".into())]).unwrap(), Value::Text("9999-12-31".into()));
         assert_eq!(last_day(&[Value::Null]).unwrap(), Value::Null);
         assert!(last_day(&[Value::Text("2024-04-31".into())]).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod dayname_tests {
+    use super::*;
+    #[test]
+    fn identifies_weekdays_across_years() {
+        assert_eq!(dayname(&[Value::Text("1970-01-01".into())]).unwrap(), Value::Text("Thursday".into()));
+        assert_eq!(dayname(&[Value::Text("2024-02-29".into())]).unwrap(), Value::Text("Thursday".into()));
+        assert_eq!(dayname(&[Value::Text("2023-01-01".into())]).unwrap(), Value::Text("Sunday".into()));
+        assert_eq!(dayname(&[Value::Null]).unwrap(), Value::Null);
     }
 }
