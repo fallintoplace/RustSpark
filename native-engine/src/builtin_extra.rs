@@ -84,6 +84,16 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(first)
         },
+        "LAST_DAY" => {
+            if args.len() != 1 {
+                return Err(Error::Parse("LAST_DAY expects one date".into()));
+            }
+            if !matches!(&args[0], Expr::Literal(Value::Null))
+                && args[0].output_type(schema)? != DataType::Text {
+                return Err(Error::Type("LAST_DAY expects ISO date text".into()));
+            }
+            Ok(DataType::Text)
+        },
         "DATE_ADD" | "DATE_SUB" => {
             if args.len() != 2 {
                 return Err(Error::Parse(format!("{name} requires date and day offset")));
@@ -346,6 +356,26 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "LAST_DAY" => match args {
+            [Value::Null] => Ok(Value::Null),
+            [Value::Text(date)] => {
+                tpch_iso_days(date)?;
+                let year: i64 = date[..4].parse()
+                    .map_err(|_| Error::Type("invalid LAST_DAY year".into()))?;
+                let month: i64 = date[5..7].parse()
+                    .map_err(|_| Error::Type("invalid LAST_DAY month".into()))?;
+                let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+                let last = match month {
+                    1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                    4 | 6 | 9 | 11 => 30,
+                    2 if leap => 29,
+                    2 => 28,
+                    _ => unreachable!("ISO date was validated"),
+                };
+                Ok(Value::Text(format!("{}-{month:02}-{last:02}", &date[..4])))
+            },
+            _ => Err(Error::Type("LAST_DAY expects ISO date text".into())),
         },
         "DATE_ADD" | "DATE_SUB" => match args {
             [Value::Text(text), Value::Integer(amount)] => {
