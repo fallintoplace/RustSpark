@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
+    Array, ArrayRef, BooleanArray, Decimal128Array, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
     builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
@@ -150,7 +150,7 @@ pub fn schema_from_arrow(input: &ArrowSchema) -> Result<Schema> {
             ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
             ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 |
             ArrowType::UInt64 => DataType::Integer,
-            ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
+            ArrowType::Float32 | ArrowType::Float64 | ArrowType::Decimal128(_, _) => DataType::Float,
             ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
             ArrowType::Dictionary(key, value)
                 if matches!(key.as_ref(),
@@ -243,6 +243,30 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                         i64::try_from(values.value(row)).map(Value::Integer)
                             .map_err(|_| Error::Type("UInt64 exceeds native integer range".into()))
                     }
+                }).collect::<Result<Vec<_>>>()?)
+            }
+            ArrowType::Decimal128(_, scale) => {
+                let values = array.as_any().downcast_ref::<Decimal128Array>()
+                    .ok_or_else(|| Error::Type("invalid Decimal128 Arrow array".into()))?;
+                let divisor = 10.0_f64.powi(i32::from(*scale));
+                if !divisor.is_finite() || divisor == 0.0 {
+                    return Err(Error::Type("Decimal128 scale is outside finite FLOAT range".into()));
+                }
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { return Ok(Value::Null); }
+                    let coefficient = values.value(row);
+                    // A native Float can preserve the integer coefficient
+                    // only below the IEEE-754 exact-integer boundary.
+                    if coefficient.unsigned_abs() > (1_u128 << 53) {
+                        return Err(Error::Type(
+                            "Decimal128 coefficient exceeds exact native FLOAT range".into()
+                        ));
+                    }
+                    let result = coefficient as f64 / divisor;
+                    if !result.is_finite() {
+                        return Err(Error::Type("Decimal128 cannot be represented as FLOAT".into()));
+                    }
+                    Ok(Value::Float(result))
                 }).collect::<Result<Vec<_>>>()?)
             }
             ArrowType::Float32 => {
