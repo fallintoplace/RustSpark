@@ -141,15 +141,16 @@ impl Schema {
     }
 
     pub fn project_columns(&self, names: &[&str]) -> Result<Self> {
-        // An identity projection only changes the caller's view, not the
-        // metadata. Reuse both Arc allocations and their column index.
+        // Keep the borrowed metadata fast path for identity projections.
         if names.len() == self.len() && names.iter().enumerate()
             .all(|(index, name)| self.column(name).ok() == Some(index)) {
             return Ok(self.clone());
         }
-        Self::new(names.iter().map(|name| {
-            Ok(self.field(self.column(name)?)?.clone())
-        }).collect::<Result<Vec<_>>>()?)
+        // Resolve SQL names once, then use the same validation and field
+        // projection logic as physical plans using pre-resolved indices.
+        let indices = names.iter().map(|name| self.column(name))
+            .collect::<Result<Vec<_>>>()?;
+        self.project_indices(&indices)
     }
 }
 
