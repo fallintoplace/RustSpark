@@ -14,11 +14,20 @@ fn output(types: &[DataType]) -> Result<DataType> {
 // a caller can check whether the result exceeds the native byte budget.
 const MAX_REGEX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
+fn new_output(input: &str) -> Result<String> {
+    let mut output = String::new();
+    output.try_reserve_exact(input.len())
+        .map_err(|_| Error::Execution("regex output allocation failed".into()))?;
+    Ok(output)
+}
+
 fn push_bounded(output: &mut String, text: &str) -> Result<()> {
     if output.len().checked_add(text.len())
         .is_none_or(|total| total > MAX_REGEX_OUTPUT_BYTES) {
         return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
     }
+    output.try_reserve(text.len())
+        .map_err(|_| Error::Execution("regex output allocation failed".into()))?;
     output.push_str(text);
     Ok(())
 }
@@ -97,7 +106,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     // Dollar substitutions still use the regex capture-expansion path.
     if (pattern == "[0-9]" || pattern == "[0-9]+") && !replacement.contains('$') {
         let bytes = suffix.as_bytes();
-        let mut result = String::with_capacity(text.len());
+        let mut result = new_output(text)?;
         push_bounded(&mut result, &text[..start])?;
         let mut cursor = 0usize;
         let mut index = 0usize;
@@ -132,9 +141,11 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let Some(first_match) = matches.next() else {
             // No substitution is required. Reuse a single clone and avoid
             // constructing the incremental replacement buffer.
-            return Ok(Value::Text(text.to_owned()));
+            let mut unchanged = new_output(text)?;
+            unchanged.push_str(text);
+            return Ok(Value::Text(unchanged));
         };
-        let mut result = String::with_capacity(text.len());
+        let mut result = new_output(text)?;
         result.push_str(&text[..start]);
         let mut consumed = 0usize;
         for (index, _) in std::iter::once(first_match).chain(matches) {
@@ -143,6 +154,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
                 .and_then(|len| len.checked_add(replacement.len()))
                 .filter(|&len| len <= 16 * 1024 * 1024)
                 .ok_or_else(|| Error::Execution("regex output exceeds native 16 MiB budget".into()))?;
+            result.try_reserve(next_len - result.len())
+                .map_err(|_| Error::Execution("regex output allocation failed".into()))?;
             result.push_str(unchanged);
             result.push_str(replacement);
             debug_assert_eq!(result.len(), next_len);
@@ -153,12 +166,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .is_none_or(|len| len > 16 * 1024 * 1024) {
             return Err(Error::Execution("regex output exceeds native 16 MiB budget".into()));
         }
-        result.push_str(remaining);
+        push_bounded(&mut result, remaining)?;
         return Ok(Value::Text(result));
     }
 
     let compiled = regex_support::compile(pattern)?;
-    let mut result = String::with_capacity(text.len());
+    let mut result = new_output(text)?;
     result.push_str(&text[..start]);
     let mut consumed = 0;
     for captures in compiled.captures_iter(suffix) {
@@ -616,5 +629,31 @@ mod digit_class_replace_regressions {
         assert_eq!(evaluate(&[
             Value::Text("99".into()), Value::Text("[0-9]+".into()), Value::Text("$0".into())
         ]).unwrap(), Value::Text("99".into()));
+    }
+}
+
+#[cfg(test)]
+mod fallible_regexp_replace_output_tests {
+    use super::*;
+
+    #[test]
+    fn literal_and_regex_paths_keep_identical_unicode_results() {
+        let input = format!("{}🙂123{}", "é".repeat(32_768), "z".repeat(32_768));
+        let args = [Value::Text(input.clone()), Value::Text("123".into()),
+            Value::Text("ABC".into())];
+        let expected = input.replace("123", "ABC");
+        assert_eq!(evaluate(&args).unwrap(), Value::Text(expected));
+        let captures = [Value::Text("a12 b34".into()), Value::Text(r"([a-z])([0-9]+)".into()),
+            Value::Text("$2-$1".into())];
+        assert_eq!(evaluate(&captures).unwrap(), Value::Text("12-a 34-b".into()));
+    }
+
+    #[test]
+    fn checks_growth_before_publishing_large_replacements() {
+        let input = Value::Text("x".repeat(32));
+        let replacement = Value::Text("z".repeat(1024 * 1024));
+        assert!(evaluate(&[input, Value::Text("x".into()), replacement]).is_err());
+        assert_eq!(evaluate(&[Value::Text("🙂abc".into()), Value::Text("none".into()),
+            Value::Text("!".into())]).unwrap(), Value::Text("🙂abc".into()));
     }
 }
