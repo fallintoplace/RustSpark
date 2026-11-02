@@ -29,6 +29,9 @@ impl StageGraph {
             return Err(Error::Execution("execution graph exceeds 4096 stages".into()));
         }
         let mut index = HashMap::new();
+        index.try_reserve(stages.len()).map_err(|_| Error::Execution(
+            "stage graph ID index allocation failed".into()
+        ))?;
         let mut total_partitions = 0usize;
         // A bounded stage count alone does not bound a dense DAG. Reject
         // excessive fan-in before allocating successor adjacency lists.
@@ -49,8 +52,16 @@ impl StageGraph {
                 return Err(Error::Execution("duplicate stage ID".into()));
             }
         }
-        let mut indegree = vec![0usize; stages.len()];
-        let mut successors = vec![Vec::new(); stages.len()];
+        let mut indegree = Vec::new();
+        indegree.try_reserve_exact(stages.len()).map_err(|_| Error::Execution(
+            "stage graph degree allocation failed".into()
+        ))?;
+        indegree.resize(stages.len(), 0usize);
+        let mut successors = Vec::new();
+        successors.try_reserve_exact(stages.len()).map_err(|_| Error::Execution(
+            "stage graph successor index allocation failed".into()
+        ))?;
+        successors.resize_with(stages.len(), Vec::new);
         for (position, stage) in stages.iter().enumerate() {
             // Most distributed plans have unary stages or binary joins.
             // Avoid a HashSet allocation for those common fan-ins.
@@ -58,7 +69,13 @@ impl StageGraph {
                 stage.dependencies[0] == stage.dependencies[1] {
                 return Err(Error::Execution("duplicate stage dependency".into()));
             }
-            let mut seen = (stage.dependencies.len() > 2).then(HashSet::new);
+            let mut seen = if stage.dependencies.len() > 2 {
+                let mut seen = HashSet::new();
+                seen.try_reserve(stage.dependencies.len()).map_err(|_| Error::Execution(
+                    "stage graph dependency index allocation failed".into()
+                ))?;
+                Some(seen)
+            } else { None };
             for dep in &stage.dependencies {
                 if seen.as_mut().is_some_and(|keys| !keys.insert(*dep)) {
                     return Err(Error::Execution("duplicate stage dependency".into()));
@@ -66,18 +83,34 @@ impl StageGraph {
                 let source = *index.get(dep)
                     .ok_or_else(|| Error::Execution("stage refers to unknown dependency".into()))?;
                 indegree[position] += 1;
+                successors[source].try_reserve(1).map_err(|_| Error::Execution(
+                    "stage graph successor allocation failed".into()
+                ))?;
                 successors[source].push(position);
             }
         }
         let mut ready = VecDeque::new();
+        ready.try_reserve(stages.len()).map_err(|_| Error::Execution(
+            "stage graph ready queue allocation failed".into()
+        ))?;
         for (index, degree) in indegree.iter().enumerate() {
             if *degree == 0 {
                 ready.push_back(index);
             }
         }
-        let mut order = Vec::with_capacity(stages.len());
-        let mut order_indices = Vec::with_capacity(stages.len());
-        let mut depth = vec![1usize; stages.len()];
+        let mut order = Vec::new();
+        order.try_reserve_exact(stages.len()).map_err(|_| Error::Execution(
+            "stage graph order allocation failed".into()
+        ))?;
+        let mut order_indices = Vec::new();
+        order_indices.try_reserve_exact(stages.len()).map_err(|_| Error::Execution(
+            "stage graph order index allocation failed".into()
+        ))?;
+        let mut depth = Vec::new();
+        depth.try_reserve_exact(stages.len()).map_err(|_| Error::Execution(
+            "stage graph depth allocation failed".into()
+        ))?;
+        depth.resize(stages.len(), 1usize);
         while let Some(position) = ready.pop_front() {
             order.push(stages[position].id);
             order_indices.push(position);
@@ -95,7 +128,11 @@ impl StageGraph {
         let longest_chain = depth.into_iter().max().unwrap_or(0);
         // Compute downstream chain lengths once while successor links are available.
         // Scheduling repeatedly reads these priorities without rebuilding the graph.
-        let mut depth_to_leaf = vec![1usize; stages.len()];
+        let mut depth_to_leaf = Vec::new();
+        depth_to_leaf.try_reserve_exact(stages.len()).map_err(|_| Error::Execution(
+            "stage graph critical-path allocation failed".into()
+        ))?;
+        depth_to_leaf.resize(stages.len(), 1usize);
         for &position in order_indices.iter().rev() {
             for &child in &successors[position] {
                 depth_to_leaf[position] = depth_to_leaf[position]
@@ -104,7 +141,11 @@ impl StageGraph {
         }
         // Critical-path priority is fixed for the lifetime of a stage graph.
         // Sort once instead of allocating and sorting runnable IDs per poll.
-        let mut critical_order_indices = order_indices.clone();
+        let mut critical_order_indices = Vec::new();
+        critical_order_indices.try_reserve_exact(order_indices.len()).map_err(|_| Error::Execution(
+            "stage graph critical-order allocation failed".into()
+        ))?;
+        critical_order_indices.extend_from_slice(&order_indices);
         critical_order_indices.sort_unstable_by_key(|&position| {
             (std::cmp::Reverse(depth_to_leaf[position]), stages[position].id)
         });
@@ -892,5 +933,37 @@ mod ready_task_ranges_unready_exclusion_tests {
             vec![(10, 0..2)]);
         assert_eq!(graph.ready_task_ranges_excluding(&HashSet::from([10]), &running, 8, false),
             vec![(20, 1..2)]);
+    }
+}
+
+#[cfg(test)]
+mod fallible_stage_graph_admission_tests {
+    use super::*;
+
+    #[test]
+    fn dense_fan_in_keeps_complete_topological_and_critical_order() {
+        let mut stages = (0..200u64).map(|id| Stage {
+            id, dependencies: Vec::new(), partitions: 1
+        }).collect::<Vec<_>>();
+        stages.push(Stage {
+            id: 200, dependencies: (0..200u64).collect(), partitions: 2
+        });
+        let graph = StageGraph::new(stages).unwrap();
+        assert_eq!(graph.topological_order().len(), 201);
+        assert_eq!(graph.topological_order().last(), Some(&200));
+        let done = (0..200u64).collect::<HashSet<_>>();
+        assert_eq!(graph.ready(&done), vec![200]);
+        assert_eq!(graph.ready_tasks(&done, 5), vec![(200, 0), (200, 1)]);
+    }
+
+    #[test]
+    fn invalid_dependency_and_cycle_are_rejected_before_admission() {
+        assert!(StageGraph::new(vec![Stage {
+            id: 1, dependencies: vec![99], partitions: 1
+        }]).is_err());
+        assert!(StageGraph::new(vec![
+            Stage { id: 1, dependencies: vec![2], partitions: 1 },
+            Stage { id: 2, dependencies: vec![1], partitions: 1 },
+        ]).is_err());
     }
 }

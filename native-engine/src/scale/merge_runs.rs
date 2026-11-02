@@ -88,7 +88,10 @@ fn bind_sort_keys(schema: &Schema, keys: &[SortKey]) -> Result<Vec<Key>> {
     if keys.is_empty() {
         return Err(Error::Execution("external merge needs at least one sort key".into()));
     }
-    let mut selected = Vec::with_capacity(keys.len());
+    let mut selected = Vec::new();
+    selected.try_reserve_exact(keys.len()).map_err(|_| Error::Execution(
+        "external merge sort key allocation failed".into()
+    ))?;
     for key in keys {
         let Expr::Column(name) = &key.expression else {
             return Err(Error::Unsupported("external merge requires column sort keys".into()));
@@ -130,6 +133,9 @@ impl RunMerger {
         control.check()?;
         let selected = bind_sort_keys(&schema, keys)?;
         let mut runs = Vec::new();
+        runs.try_reserve_exact(paths.len()).map_err(|_| Error::Execution(
+            "external merge run index allocation failed".into()
+        ))?;
         for path in paths {
             control.check()?;
             let reader = SpillReader::new(
@@ -205,8 +211,16 @@ impl RunMerger {
         self.control.check()?;
         if !self.heap_ready {
             for run in &mut self.runs { run.fill(&self.control)?; }
-            self.heap = (0..self.runs.len())
-                .filter(|&index| self.runs[index].peek(self.keys[0].column).is_some()).collect();
+            let mut heap = Vec::new();
+            heap.try_reserve_exact(self.runs.len()).map_err(|_| Error::Execution(
+                "external merge heap allocation failed".into()
+            ))?;
+            for index in 0..self.runs.len() {
+                if self.runs[index].peek(self.keys[0].column).is_some() {
+                    heap.push(index);
+                }
+            }
+            self.heap = heap;
             for parent in (0..self.heap.len() / 2).rev() {
                 self.sift_down(parent);
             }
@@ -779,5 +793,56 @@ mod fallible_external_merge_output_admission {
         control.cancel();
         assert!(merger.next().unwrap().unwrap_err().to_string().contains("cancelled"));
         assert!(merger.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod fallible_merge_heap_admission_regressions {
+    use super::*;
+    use crate::{schema::{DataType, Field}, scale::spill::SpillWriter};
+    use std::{fs, io::BufWriter, sync::atomic::{AtomicU64, Ordering as AtomicOrdering}};
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn many_nullable_runs_preserve_stable_order_during_refills() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-merge-fallible-{}-{}", std::process::id(),
+            TEST_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Integer, true),
+            Field::new("run", DataType::Integer, false)
+        ]).unwrap();
+        let mut paths = Vec::new();
+        for run in 0..7i64 {
+            let path = dir.join(format!("{run}.rspill"));
+            let values = (0..128i64).map(|n| vec![
+                if n == 0 { Value::Null } else { Value::Integer(n) },
+                Value::Integer(run),
+            ]).collect::<Vec<_>>();
+            let batch = Batch::from_rows(schema.clone(), values).unwrap();
+            let mut writer = SpillWriter::new(
+                BufWriter::new(File::create(&path).unwrap()), schema.clone()
+            ).unwrap();
+            writer.write_batch(&batch).unwrap();
+            writer.finish().unwrap();
+            paths.push(path);
+        }
+        let keys = [SortKey::ascending(Expr::Column("key".into()))];
+        let batches = RunMerger::new(&paths, schema, &keys, 11, 53,
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = batches.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 7 * 128);
+        for (index, row) in rows.iter().enumerate() {
+            let key_index = index / 7;
+            assert_eq!(row[0], if key_index == 0 { Value::Null }
+                else { Value::Integer(key_index as i64) });
+            assert_eq!(row[1], Value::Integer((index % 7) as i64));
+        }
+        for path in &paths { fs::remove_file(path).unwrap(); }
+        fs::remove_dir(dir).unwrap();
     }
 }

@@ -86,14 +86,22 @@ impl<R: BufRead> Records<R> {
     // while retaining quoted empty fields and explicit comma-only rows.
     fn record(&mut self) -> Result<Option<Vec<String>>> {
         loop {
-            match self.record_once()? {
+            match self.record_once(false)? {
                 Some(row) if row.is_empty() => continue,
                 other => return Ok(other),
             }
         }
     }
 
-    fn record_once(&mut self) -> Result<Option<Vec<String>>> {
+    // Only the first bytes of the file may contain a UTF-8 BOM.
+    fn header(&mut self) -> Result<Option<Vec<String>>> {
+        match self.record_once(true)? {
+            Some(row) if row.is_empty() => self.record(),
+            other => Ok(other),
+        }
+    }
+
+    fn record_once(&mut self, mut strip_initial_bom: bool) -> Result<Option<Vec<String>>> {
         if self.skip_lf {
             if let Some(byte) = self.byte()? {
                 if byte != b'\n' {
@@ -162,6 +170,26 @@ impl<R: BufRead> Records<R> {
                     return Ok(Some(fields));
                 }
             };
+            if strip_initial_bom && !seen && byte == 0xef {
+                // Consume the UTF-8 prefix through the same buffered reader so
+                // the BOM is recognized even across one-byte input reads.
+                let second = self.byte()?.ok_or_else(||
+                    Error::Parse("truncated UTF-8 CSV header".into()))?;
+                let third = self.byte()?.ok_or_else(||
+                    Error::Parse("truncated UTF-8 CSV header".into()))?;
+                strip_initial_bom = false;
+                if (second, third) == (0xbb, 0xbf) { continue; }
+                // An ordinary U+F000..U+FFFF character is not a BOM.
+                if self.max_record_bytes < 3 {
+                    return Err(Error::Execution("CSV record exceeds configured byte limit".into()));
+                }
+                field.extend_from_slice(&[byte, second, third]);
+                state = State::Unquoted;
+                seen = true;
+                size = 3;
+                continue;
+            }
+            strip_initial_bom = false;
             seen = true;
             size += 1;
             if size > self.max_record_bytes {
@@ -238,7 +266,7 @@ impl<R: BufRead> CsvStream<R> {
             input, max_record_bytes, pending: None, skip_lf: false,
             buffer: [0; READ_CHUNK_BYTES], cursor: 0, filled: 0,
         };
-        let mut names = records.record()?.ok_or_else(|| Error::Parse("CSV header missing".into()))?;
+        let mut names = records.header()?.ok_or_else(|| Error::Parse("CSV header missing".into()))?;
         if let Some(first) = names.first_mut() {
             if let Some(clean) = first.strip_prefix('\u{feff}') {
                 *first = clean.to_owned();
@@ -391,6 +419,34 @@ impl<R: BufRead> Iterator for CsvStream<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_with_byte_budget(MAX_BATCH_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod bom_before_quoted_header_regressions {
+    use super::*;
+    use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn quoted_header_after_bom_matches_eager_reader_across_short_reads() {
+        let input = "\u{feff}\"id\",\"note\"\r\n1,\"hello\"\r\n2,\"world\"\r\n";
+        let eager = crate::csv::from_csv_str(input).unwrap();
+        let reader = BufReader::with_capacity(1, Cursor::new(input.as_bytes()));
+        let streamed = CsvStream::new_typed(reader, 1, 64, eager.schema().clone())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = streamed.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, eager.rows().unwrap());
+        assert_eq!(streamed.len(), 2);
+    }
+
+    #[test]
+    fn other_utf8_prefixes_and_later_bom_are_not_stripped() {
+        let input = "\u{f000},note\nx,\u{feff}kept\n";
+        let eager = crate::csv::from_csv_str(input).unwrap();
+        let streamed = CsvStream::new_typed(Cursor::new(input), 3, 64,
+            eager.schema().clone()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(streamed[0].rows().unwrap(), eager.rows().unwrap());
+        assert_eq!(streamed[0].value(0, 1).unwrap(), &Value::Text("\u{feff}kept".into()));
     }
 }
 
@@ -904,3 +960,4 @@ mod budgeted_csv_initial_capacity_regressions {
         assert_eq!(rows, eager.rows().unwrap());
     }
 }
+

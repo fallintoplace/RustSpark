@@ -184,6 +184,14 @@ fn check_distance_budget(a_len: usize, b_len: usize, threshold: Option<usize>) -
     Ok(())
 }
 
+fn new_distance_row(length: usize, initial: usize) -> Result<Vec<usize>> {
+    let mut row = Vec::new();
+    row.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("LEVENSHTEIN DP row allocation failed".into()))?;
+    row.resize(length, initial);
+    Ok(row)
+}
+
 fn distance_units<T: Eq + Copy>(
     a: &[T], b: &[T], threshold: Option<usize>,
 ) -> Result<Value> {
@@ -204,8 +212,8 @@ fn distance_units<T: Eq + Copy>(
         let outside = limit.saturating_add(1);
         let width = limit.saturating_mul(2).saturating_add(1)
             .min(shorter.len().saturating_add(1));
-        let mut previous = vec![outside; width];
-        let mut current = vec![outside; width];
+        let mut previous = new_distance_row(width, outside)?;
+        let mut current = new_distance_row(width, outside)?;
         let mut previous_start = 0usize;
         let mut previous_end = shorter.len().min(limit);
         for column in 0..=previous_end {
@@ -247,8 +255,13 @@ fn distance_units<T: Eq + Copy>(
     }
     let limit = threshold.unwrap_or(usize::MAX);
     let outside = limit.saturating_add(1);
-    let mut previous = (0..=shorter.len()).map(|n| n.min(outside)).collect::<Vec<_>>();
-    let mut current = vec![outside; shorter.len() + 1];
+    let width = shorter.len().checked_add(1)
+        .ok_or_else(|| Error::Execution("LEVENSHTEIN DP width overflow".into()))?;
+    let mut previous = new_distance_row(width, outside)?;
+    for (index, value) in previous.iter_mut().enumerate() {
+        *value = index.min(outside);
+    }
+    let mut current = new_distance_row(width, outside)?;
     for (i, from) in longer.iter().enumerate() {
         let row = i + 1;
         let start = if threshold.is_some() { row.saturating_sub(limit).max(1) } else { 1 };
@@ -792,5 +805,43 @@ mod spark_jaro_winkler_tests {
         let plan = sql::parse_sql("SELECT JARO_WINKLER_SIMILARITY('ABC', 'ABC')").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Float(1.0)]]);
+    }
+}
+
+#[cfg(test)]
+mod fallible_levenshtein_dp_rows_regressions {
+    use super::*;
+
+    #[test]
+    fn full_and_banded_rows_agree_at_threshold_boundaries() {
+        let a = b"kitten";
+        let b = b"sitting";
+        assert_eq!(distance_units(a, b, None).unwrap(), Value::Integer(3));
+        assert_eq!(distance_units(a, b, Some(2)).unwrap(), Value::Integer(-1));
+        assert_eq!(distance_units(a, b, Some(3)).unwrap(), Value::Integer(3));
+        assert_eq!(distance_units(a, b, Some(4)).unwrap(), Value::Integer(3));
+        assert_eq!(distance_units(b"same", b"same", Some(0)).unwrap(),
+            Value::Integer(0));
+    }
+
+    #[test]
+    fn unicode_suffixes_keep_character_edit_distance_and_null_semantics() {
+        let source = Value::Text("é🙂hello東京".into());
+        let edited = Value::Text("é界hallo東京".into());
+        assert_eq!(evaluate(&[source.clone(), edited.clone()]).unwrap(),
+            Value::Integer(2));
+        assert_eq!(evaluate(&[source.clone(), edited.clone(), Value::Integer(3)])
+            .unwrap(), Value::Integer(2));
+        assert_eq!(evaluate(&[source, edited, Value::Integer(1)]).unwrap(),
+            Value::Integer(-1));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("x".into())]).unwrap(),
+            Value::Null);
+    }
+
+    #[test]
+    fn excessive_quadratic_work_still_returns_a_query_error() {
+        let a = vec![b'a'; 2000];
+        let b = vec![b'b'; 2000];
+        assert!(distance_units(&a, &b, None).is_err());
     }
 }
