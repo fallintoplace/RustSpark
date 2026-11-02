@@ -683,6 +683,43 @@ impl Parser {
                     Ok(Expr::Call { name: "locate".into(), args })
                 }
             }
+            // Spark's ANSI TRIM forms put the trim set before FROM, while
+            // the native scalar functions take (text, optional trim set).
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("TRIM")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let direction = if self.take_word("BOTH") {
+                    Some("trim")
+                } else if self.take_word("LEADING") {
+                    Some("ltrim")
+                } else if self.take_word("TRAILING") {
+                    Some("rtrim")
+                } else {
+                    None
+                };
+                let first = if self.peek_word("FROM") {
+                    None
+                } else {
+                    Some(self.expression(0)?)
+                };
+                let (name, args) = if self.take_word("FROM") {
+                    let value = self.expression(0)?;
+                    let mut args = vec![value];
+                    if let Some(chars) = first { args.push(chars); }
+                    (direction.unwrap_or("trim"), args)
+                } else {
+                    if direction.is_some() {
+                        return Err(Error::Parse("TRIM direction requires FROM".into()));
+                    }
+                    let mut args = vec![first.ok_or_else(||
+                        Error::Parse("TRIM expects an expression".into()))?];
+                    if self.take_symbol(',') { args.push(self.expression(0)?); }
+                    ("trim", args)
+                };
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: name.into(), args })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("SUBSTRING")
                 && self.peek() == Some(&Token::Symbol('(')) =>
             {
