@@ -9,7 +9,11 @@ fn bounded_substring_index_result(text: &str) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("SUBSTRING_INDEX result exceeds native 16 MiB budget".into()));
     }
-    Ok(Value::Text(text.to_owned()))
+    let mut result = String::new();
+    result.try_reserve_exact(text.len())
+        .map_err(|_| Error::Execution("SUBSTRING_INDEX output allocation failed".into()))?;
+    result.push_str(text);
+    Ok(Value::Text(result))
 }
 
 fn evaluate(args: &[Value]) -> Result<Value> {
@@ -352,5 +356,25 @@ mod medium_tail_substring_index_ring_tests {
                     "delimiter={delimiter:?} from_end={from_end}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fallible_substring_index_output_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_results_preserve_forward_and_backward_slices() {
+        let check = |text: &str, delimiter: &str, count: i64| {
+            evaluate(&[Value::Text(text.into()), Value::Text(delimiter.into()),
+                Value::Integer(count)]).unwrap()
+        };
+        assert_eq!(check("é.a.🙂", ".", 2), Value::Text("é.a".into()));
+        assert_eq!(check("é.a.🙂", ".", -2), Value::Text("a.🙂".into()));
+        assert_eq!(check("aaa", "aa", -1), Value::Text("a".into()));
+        let long = "é🙂".repeat(20_000);
+        assert_eq!(check(&long, "|", 1), Value::Text(long));
+        assert!(matches!(bounded_substring_index_result(&"x".repeat(16 * 1024 * 1024 + 1)),
+            Err(Error::Execution(_))));
     }
 }
