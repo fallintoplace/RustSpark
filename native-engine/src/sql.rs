@@ -605,8 +605,8 @@ impl Parser {
                 let expression = self.expression(0)?;
                 self.expect_word("AS")?;
                 let target = match self.identifier()?.to_ascii_uppercase().as_str() {
-                    "BIGINT" | "INT" | "INTEGER" => DataType::Integer,
-                    "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
+                    "BIGINT" | "INT" | "INTEGER" | "INT64" => DataType::Integer,
+                    "DOUBLE" | "FLOAT" | "REAL" | "FLOAT64" => DataType::Float,
                     "BOOLEAN" | "BOOL" => DataType::Boolean,
                     "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
                     other => return Err(Error::Unsupported(format!("native CAST type: {other}"))),
