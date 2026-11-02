@@ -6,7 +6,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
     else { Err(Error::Type("QUOTE has incompatible SQL argument types".into())) }
 }
 
-fn quoted_length(text: &str) -> Result<usize> {
+fn quoted_length(text: &str) -> Result<(usize, bool)> {
     const MAX_OUTPUT: usize = 16 * 1024 * 1024;
     let base_length = text.len().checked_add(2)
         .ok_or_else(|| Error::Execution("QUOTE output length overflow".into()))?;
@@ -16,31 +16,29 @@ fn quoted_length(text: &str) -> Result<usize> {
 
     // Plain strings need only the surrounding quotes. Bypass escape
     // counting and the repeated substring search for the common case.
-    if !text.contains(['\'', '\\']) {
-        let mut output = String::new();
-        output.try_reserve_exact(base_length)
-            .map_err(|_| Error::Execution("QUOTE output allocation failed".into()))?;
-        output.push('\'');
-        output.push_str(text);
-        output.push('\'');
-        return Ok(Value::Text(output));
-    }
+    if !text.contains(['\'', '\\']) { return Ok((base_length, true)); }
 
     // Count escapes before allocation. Besides making output size exact,
     // this prevents late errors after a near-limit String has been built.
     let escapes = text.bytes().filter(|&byte| byte == b'\'' || byte == b'\\').count();
     base_length.checked_add(escapes)
         .filter(|&bytes| bytes <= MAX_OUTPUT)
+        .map(|bytes| (bytes, false))
         .ok_or_else(|| Error::Execution("QUOTE output exceeds native 16 MiB budget".into()))
 }
 
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let final_length = quoted_length(text)?;
+    let (final_length, plain) = quoted_length(text)?;
     let mut output = String::new();
     output.try_reserve_exact(final_length)
         .map_err(|_| Error::Execution("QUOTE output allocation failed".into()))?;
     output.push('\'');
+    if plain {
+        output.push_str(text);
+        output.push('\'');
+        return Ok(Value::Text(output));
+    }
     let mut remaining = text;
     while let Some(index) = remaining.find(['\'', '\\']) {
         output.push_str(&remaining[..index]);
@@ -294,6 +292,14 @@ mod quote_unescaped_fast_path_tests {
         assert_eq!(evaluate(&[Value::Text("a\\b".into())]).unwrap(),
             Value::Text("'a\\\\b'".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn length_preflight_distinguishes_plain_and_escaped_inputs() {
+        assert_eq!(quoted_length("").unwrap(), (2, true));
+        assert_eq!(quoted_length("é🙂").unwrap(), ("é🙂".len() + 2, true));
+        assert_eq!(quoted_length("a'b").unwrap(), (6, false));
+        assert_eq!(quoted_length("a\\b").unwrap(), (6, false));
     }
 
     #[test]
