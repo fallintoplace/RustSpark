@@ -109,6 +109,15 @@ fn dayname(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(NAMES[index].into()))
 }
 
+fn monthname(args: &[Value]) -> Result<Value> {
+    let Some(date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    const MONTH_NAMES: &[&str; 12] = &[
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ];
+    Ok(Value::Text(MONTH_NAMES[(date.month - 1) as usize].into()))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
@@ -122,6 +131,8 @@ pub(super) const FUNCTIONS: &[Function] = &[
         result_type: date_text_type, call: last_day },
     Function { name: "dayname", min_args: 1, max_args: 1,
         result_type: date_text_type, call: dayname },
+    Function { name: "monthname", min_args: 1, max_args: 1,
+        result_type: date_text_type, call: monthname },
 ];
 
 #[cfg(test)]
@@ -226,5 +237,19 @@ mod dayname_tests {
         assert_eq!(dayname(&[Value::Text("2024-02-29".into())]).unwrap(), Value::Text("Thursday".into()));
         assert_eq!(dayname(&[Value::Text("2023-01-01".into())]).unwrap(), Value::Text("Sunday".into()));
         assert_eq!(dayname(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod monthname_tests {
+    use super::*;
+    #[test]
+    fn names_months_and_preserves_nulls() {
+        assert_eq!(monthname(&[Value::Text("2024-01-30".into())]).unwrap(), Value::Text("January".into()));
+        assert_eq!(monthname(&[Value::Text("2024-02-29".into())]).unwrap(), Value::Text("February".into()));
+        assert_eq!(monthname(&[Value::Text("2024-12-01".into())]).unwrap(), Value::Text("December".into()));
+        assert_eq!(monthname(&[Value::Null]).unwrap(), Value::Null);
+        assert!(monthname(&[Value::Text("2024-00-01".into())]).is_err());
     }
 }
