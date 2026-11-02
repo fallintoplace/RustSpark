@@ -141,15 +141,9 @@ impl Schema {
     }
 
     pub fn project_columns(&self, names: &[&str]) -> Result<Self> {
-        // An identity projection only changes the caller's view, not the
-        // metadata. Reuse both Arc allocations and their column index.
-        if names.len() == self.len() && names.iter().enumerate()
-            .all(|(index, name)| self.column(name).ok() == Some(index)) {
-            return Ok(self.clone());
-        }
-        Self::new(names.iter().map(|name| {
-            Ok(self.field(self.column(name)?)?.clone())
-        }).collect::<Result<Vec<_>>>()?)
+        let indices = names.iter().map(|name| self.column(name))
+            .collect::<Result<Vec<_>>>()?;
+        self.project_indices(&indices)
     }
 }
 
@@ -279,5 +273,24 @@ mod indexed_schema_projection_tests {
         assert!(schema.project_indices(&[3]).is_err());
         assert!(schema.project_indices(&[usize::MAX]).is_err());
         assert!(schema.project_indices(&[]).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod named_projection_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn named_projection_reuses_indexed_validation_and_identity_metadata() {
+        let schema = Schema::new(vec![
+            Field::new("First", DataType::Integer, false),
+            Field::new("Second", DataType::Text, true),
+        ]).unwrap();
+        assert_eq!(schema.project_columns(&["SECOND", "first"]).unwrap(),
+            schema.project_indices(&[1, 0]).unwrap());
+        let identity = schema.project_columns(&["FIRST", "second"]).unwrap();
+        assert!(Arc::ptr_eq(&identity.fields, &schema.fields));
+        assert!(schema.project_columns(&["first", "FIRST"]).is_err());
+        assert!(schema.project_columns(&["missing"]).is_err());
     }
 }
