@@ -76,6 +76,18 @@ fn append_bounded_expansion(
     push_bounded(output, replacement)
 }
 
+fn start_byte_offset(text: &str, character_offset: usize) -> usize {
+    // There are no more Unicode characters than input bytes.
+    if character_offset >= text.len() {
+        text.len()
+    } else if text.is_ascii() {
+        character_offset
+    } else {
+        text.char_indices().nth(character_offset)
+            .map_or(text.len(), |(index, _)| index)
+    }
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -89,15 +101,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         if position < 1 {
             return Err(Error::Execution("REGEXP_REPLACE position must be positive".into()));
         }
-        let offset = usize::try_from(position - 1).unwrap_or(usize::MAX);
-        // The number of Unicode scalars cannot exceed the byte length.
-        if offset >= text.len() {
-            text.len()
-        } else if text.is_ascii() {
-            offset
-        } else {
-            text.char_indices().nth(offset).map_or(text.len(), |(index, _)| index)
-        }
+        start_byte_offset(text, usize::try_from(position - 1).unwrap_or(usize::MAX))
     } else { 0 };
     let suffix = &text[start..];
 
@@ -188,6 +192,25 @@ pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "regexp_replace", min_args: 3, max_args: 4,
     result_type: output, call: evaluate,
 }];
+
+#[cfg(test)]
+mod regexp_replace_start_offset_tests {
+    use super::*;
+
+    #[test]
+    fn sql_offsets_skip_unicode_characters_without_splitting_bytes() {
+        assert_eq!(start_byte_offset("é🙂abc", 0), 0);
+        assert_eq!(start_byte_offset("é🙂abc", 2), "é🙂".len());
+        assert_eq!(start_byte_offset("abc", 2), 2);
+        assert_eq!(start_byte_offset("é🙂abc", usize::MAX), "é🙂abc".len());
+        assert_eq!(evaluate(&[
+            Value::Text("é🙂ababa".into()),
+            Value::Text("a".into()),
+            Value::Text("X".into()),
+            Value::Integer(3),
+        ]).unwrap(), Value::Text("é🙂XbXbX".into()));
+    }
+}
 
 #[cfg(test)]
 mod tests {
