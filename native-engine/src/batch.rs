@@ -227,7 +227,7 @@ impl Batch {
             if indices.windows(2).all(|pair| pair[0] < pair[1]) {
                 return self.take_sorted_owned(indices);
             }
-            return Ok(self.gather_owned_last_positions(indices, |row| last[&row]));
+            return self.gather_owned_last_positions(indices, |row| last[&row]);
         }
         let mut last = Vec::new();
         last.try_reserve_exact(self.rows)
