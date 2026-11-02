@@ -113,8 +113,40 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Type("UNBASE64_UTF8 decoded bytes are not UTF-8".into()))?;
     Ok(Value::Text(decoded))
 }
+fn to_base32(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let bytes = text.as_bytes();
+    if bytes.len() > MAX_BYTES {
+        return Err(Error::Execution("TO_BASE32 input exceeds byte budget".into()));
+    }
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let output_len = bytes.len().div_ceil(5).checked_mul(8)
+        .ok_or_else(|| Error::Execution("TO_BASE32 output length overflow".into()))?;
+    let mut encoded = String::new();
+    encoded.try_reserve_exact(output_len)
+        .map_err(|_| Error::Execution("TO_BASE32 allocation failed".into()))?;
+    let mut bits: u32 = 0;
+    let mut available = 0u8;
+    for &byte in bytes {
+        bits = (bits << 8) | u32::from(byte);
+        available += 8;
+        while available >= 5 {
+            available -= 5;
+            let index = ((bits >> available) & 31) as usize;
+            encoded.push(char::from(ALPHABET[index]));
+        }
+    }
+    if available != 0 {
+        let index = ((bits << (5 - available)) & 31) as usize;
+        encoded.push(char::from(ALPHABET[index]));
+    }
+    while encoded.len() < output_len { encoded.push('='); }
+    Ok(Value::Text(encoded))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "base64", min_args: 1, max_args: 1, result_type: output, call: base64 },
+    Function { name: "to_base32", min_args: 1, max_args: 1, result_type: output, call: to_base32 },
     Function { name: "unbase64_utf8", min_args: 1, max_args: 1, result_type: output, call: unbase64_utf8 },
 ];
 #[cfg(test)]
@@ -235,5 +267,31 @@ mod bulk_base64_decode_tests {
         }
         assert_eq!(unbase64_utf8(&[Value::Text(String::new())]).unwrap(),
             Value::Text(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod spark_to_base32_utf8_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+    #[test]
+    fn rfc4648_vectors_and_utf8_bytes() {
+        for (raw, expected) in [
+            ("", ""), ("f", "MY======"), ("fo", "MZXQ===="),
+            ("foo", "MZXW6==="), ("foob", "MZXW6YQ="),
+            ("fooba", "MZXW6YTB"), ("foobar", "MZXW6YTBOI======"),
+            ("é", "YOUQ===="),
+        ] {
+            assert_eq!(to_base32(&[Value::Text(raw.into())]).unwrap(),
+                Value::Text(expected.into()));
+        }
+        assert_eq!(to_base32(&[Value::Null]).unwrap(), Value::Null);
+        assert!(to_base32(&[Value::Text("a".repeat(MAX_BYTES + 1))]).is_err());
+    }
+    #[test]
+    fn native_sql_exposes_base32_encoding() {
+        let plan = sql::parse_sql("SELECT TO_BASE32('foo')").unwrap();
+        assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Text("MZXW6===".into())]]);
     }
 }
