@@ -130,27 +130,30 @@ impl Plan {
         }
     }
 
-    /// Count nodes in an owned native logical tree without recursive walking.
-    pub fn operator_count(&self) -> usize {
+    /// Visit nodes iteratively so deeply nested plans do not use the call stack.
+    fn for_each_node<'a>(&'a self, mut visit: impl FnMut(&'a Self)) {
         let mut pending = vec![self];
-        let mut count = 0usize;
         while let Some(plan) = pending.pop() {
-            count += 1;
+            visit(plan);
             plan.push_children(&mut pending);
         }
+    }
+
+    /// Count nodes in an owned native logical tree without recursive walking.
+    pub fn operator_count(&self) -> usize {
+        let mut count = 0usize;
+        self.for_each_node(|_| count += 1);
         count
     }
 
     /// Return all distinct native table scan dependencies in lexical order.
     pub fn scanned_tables(&self) -> Vec<&str> {
-        let mut pending = vec![self];
         let mut names = std::collections::BTreeSet::new();
-        while let Some(plan) = pending.pop() {
+        self.for_each_node(|plan| {
             if let Self::Scan { table } = plan {
                 names.insert(table.as_str());
             }
-            plan.push_children(&mut pending);
-        }
+        });
         names.into_iter().collect()
     }
 
@@ -231,5 +234,8 @@ mod native_plan_inspection_tests {
         assert_eq!(plan.operator_count(), 6);
         assert_eq!(plan.scanned_tables(), vec!["customers", "sales"]);
         assert_eq!(Plan::scan("alone").operator_count(), 1);
+        let mut visits = 0usize;
+        plan.for_each_node(|_| visits += 1);
+        assert_eq!(visits, 6);
     }
 }
