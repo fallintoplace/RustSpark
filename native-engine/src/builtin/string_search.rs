@@ -15,7 +15,11 @@ fn bounded_split_field(value: &str) -> Result<Value> {
     if value.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("SPLIT_PART result exceeds native 16 MiB budget".into()));
     }
-    Ok(Value::Text(value.to_owned()))
+    let mut owned = String::new();
+    owned.try_reserve_exact(value.len())
+        .map_err(|_| Error::Execution("SPLIT_PART output allocation failed".into()))?;
+    owned.push_str(value);
+    Ok(Value::Text(owned))
 }
 
 fn split_part(args: &[Value]) -> Result<Value> {
@@ -67,7 +71,10 @@ fn split_part(args: &[Value]) -> Result<Value> {
         if from_end <= 256 {
             // Keep a bounded ring of borrowed fields for larger negative
             // offsets. One forward pass preserves nonoverlapping split order.
-            let mut recent = vec![None; from_end];
+            let mut recent = Vec::new();
+            recent.try_reserve_exact(from_end)
+                .map_err(|_| Error::Execution("SPLIT_PART ring allocation failed".into()))?;
+            recent.resize(from_end, None);
             let mut seen = 0usize;
             for field in text.split(delimiter) {
                 recent[seen % from_end] = Some(field);
@@ -549,5 +556,47 @@ mod spark_instr_occurrence_tests {
         ).unwrap();
         let rows = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Integer(5), Value::Integer(2)]]);
+    }
+}
+
+#[cfg(test)]
+mod fallible_split_part_result_and_reverse_ring_tests {
+    use super::*;
+
+    fn field(text: &str, delimiter: &str, position: i64) -> Result<Value> {
+        split_part(&[Value::Text(text.into()), Value::Text(delimiter.into()),
+            Value::Integer(position)])
+    }
+
+    #[test]
+    fn negative_positions_keep_forward_split_semantics_for_overlaps() {
+        assert_eq!(field("aaaaa", "aa", -1).unwrap(), Value::Text("a".into()));
+        assert_eq!(field("aaaaa", "aa", -2).unwrap(), Value::Text("".into()));
+        assert_eq!(field("🙂::東京::é", "::", -2).unwrap(),
+            Value::Text("東京".into()));
+        assert_eq!(field("🙂::東京::é", "::", -3).unwrap(),
+            Value::Text("🙂".into()));
+    }
+
+    #[test]
+    fn ring_and_two_pass_fallback_match_the_forward_reference() {
+        let input = (0..300).map(|index| format!("field{index}"))
+            .collect::<Vec<_>>().join("::");
+        for index in [2_i64, 16, 17, 255, 256, 257, 300] {
+            let expected = input.split("::").nth(300 - index as usize).unwrap();
+            assert_eq!(field(&input, "::", -index).unwrap(),
+                Value::Text(expected.into()));
+        }
+    }
+
+    #[test]
+    fn copies_large_utf8_fields_and_checks_result_limit() {
+        let large = "🙂é東京".repeat(32_768);
+        let input = format!("{large}::tail");
+        assert_eq!(field(&input, "::", 1).unwrap(), Value::Text(large));
+        let oversize = "a".repeat(16 * 1024 * 1024 + 1);
+        assert!(field(&oversize, ",", 1).is_err());
+        assert_eq!(split_part(&[Value::Null, Value::Text(",".into()),
+            Value::Integer(1)]).unwrap(), Value::Null);
     }
 }
