@@ -16,6 +16,7 @@ use super::{
     merge_passes::{merge_to_fan_in, MultiPassRuns},
     merge_runs::RunMerger,
     grouped_spill::{grouped_aggregate, GroupFiles},
+    distinct_spill::{distinct_to_disk, DistinctFiles},
     grace_join::{grace_join, JoinFiles}, spill::SpillReader,
 };
 
@@ -80,6 +81,64 @@ impl Iterator for GroupedOutput {
                 Ok(reader)
             })();
             match next_reader {
+                Ok(reader) => self.reader = Some(reader),
+                Err(error) => {
+                    self.stopped = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
+/// Read exact DISTINCT spill results without keeping all unique keys in RAM.
+/// The reader must close before the owned shard files are deleted.
+struct SpilledDistinctOutput {
+    reader: Option<SpillReader<BufReader<File>>>,
+    files: DistinctFiles,
+    next_file: usize,
+    batch_rows: usize,
+    control: QueryControl,
+    stopped: bool,
+}
+
+impl Iterator for SpilledDistinctOutput {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped { return None; }
+        loop {
+            if let Err(error) = self.control.check() {
+                self.reader = None;
+                self.stopped = true;
+                return Some(Err(error));
+            }
+            if let Some(reader) = &mut self.reader {
+                match reader.next_batch() {
+                    Ok(Some(batch)) if batch.num_rows() == 0 => continue,
+                    Ok(Some(batch)) => return Some(Ok(batch)),
+                    Ok(None) => self.reader = None,
+                    Err(error) => {
+                        self.reader = None;
+                        self.stopped = true;
+                        return Some(Err(error));
+                    }
+                }
+                continue;
+            }
+            let Some(path) = self.files.paths().get(self.next_file) else {
+                self.stopped = true;
+                return None;
+            };
+            self.next_file += 1;
+            match (|| {
+                let reader = SpillReader::new(
+                    BufReader::new(File::open(path)?), self.batch_rows)?;
+                if reader.schema() != self.files.schema() {
+                    return Err(Error::Schema("DISTINCT result spill schema mismatch".into()));
+                }
+                Ok(reader)
+            })() {
                 Ok(reader) => self.reader = Some(reader),
                 Err(error) => {
                     self.stopped = true;
@@ -545,9 +604,27 @@ fn lower(
                 MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES,
             )?))
         }
-        Plan::Distinct { input } => Ok(Box::new(DistinctOutput::new(
-            child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS, MAX_STREAM_DISTINCT_BYTES
-        ))),
+        Plan::Distinct { input } => {
+            let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
+            if schema.is_empty() {
+                // A zero-width DISTINCT relation has at most one output row.
+                // The disk DISTINCT format intentionally requires columns.
+                return Ok(Box::new(DistinctOutput::new(
+                    child(input)?, control.clone(), MAX_STREAM_DISTINCT_KEYS,
+                    MAX_STREAM_DISTINCT_BYTES)));
+            }
+            // Do not emit a prefix before spilling: if in-memory DISTINCT
+            // exhausts its budget, replaying earlier rows would duplicate
+            // results. A blocking exact partitioned pass is retry-safe.
+            let files = distinct_to_disk(
+                child(input)?, schema, &options.scratch_directory,
+                16, MAX_STREAM_DISTINCT_KEYS, options.batch_rows, control
+            )?;
+            Ok(Box::new(SpilledDistinctOutput {
+                files, reader: None, next_file: 0, batch_rows: options.batch_rows,
+                control: control.clone(), stopped: false,
+            }))
+        },
         Plan::CrossJoin { left, right } => {
             let left_schema = infer(left, catalog, depth + 1, options.max_plan_depth, cache)?;
             let right_schema = infer(right, catalog, depth + 1, options.max_plan_depth, cache)?;
