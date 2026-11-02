@@ -74,6 +74,14 @@ impl HyperLogLog {
     /// remains the dense format and can still be read from older workers.
     /// Neither format is persistent across native hash implementation changes.
     pub fn to_wire_bytes(&self) -> Vec<u8> {
+        // Empty partitions produce no register entries. Avoid inspecting all
+        // 4096 registers when exporting an empty worker sketch.
+        if self.nonempty == 0 {
+            let mut encoded = Vec::with_capacity(SPARSE_HEADER_BYTES);
+            encoded.extend_from_slice(SPARSE_WIRE_HEADER);
+            encoded.extend_from_slice(&0_u16.to_le_bytes());
+            return encoded;
+        }
         let sparse_bytes = SPARSE_HEADER_BYTES + self.nonempty * 3;
         if sparse_bytes < WIRE_BYTES {
             let mut encoded = Vec::with_capacity(sparse_bytes);
@@ -916,5 +924,23 @@ mod dense_wire_batch_accumulator_tests {
         *wire.last_mut().unwrap() = u8::MAX;
         assert!(actual.merge_wire_bytes(&wire).is_err());
         assert_eq!(actual, reference);
+    }
+}
+
+#[cfg(test)]
+mod empty_wire_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn empty_sketch_uses_the_canonical_sparse_wire_header() {
+        let empty = HyperLogLog::new();
+        let bytes = empty.to_wire_bytes();
+        assert_eq!(bytes.as_slice(), b"RSH2\0\0");
+        assert_eq!(bytes.len(), SPARSE_HEADER_BYTES);
+        assert_eq!(HyperLogLog::from_wire_bytes(&bytes).unwrap(), empty);
+
+        let mut populated = HyperLogLog::new();
+        populated.add(&Value::Integer(42));
+        assert_ne!(populated.to_wire_bytes(), bytes);
     }
 }
