@@ -8,7 +8,11 @@ fn concat(args: &[Value]) -> Result<Value> {
         if text.len() > 16 * 1024 * 1024 {
             return Err(Error::Execution("CONCAT output exceeds 16 MiB".into()));
         }
-        return Ok(Value::Text(text.clone()));
+        let mut output = String::new();
+        output.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("CONCAT output allocation failed".into()))?;
+        output.push_str(text);
+        return Ok(Value::Text(output));
     }
     let mut length = 0_usize;
     for value in args {
@@ -20,7 +24,9 @@ fn concat(args: &[Value]) -> Result<Value> {
         }
     }
     // Type and size were checked above; avoid intermediate strings or joins.
-    let mut output = String::with_capacity(length);
+    let mut output = String::new();
+    output.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("CONCAT output allocation failed".into()))?;
     for value in args {
         if let Value::Text(text) = value {
             output.push_str(text);
@@ -71,5 +77,18 @@ mod single_value_concat_tests {
         assert_eq!(concat(&[Value::Text(content.clone())]).unwrap(), Value::Text(content));
         assert_eq!(concat(&[Value::Null]).unwrap(), Value::Null);
         assert!(concat(&[Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_concat_reservation_tests {
+    use super::*;
+    #[test]
+    fn exact_result_lengths_with_single_and_multiple_unicode_values() {
+        let one = concat(&[Value::Text("é🙂".into())]).unwrap();
+        assert_eq!(one, Value::Text("é🙂".into()));
+        let multiple = concat(&[Value::Text("é".into()), Value::Text("🙂".into())]).unwrap();
+        assert_eq!(multiple, one);
+        assert_eq!(concat(&[Value::Text("a".into()), Value::Null]).unwrap(), Value::Null);
     }
 }
