@@ -5,7 +5,9 @@ fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
 // Single and multi-argument CONCAT paths reserve with the same error contract.
 fn reserved_output(length: usize) -> Result<String> {
-    let mut output = reserved_output(length)?;
+    let mut output = String::new();
+    output.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("CONCAT output allocation failed".into()))?;
     Ok(output)
 }
 
@@ -28,9 +30,7 @@ fn concat(args: &[Value]) -> Result<Value> {
         }
     }
     // Type and size were checked above; avoid intermediate strings or joins.
-    let mut output = String::new();
-    output.try_reserve_exact(length)
-        .map_err(|_| Error::Execution("CONCAT output allocation failed".into()))?;
+    let mut output = reserved_output(length)?;
     for value in args {
         if let Value::Text(text) = value {
             output.push_str(text);
