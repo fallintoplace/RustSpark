@@ -30,20 +30,25 @@ fn lower_hex<B: AsRef<[u8]>>(digest: B) -> String {
     String::from_utf8(output).expect("hex pairs contain only ASCII")
 }
 
+fn sha2_hex(input: &[u8], bits: i64) -> Option<String> {
+    let digest = match bits {
+        224 => lower_hex(Sha224::digest(input)),
+        0 | 256 => lower_hex(Sha256::digest(input)),
+        384 => lower_hex(Sha384::digest(input)),
+        512 => lower_hex(Sha512::digest(input)),
+        // Spark returns NULL for unsupported digest widths.
+        _ => return None,
+    };
+    Some(digest)
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(bits) = super::integer(&args[1])? else { return Ok(Value::Null); };
     if input.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("SHA2 input exceeds 16 MiB budget".into()));
     }
-    let digest = match bits {
-        224 => lower_hex(Sha224::digest(input.as_bytes())),
-        0 | 256 => lower_hex(Sha256::digest(input.as_bytes())),
-        384 => lower_hex(Sha384::digest(input.as_bytes())),
-        512 => lower_hex(Sha512::digest(input.as_bytes())),
-        // Spark returns NULL for unsupported digest widths.
-        _ => return Ok(Value::Null),
-    };
+    let Some(digest) = sha2_hex(input.as_bytes(), bits) else { return Ok(Value::Null); };
     Ok(Value::Text(digest))
 }
 
