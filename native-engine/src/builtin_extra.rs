@@ -84,6 +84,16 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(first)
         },
+        "MAKE_DATE" => {
+            if args.len() != 3 { return Err(Error::Parse("MAKE_DATE requires year, month and day".into())); }
+            for arg in args {
+                if !matches!(arg, Expr::Literal(Value::Null))
+                    && arg.output_type(schema)? != DataType::Integer {
+                    return Err(Error::Type("MAKE_DATE requires integer arguments".into()));
+                }
+            }
+            Ok(DataType::Text)
+        },
         "DATE_ADD" | "DATE_SUB" => {
             if args.len() != 2 {
                 return Err(Error::Parse(format!("{name} requires date and day offset")));
@@ -346,6 +356,18 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "MAKE_DATE" => match args {
+            [Value::Integer(year), Value::Integer(month), Value::Integer(day)] => {
+                if !(1..=9_999).contains(year) || !(1..=12).contains(month) || !(1..=31).contains(day) {
+                    return Err(Error::Execution("MAKE_DATE received invalid calendar fields".into()));
+                }
+                let date = format!("{year:04}-{month:02}-{day:02}");
+                tpch_iso_days(&date).map_err(|_| Error::Execution("MAKE_DATE received invalid calendar fields".into()))?;
+                Ok(Value::Text(date))
+            }
+            _ if args.iter().any(Value::is_null) => Ok(Value::Null),
+            _ => Err(Error::Type("MAKE_DATE requires integer arguments".into())),
         },
         "DATE_ADD" | "DATE_SUB" => match args {
             [Value::Text(text), Value::Integer(amount)] => {
