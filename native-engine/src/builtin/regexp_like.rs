@@ -6,33 +6,38 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Boolean)
 }
 
+// Return None for patterns that still require the regex compiler.
+fn fast_match(text: &str, pattern: &str) -> Option<bool> {
+    if pattern.is_empty() || pattern == ".*" {
+        return Some(true);
+    }
+    if pattern == "." {
+        // A non-newline UTF-8 byte implies a non-newline Unicode scalar.
+        return Some(text.bytes().any(|byte| byte != b'\n'));
+    }
+    // Only identifier literals may bypass the regex compiler.
+    if let Some(prefix) = pattern.strip_prefix('^') {
+        if prefix.len() <= 4095 && prefix.chars().all(|ch|
+            ch.is_alphanumeric() || ch == '_') {
+            return Some(text.starts_with(prefix));
+        }
+    }
+    if pattern.len() <= 4096 && pattern.chars().all(|ch|
+        ch.is_alphanumeric() || ch == '_') {
+        return Some(text.contains(pattern));
+    }
+    None
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
     regex_support::check_input(text)?;
-    if pattern.is_empty() { return Ok(Value::Boolean(true)); }
-    if pattern == ".*" { return Ok(Value::Boolean(true)); }
-    if pattern == "." {
-        // A non-newline UTF-8 byte implies a non-newline Unicode scalar.
-        return Ok(Value::Boolean(text.bytes().any(|byte| byte != b'\n')));
-    }
-    // A leading ^ followed only by literal word characters is a prefix
-    // test. Patterns with $, escapes, groups or modifiers use the regex
-    // compiler so their full semantics remain intact.
-    if let Some(prefix) = pattern.strip_prefix('^') {
-        if prefix.len() <= 4095 && prefix.chars().all(|ch|
-            ch.is_alphanumeric() || ch == '_') {
-            return Ok(Value::Boolean(text.starts_with(prefix)));
-        }
-    }
-    // Plain ASCII identifiers have no regex metacharacters.
-    if pattern.len() <= 4096 && pattern.chars().all(|ch|
-        ch.is_alphanumeric() || ch == '_') {
-        return Ok(Value::Boolean(text.contains(pattern)));
+    if let Some(matched) = fast_match(text, pattern) {
+        return Ok(Value::Boolean(matched));
     }
     Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(text)))
 }
-
 
 fn regexp_escape_type(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 fn regexp_escape(args: &[Value]) -> Result<Value> {
@@ -233,5 +238,23 @@ mod recovered_regex_prefix_parser_regressions {
         assert_eq!(evaluate(&[Value::Null, Value::Text("^foo".into())]).unwrap(),
             Value::Null);
         assert!(evaluate(&[Value::Text("hello".into()), Value::Text("(".into())]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fast_match_regressions {
+    use super::*;
+
+    #[test]
+    fn literal_paths_match_the_regex_engine() {
+        for text in ["", "foo_bar", "éfoo", "\n", "🙂"] {
+            for pattern in ["", ".*", ".", "^", "^foo", "^é", "foo", "_", "é"] {
+                let expected = regex_support::compile(pattern).unwrap().is_match(text);
+                assert_eq!(fast_match(text, pattern), Some(expected),
+                    "pattern={pattern:?}, input={text:?}");
+            }
+        }
+        assert_eq!(fast_match("foobar", "f.o"), None);
+        assert_eq!(fast_match("foobar", "(?i)foo"), None);
     }
 }
