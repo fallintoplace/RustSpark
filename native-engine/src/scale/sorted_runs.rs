@@ -48,7 +48,7 @@ fn validate_sort_keys(schema: &Schema, keys: &[SortKey]) -> Result<()> {
 
 fn flush_pending_run(
     runs: &mut RunSet, pending: &mut Vec<Batch>, pending_rows: &mut usize,
-    schema: &Schema, keys: &[SortKey], directory: &Path,
+    pending_bytes: &mut usize, schema: &Schema, keys: &[SortKey], directory: &Path,
     max_rows_per_run: usize, control: &QueryControl,
 ) -> Result<()> {
     if *pending_rows == 0 { return Ok(()); }
@@ -71,6 +71,7 @@ fn flush_pending_run(
     // one file and split only its on-disk batch windows.
     writer.write_batch_bounded(&sorted, max_rows_per_run)?;
     writer.finish()?;
+    *pending_bytes = 0;
     Ok(())
 }
 
@@ -135,8 +136,7 @@ where I: IntoIterator<Item = Result<Batch>>
             }
             if take == 0 {
                 flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
-                    &schema, keys, directory, max_rows_per_run, control)?;
-                pending_bytes = 0;
+                    &mut pending_bytes, &schema, keys, directory, max_rows_per_run, control)?;
                 continue;
             }
             let columns = sources.iter_mut()
@@ -149,13 +149,12 @@ where I: IntoIterator<Item = Result<Batch>>
             remaining -= take;
             if pending_rows == max_rows_per_run || pending_bytes == max_bytes_per_run {
                 flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
-                    &schema, keys, directory, max_rows_per_run, control)?;
-                pending_bytes = 0;
+                    &mut pending_bytes, &schema, keys, directory, max_rows_per_run, control)?;
             }
         }
     }
     flush_pending_run(&mut runs, &mut pending, &mut pending_rows,
-        &schema, keys, directory, max_rows_per_run, control)?;
+        &mut pending_bytes, &schema, keys, directory, max_rows_per_run, control)?;
     Ok(runs)
 }
 
