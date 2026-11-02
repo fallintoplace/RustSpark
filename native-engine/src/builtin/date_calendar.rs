@@ -175,6 +175,28 @@ fn trunc_date(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(iso_text(date)))
 }
 
+fn iso_weeks_in_year(year: i64) -> i64 {
+    let january_first = CalendarDate { year, month: 1, day: 1 };
+    let weekday = (days_since_epoch(january_first) + 3).rem_euclid(7);
+    if weekday == 3 || (weekday == 2 && leap_year(year)) { 53 } else { 52 }
+}
+
+fn weekofyear(args: &[Value]) -> Result<Value> {
+    let Some(date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    let mut ordinal = date.day;
+    for month in 1..date.month {
+        ordinal += month_length(date.year, month);
+    }
+    let weekday = (days_since_epoch(date) + 3).rem_euclid(7);
+    let mut week = (ordinal - weekday + 9).div_euclid(7);
+    if week == 0 {
+        week = iso_weeks_in_year(date.year - 1);
+    } else if week > iso_weeks_in_year(date.year) {
+        week = 1;
+    }
+    Ok(Value::Integer(week))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
@@ -194,6 +216,8 @@ pub(super) const FUNCTIONS: &[Function] = &[
         result_type: text_pair_type, call: next_day },
     Function { name: "trunc", min_args: 2, max_args: 2,
         result_type: text_pair_type, call: trunc_date },
+    Function { name: "weekofyear", min_args: 1, max_args: 1,
+        result_type: date_integer_type, call: weekofyear },
 ];
 
 #[cfg(test)]
@@ -351,5 +375,21 @@ mod trunc_date_tests {
             Value::Null);
         assert_eq!(trunc_date(&[Value::Null, Value::Text("YEAR".into())]).unwrap(), Value::Null);
         assert_eq!(trunc_date(&[Value::Text("2024-01-01".into()), Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod weekofyear_tests {
+    use super::*;
+    #[test]
+    fn uses_iso_weeks_and_handles_calendar_year_rollovers() {
+        assert_eq!(weekofyear(&[Value::Text("2015-01-01".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(weekofyear(&[Value::Text("2016-01-01".into())]).unwrap(), Value::Integer(53));
+        assert_eq!(weekofyear(&[Value::Text("2018-12-31".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(weekofyear(&[Value::Text("2020-12-31".into())]).unwrap(), Value::Integer(53));
+        assert_eq!(weekofyear(&[Value::Text("2021-01-01".into())]).unwrap(), Value::Integer(53));
+        assert_eq!(weekofyear(&[Value::Text("2024-12-30".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(weekofyear(&[Value::Null]).unwrap(), Value::Null);
     }
 }
