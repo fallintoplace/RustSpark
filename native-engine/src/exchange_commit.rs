@@ -12,6 +12,16 @@ struct PartitionState {
     committed: bool,
 }
 
+/// A received chunk in a multi-frame shuffle window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkRecord {
+    pub stage: u64,
+    pub partition: u64,
+    pub attempt: u32,
+    pub sequence: usize,
+    pub checksum: u32,
+}
+
 /// Track ordered shuffle chunks and enforce one logical partition commit.
 /// A newer attempt invalidates all uncommitted chunks from older attempts.
 pub struct CommitLedger {
@@ -96,6 +106,59 @@ impl CommitLedger {
             .map_err(|_| Error::Execution("shuffle chunk tracking allocation failed".into()))?;
         state.checksums.push(checksum);
         Ok(true)
+    }
+
+    /// Admit a network window as one transaction. Invalid later frames must
+    /// not leave earlier chunks or newer attempts visible in the live ledger.
+    /// Only touched partition state is copied; unrelated partitions are never
+    /// duplicated, so large long-lived ledgers remain cheap to update.
+    ///
+    /// The returned bool for each frame reports whether that chunk is new.
+    pub fn record_chunks_atomic(&mut self, chunks: &[ChunkRecord]) -> Result<Vec<bool>> {
+        let mut accepted = Vec::new();
+        accepted.try_reserve_exact(chunks.len())
+            .map_err(|_| Error::Execution("shuffle batch result allocation failed".into()))?;
+
+        // Stage only touched partitions. The staging ledger reuses the exact
+        // attempt fencing and contiguous-sequence checks from record_chunk.
+        let mut staged = Self::new(self.max_partitions, self.max_chunks_per_partition)?;
+        for chunk in chunks {
+            let key = (chunk.stage, chunk.partition);
+            if !staged.states.contains_key(&key) {
+                if let Some(existing) = self.states.get(&key) {
+                    let mut checksums = Vec::new();
+                    checksums.try_reserve_exact(existing.checksums.len())
+                        .map_err(|_| Error::Execution(
+                            "shuffle chunk staging allocation failed".into()
+                        ))?;
+                    checksums.extend_from_slice(&existing.checksums);
+                    staged.states.try_reserve(1)
+                        .map_err(|_| Error::Execution(
+                            "shuffle partition staging allocation failed".into()
+                        ))?;
+                    staged.states.insert(key, PartitionState {
+                        attempt: existing.attempt,
+                        checksums,
+                        committed: existing.committed,
+                    });
+                }
+            }
+            accepted.push(staged.record_chunk(
+                chunk.stage, chunk.partition, chunk.attempt,
+                chunk.sequence, chunk.checksum
+            )?);
+        }
+
+        let new_partitions = staged.states.keys()
+            .filter(|&&key| !self.states.contains_key(&key)).count();
+        if new_partitions > self.max_partitions.saturating_sub(self.states.len()) {
+            return Err(Error::Execution("shuffle partition tracking budget exceeded".into()));
+        }
+        // Reserve before the first mutation to keep failure atomic.
+        self.states.try_reserve(new_partitions)
+            .map_err(|_| Error::Execution("shuffle partition index allocation failed".into()))?;
+        self.states.extend(staged.states);
+        Ok(accepted)
     }
 
     /// Commit a partition only after receiving the complete ordered sequence.
