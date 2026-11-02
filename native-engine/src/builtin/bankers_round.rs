@@ -9,13 +9,9 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(if types[0] == DataType::Integer { DataType::Integer } else { DataType::Float })
 }
 fn round_even(args: &[Value]) -> Result<Value> {
-    let scale = if args.len() == 2 {
-        let Some(scale) = super::integer(&args[1])? else { return Ok(Value::Null) };
-        scale
-    } else { 0 };
-    if !(-15..=15).contains(&scale) {
-        return Err(Error::Execution("BROUND scale must be within [-15,15]".into()));
-    }
+    let Some(scale) = super::bounded_rounding_scale(
+        args, "BROUND scale must be within [-15,15]",
+    )? else { return Ok(Value::Null); };
     if let Value::Integer(value) = args[0] {
         if scale >= 0 { return Ok(Value::Integer(value)); }
         let factor = 10_i128.pow((-scale) as u32);
@@ -118,5 +114,17 @@ mod inexact_large_negative_bround_regressions {
             Value::Float(120.0));
         assert_eq!(round_even(&[Value::Float(135.0), Value::Integer(-1)]).unwrap(),
             Value::Float(140.0));
+    }
+}
+
+#[cfg(test)]
+mod shared_precision_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_null_precision_and_range_errors() {
+        assert_eq!(round_even(&[Value::Integer(5), Value::Null]).unwrap(), Value::Null);
+        assert!(round_even(&[Value::Integer(5), Value::Integer(-16)]).is_err());
+        assert_eq!(round_even(&[Value::Integer(5), Value::Integer(15)]).unwrap(), Value::Integer(5));
     }
 }
