@@ -29,6 +29,7 @@ fn read_sql_file(path: &std::path::Path) -> Result<String> {
 
 struct Args {
     csv: Option<PathBuf>, parquet: Option<PathBuf>, catalog_manifest: Option<PathBuf>,
+    parquet_tables: Vec<(String, PathBuf)>,
     table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
 }
@@ -58,6 +59,7 @@ fn parse_schema(text: &str) -> Result<Schema> {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut csv = None;
     let mut parquet = None;
+    let mut parquet_tables = Vec::new();
     let mut catalog_manifest = None;
     let mut table = "data".to_string();
     let mut schema = None;
@@ -83,6 +85,18 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 }
             },
             "--table" => table = value,
+            "--parquet-table" => {
+                let (name, path) = value.split_once('=')
+                    .ok_or_else(|| Error::Parse(
+                        "--parquet-table expects TABLE=FILE".into()))?;
+                if name.is_empty() || path.is_empty() {
+                    return Err(Error::Parse("--parquet-table expects TABLE=FILE".into()));
+                }
+                if parquet_tables.len() >= 1024 {
+                    return Err(Error::Parse("too many --parquet-table sources".into()));
+                }
+                parquet_tables.push((name.to_owned(), PathBuf::from(path)));
+            },
             "--catalog-manifest" => {
                 if catalog_manifest.replace(PathBuf::from(value)).is_some() {
                     return Err(Error::Parse("duplicate --catalog-manifest".into()));
@@ -110,18 +124,20 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     };
     if sql.trim().is_empty() { return Err(Error::Parse("SQL cannot be empty".into())); }
     let inputs = usize::from(csv.is_some()) + usize::from(parquet.is_some())
-        + usize::from(catalog_manifest.is_some());
+        + usize::from(catalog_manifest.is_some())
+        + usize::from(!parquet_tables.is_empty());
     if inputs != 1 {
-        return Err(Error::Parse("choose --csv, --parquet, or --catalog-manifest".into()));
+        return Err(Error::Parse("choose --csv, --parquet, --parquet-table, or --catalog-manifest".into()));
     }
     if csv.is_some() && schema.is_none() {
         return Err(Error::Parse("--schema required for CSV".into()));
     }
-    if (parquet.is_some() || catalog_manifest.is_some()) && schema.is_some() {
+    if (parquet.is_some() || catalog_manifest.is_some() || !parquet_tables.is_empty()) && schema.is_some() {
         return Err(Error::Parse("Parquet schema comes from file metadata".into()));
     }
     Ok(Some(Args {
-        csv, parquet, catalog_manifest, table, schema, sql, batch_rows, record_bytes, scratch,
+        csv, parquet, catalog_manifest, parquet_tables,
+        table, schema, sql, batch_rows, record_bytes, scratch,
     }))
 }
 
@@ -188,7 +204,7 @@ fn write_csv(
 
 fn run() -> Result<()> {
     let Some(args) = parse_args(env::args().skip(1))? else {
-        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE) --sql QUERY");
+        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE | --parquet-table NAME=FILE [--parquet-table NAME=FILE ...] | --catalog-manifest FILE) --sql QUERY");
         return Ok(());
     };
     let mut catalog = if let Some(path) = &args.catalog_manifest {
@@ -201,6 +217,9 @@ fn run() -> Result<()> {
             args.schema.ok_or_else(|| Error::Parse("CSV schema required".into()))?, args.record_bytes)?;
     } else if let Some(path) = &args.parquet {
         catalog.register_parquet(&args.table, path)?;
+    }
+    for (name, path) in &args.parquet_tables {
+        catalog.register_parquet(name, path)?;
     }
     let plan = sql::parse_sql(&args.sql)?;
     let options = StreamOptions {
@@ -308,5 +327,41 @@ mod borrowed_csv_output_tests {
         let mut output = Vec::new();
         write_csv(&schema, [Ok(input)], &mut output).unwrap();
         assert_eq!(output, b"\n\n\n\n\n");
+    }
+}
+
+#[cfg(test)]
+mod direct_multi_parquet_cli_regressions {
+    use super::*;
+
+    fn args(flags: &[&str]) -> Result<Args> {
+        parse_args(flags.iter().map(|flag| (*flag).to_owned()))?
+            .ok_or_else(|| Error::Parse("expected CLI args".into()))
+    }
+
+    #[test]
+    fn accepts_multiple_named_parquet_sources() {
+        let parsed = args(&[
+            "--parquet-table", "orders=/tmp/orders.parquet",
+            "--parquet-table", "users=/tmp/users.parquet",
+            "--sql", "SELECT * FROM orders JOIN users ON orders.id = users.id",
+        ]).unwrap();
+        assert_eq!(parsed.parquet_tables.len(), 2);
+        assert_eq!(parsed.parquet_tables[0].0, "orders");
+        assert_eq!(parsed.parquet_tables[1].1, PathBuf::from("/tmp/users.parquet"));
+        assert!(parsed.parquet.is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_or_conflicting_named_sources() {
+        for bad in ["", "=empty.parquet", "missing_equals"] {
+            assert!(args(&["--parquet-table", bad, "--sql", "SELECT 1"]).is_err());
+        }
+        assert!(args(&["--parquet-table", "x=x.parquet", "--parquet", "y.parquet",
+            "--sql", "SELECT 1"]).is_err());
+        assert!(args(&["--parquet-table", "x=x.parquet", "--schema", "id:int",
+            "--sql", "SELECT 1"]).is_err());
+        assert!(args(&["--parquet-table", "x=x.parquet", "--catalog-manifest", "cat.json",
+            "--sql", "SELECT 1"]).is_err());
     }
 }
