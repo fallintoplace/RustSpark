@@ -1334,7 +1334,7 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
             let right = parser.select_with_intersections()?;
             plan = Plan::UnionAll { left: Box::new(plan), right: Box::new(right) };
             if !all { plan = Plan::Distinct { input: Box::new(plan) }; }
-        } else if parser.take_word("EXCEPT") {
+        } else if parser.take_word("EXCEPT") || parser.take_word("MINUS") {
             let all = parser.take_word("ALL");
             if !all { parser.take_word("DISTINCT"); }
             let right = parser.select_with_intersections()?;
@@ -2108,5 +2108,37 @@ mod spark_boolean_aggregate_tests {
         nulls.register("n", Batch::from_rows(all_null, vec![vec![Value::Null]]).unwrap()).unwrap();
         assert_eq!(executor::execute(&parse_sql("SELECT EVERY(flag), SOME(flag) FROM n").unwrap(), &nulls)
             .unwrap().rows().unwrap(), vec![vec![Value::Null, Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod spark_minus_alias_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    fn run(query: &str) -> Vec<Vec<Value>> {
+        executor::execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn minus_matches_except_for_distinct_and_all() {
+        let left = "SELECT col1 FROM VALUES (1), (1), (2), (NULL)";
+        let right = "SELECT col1 FROM VALUES (1), (NULL)";
+        for suffix in ["", " DISTINCT", " ALL"] {
+            let except = format!("{left} EXCEPT{suffix} {right} ORDER BY col1");
+            let minus = format!("{left} MINUS{suffix} {right} ORDER BY col1");
+            assert_eq!(run(&minus), run(&except));
+        }
+        assert_eq!(run("SELECT col1 FROM VALUES (1), (1), (2) MINUS ALL SELECT col1 FROM VALUES (1) ORDER BY col1"),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn minus_respects_intersect_precedence_and_rejects_missing_rhs() {
+        let left = run("SELECT col1 FROM VALUES (1), (2) MINUS SELECT col1 FROM VALUES (2) INTERSECT SELECT col1 FROM VALUES (2)");
+        let right = run("SELECT col1 FROM VALUES (1), (2) EXCEPT SELECT col1 FROM VALUES (2) INTERSECT SELECT col1 FROM VALUES (2)");
+        assert_eq!(left, right);
+        assert!(parse_sql("SELECT 1 MINUS").is_err());
     }
 }
