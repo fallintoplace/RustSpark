@@ -11,7 +11,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("JSON_VALID document exceeds 16 MiB".into()));
     }
-    // The result only needs syntax validity, not an allocated JSON value tree.
+    // Avoid building a serde deserializer for the three common JSON
+    // literals. JSON only permits SP, TAB, CR and LF around a value.
+    let trimmed = text.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\r' | '\n'));
+    if matches!(trimmed, "true" | "false" | "null") {
+        return Ok(Value::Boolean(true));
+    }
+    // The general path only needs syntax validity, not a JSON value tree.
     Ok(Value::Boolean(
         serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
     ))
@@ -104,5 +110,25 @@ mod json_pretty_writer_budget_tests {
         assert!(writer.bytes.len() <= 4);
         assert_eq!(json_pretty(&[Value::Text("[1,2]".into())]).unwrap(),
             Value::Text("[\n  1,\n  2\n]".into()));
+    }
+}
+
+#[cfg(test)]
+mod json_literal_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn matches_serde_for_literals_and_invalid_whitespace() {
+        for text in [
+            "true", "false", "null", " \ttrue\r\n",
+            "\n false \t", " \r null  ", "TRUE", "falsex",
+            "true false", "\u{000b}true", "false\u{000c}",
+            "\u{00a0}null", "", "123", r#"{"ok":true}"#,
+        ] {
+            let expected = serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok();
+            assert_eq!(evaluate(&[Value::Text(text.into())]).unwrap(),
+                Value::Boolean(expected), "input={text:?}");
+        }
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }
