@@ -130,27 +130,29 @@ impl Plan {
         }
     }
 
-    /// Count nodes in an owned native logical tree without recursive walking.
-    pub fn operator_count(&self) -> usize {
+    fn visit_nodes<'a>(&'a self, mut visitor: impl FnMut(&'a Self)) {
         let mut pending = vec![self];
-        let mut count = 0usize;
         while let Some(plan) = pending.pop() {
-            count += 1;
+            visitor(plan);
             plan.push_children(&mut pending);
         }
+    }
+
+    /// Count nodes in an owned native logical tree without recursive walking.
+    pub fn operator_count(&self) -> usize {
+        let mut count = 0usize;
+        self.visit_nodes(|_| count += 1);
         count
     }
 
     /// Return all distinct native table scan dependencies in lexical order.
     pub fn scanned_tables(&self) -> Vec<&str> {
-        let mut pending = vec![self];
         let mut names = std::collections::BTreeSet::new();
-        while let Some(plan) = pending.pop() {
+        self.visit_nodes(|plan| {
             if let Self::Scan { table } = plan {
                 names.insert(table.as_str());
             }
-            plan.push_children(&mut pending);
-        }
+        });
         names.into_iter().collect()
     }
 
