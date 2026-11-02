@@ -103,7 +103,7 @@ fn normalize_space(args: &[Value]) -> Result<Value> {
         ))?;
         let mut pending = false;
         for &byte in input.as_bytes() {
-            if byte.is_ascii_whitespace() || byte == b'\x0b' {
+            if super::char_length::is_ascii_sql_whitespace(byte) {
                 pending = !output.is_empty();
             } else {
                 if pending { output.push(b' '); }
@@ -408,5 +408,21 @@ mod fallible_trim_output_regressions {
             Value::Text("🙂é".into()));
         assert_eq!(normalize_space(&[Value::Text(" é\t🙂  界 ".into())]).unwrap(),
             Value::Text("é 🙂 界".into()));
+    }
+}
+
+#[cfg(test)]
+mod shared_ascii_whitespace_normalization_tests {
+    use super::*;
+
+    #[test]
+    fn normalization_uses_the_same_ascii_delimiters_as_word_count() {
+        for whitespace in [b' ', b'\t', b'\r', b'\n', b'\x0b', b'\x0c'] {
+            let input = String::from_utf8(vec![b'A', whitespace, b'B']).unwrap();
+            assert_eq!(normalize_space(&[Value::Text(input)]).unwrap(),
+                Value::Text("A B".into()), "byte={whitespace}");
+        }
+        assert_eq!(normalize_space(&[Value::Text("A\x00B".into())]).unwrap(),
+            Value::Text("A\x00B".into()));
     }
 }
