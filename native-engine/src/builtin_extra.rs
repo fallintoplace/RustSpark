@@ -61,6 +61,32 @@ fn tpch_iso_from_days(days: i64) -> Result<String> {
     Ok(format!("{year:04}-{month:02}-{day:02}"))
 }
 
+fn tpch_add_months(date: &str, months: i64) -> Result<String> {
+    // Validate the input date before taking its calendar fields.
+    tpch_iso_days(date)?;
+    let year: i64 = date[..4].parse().map_err(|_| Error::Type("invalid date year".into()))?;
+    let month: i64 = date[5..7].parse().map_err(|_| Error::Type("invalid date month".into()))?;
+    let day: i64 = date[8..10].parse().map_err(|_| Error::Type("invalid date day".into()))?;
+    let index = (year - 1).checked_mul(12)
+        .and_then(|v| v.checked_add(month - 1))
+        .and_then(|v| v.checked_add(months))
+        .ok_or_else(|| Error::Execution("ADD_MONTHS offset overflow".into()))?;
+    let new_year = index.div_euclid(12) + 1;
+    let new_month = index.rem_euclid(12) + 1;
+    if !(1..=9_999).contains(&new_year) {
+        return Err(Error::Execution("ADD_MONTHS date outside supported range".into()));
+    }
+    let leap = new_year % 4 == 0 && (new_year % 100 != 0 || new_year % 400 == 0);
+    let max_day = match new_month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => unreachable!(),
+    };
+    Ok(format!("{new_year:04}-{new_month:02}-{:02}", day.min(max_day)))
+}
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
@@ -83,6 +109,17 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
                 return Err(Error::Type("NULLIF arguments must have the same type".into()));
             }
             Ok(first)
+        },
+        "ADD_MONTHS" => {
+            if args.len() != 2 {
+                return Err(Error::Parse("ADD_MONTHS requires date and months".into()));
+            }
+            if args[0].output_type(schema)? != DataType::Text
+                || args[1].output_type(schema)? != DataType::Integer
+            {
+                return Err(Error::Type("ADD_MONTHS expects ISO date text and integer".into()));
+            }
+            Ok(DataType::Text)
         },
         "DATE_ADD" | "DATE_SUB" => {
             if args.len() != 2 {
@@ -346,6 +383,12 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "ADD_MONTHS" => match args {
+            [Value::Text(date), Value::Integer(months)] =>
+                Ok(Value::Text(tpch_add_months(date, *months)?)),
+            [date, months] if date.is_null() || months.is_null() => Ok(Value::Null),
+            _ => Err(Error::Type("ADD_MONTHS expects ISO date text and integer".into())),
         },
         "DATE_ADD" | "DATE_SUB" => match args {
             [Value::Text(text), Value::Integer(amount)] => {
