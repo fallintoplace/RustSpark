@@ -18,6 +18,7 @@ enum SelectItem {
     Star,
     Scalar(Selection),
     Aggregate(AggregateItem),
+    AggregateExpr { aggregate: AggregateItem, expression: Expr, alias: String },
 }
 
 
@@ -262,7 +263,11 @@ impl Parser {
     }
 
     fn parse_expression(&mut self, min_precedence: u8) -> Result<Expr> {
-        let mut left = self.prefix()?;
+        let left = self.prefix()?;
+        self.parse_expression_tail(left, min_precedence)
+    }
+
+    fn parse_expression_tail(&mut self, mut left: Expr, min_precedence: u8) -> Result<Expr> {
         loop {
             if min_precedence <= 3 && self.peek() == Some(&Token::Operator("<=>".into())) {
                 self.next();
@@ -801,6 +806,22 @@ impl Parser {
                 self.expect_symbol(')')?;
                 filtered_aggregate(op, predicate)
             } else { op };
+            // TPC-H aggregation can be followed by arithmetic such as
+            // SUM(price * quantity) * 0.0001. Keep the SUM in a hidden slot.
+            let hidden = format!("__rustspark_aggregate_expression_{index}");
+            if self.expression_depth >= 20 {
+                return Err(Error::Parse("SQL expression nesting exceeds 20 levels".into()));
+            }
+            self.expression_depth += 1;
+            let result = self.parse_expression_tail(Expr::Column(hidden.clone()), 0);
+            self.expression_depth -= 1;
+            let expression = result?;
+            if expression != Expr::Column(hidden.clone()) {
+                let alias = self.select_alias(format!("expr_{}", index + 1))?;
+                return Ok(SelectItem::AggregateExpr {
+                    aggregate: AggregateItem::new(op, hidden), expression, alias,
+                });
+            }
             let alias = self.select_alias(function.to_ascii_lowercase())?;
             return Ok(SelectItem::Aggregate(AggregateItem::new(op, alias)));
         }
@@ -1014,7 +1035,8 @@ impl Parser {
                 }
             }
         }
-        let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
+        let has_aggregates = select.iter().any(|entry|
+            matches!(entry, SelectItem::Aggregate(_) | SelectItem::AggregateExpr { .. }));
         let grouped = has_aggregates || has_group_by;
         let having = if self.take_word("HAVING") {
             if !grouped {
@@ -1035,6 +1057,7 @@ impl Parser {
                 let mut alias = format!("__rustspark_group_{index}");
                 while select.iter().any(|item| match item {
                     SelectItem::Aggregate(item) => item.alias.eq_ignore_ascii_case(&alias),
+                    SelectItem::AggregateExpr { alias: name, .. } => name.eq_ignore_ascii_case(&alias),
                     SelectItem::Scalar(item) => item.alias.eq_ignore_ascii_case(&alias),
                     SelectItem::Star => false,
                 }) { alias.push('_'); }
@@ -1047,6 +1070,10 @@ impl Parser {
                     SelectItem::Aggregate(item) => {
                         selections.push(Selection::new(Expr::Column(item.alias.clone()), item.alias.clone()));
                         aggregates.push(item);
+                    }
+                    SelectItem::AggregateExpr { aggregate, expression, alias } => {
+                        aggregates.push(aggregate);
+                        selections.push(Selection::new(expression, alias));
                     }
                     SelectItem::Scalar(item) => {
                         let expression = if matches!(item.expression, Expr::Literal(_)) {
