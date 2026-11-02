@@ -379,12 +379,6 @@ fn infer(
         Plan::Aggregate { input, group_by, aggregates } => {
             if group_by.is_empty() {
                 let schema = child(input)?;
-                if aggregates.iter().any(|item| matches!(&item.op,
-                    AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
-                    AggregateOp::AvgDistinct(_))) {
-                    return Err(Error::Unsupported(
-                        "stream global DISTINCT aggregates require a spill path".into()));
-                }
                 let result = aggregate::global_output_schema(&schema, aggregates)?;
                 cache.schemas.borrow_mut().insert(plan as *const Plan, result.clone());
                 return Ok(result);
@@ -1549,5 +1543,36 @@ mod streamed_distinct_adjacency_run_regressions {
         assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod streaming_global_distinct_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    fn run_memory(query: &str) -> Vec<Vec<Value>> {
+        executor::execute(&sql::parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap()
+    }
+
+    fn run_stream(query: &str) -> Vec<Vec<Value>> {
+        execute(&sql::parse_sql(query).unwrap(), &FileCatalog::new(),
+            &StreamOptions::default(), QueryControl::default()).unwrap()
+            .flat_map(|batch| batch.unwrap().rows().unwrap()).collect()
+    }
+
+    #[test]
+    fn global_distinct_count_sum_avg_agree_with_materialized_executor() {
+        for query in [
+            "SELECT COUNT(DISTINCT col1) AS n, SUM(DISTINCT col1) AS s, \
+                AVG(DISTINCT col1) AS a FROM VALUES (1), (1), (3), (NULL)",
+            "SELECT COUNT(DISTINCT col1) AS n, SUM(DISTINCT col1) AS s, \
+                AVG(DISTINCT col1) AS a FROM VALUES (NULL), (NULL)",
+            "SELECT COUNT(DISTINCT col1) AS n, SUM(DISTINCT col1) AS s, \
+                AVG(DISTINCT col1) AS a FROM VALUES (4), (5), (4) WHERE col1 > 4",
+        ] {
+            assert_eq!(run_stream(query), run_memory(query), "{query}");
+        }
     }
 }
