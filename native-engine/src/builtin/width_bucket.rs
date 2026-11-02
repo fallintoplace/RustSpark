@@ -177,7 +177,7 @@ mod integer_bucket_refactor_tests {
     #[test]
     fn matches_exact_bigint_boundaries_in_both_directions() {
         assert_eq!(integer_bucket(i64::MAX - 1, i64::MAX - 2, i64::MAX, 2).unwrap(), 2);
-        assert_eq!(integer_bucket(i64::MIN + 1, i64::MIN + 2, i64::MIN, 2).unwrap(), 1);
+        assert_eq!(integer_bucket(i64::MIN + 1, i64::MIN + 2, i64::MIN, 2).unwrap(), 2);
         assert!(integer_bucket(1, 5, 5, 2).is_err());
     }
 }
