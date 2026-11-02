@@ -1290,3 +1290,46 @@ mod prepared_existence_join_memory_regressions {
         assert_eq!(prepared.probe(&left).unwrap().num_rows(), 2);
     }
 }
+
+#[cfg(test)]
+mod native_composite_hash_join_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    fn batch(rows: Vec<Vec<Value>>, suffix: &str) -> Batch {
+        Batch::from_rows(Schema::new(vec![
+            Field::new(format!("id{suffix}"), DataType::Integer, true),
+            Field::new(format!("region{suffix}"), DataType::Text, true),
+        ]).unwrap(), rows).unwrap()
+    }
+
+    #[test]
+    fn composite_joins_do_not_match_nulls_or_cross_region_keys() {
+        let l = batch(vec![
+            vec![Value::Integer(1), Value::Text("eu".into())],
+            vec![Value::Integer(1), Value::Text("us".into())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(3), Value::Text("eu".into())],
+        ], "l");
+        let r = batch(vec![
+            vec![Value::Integer(1), Value::Text("eu".into())],
+            vec![Value::Integer(1), Value::Text("eu".into())],
+            vec![Value::Integer(2), Value::Null],
+            vec![Value::Integer(4), Value::Text("us".into())],
+        ], "r");
+        let left_keys = &["idl", "regionl"];
+        let right_keys = &["idr", "regionr"];
+        let inner = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Inner).unwrap();
+        assert_eq!(inner.num_rows(), 2);
+        let semi = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Semi).unwrap();
+        assert_eq!(semi.num_rows(), 1);
+        let anti = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Anti).unwrap();
+        assert_eq!(anti.num_rows(), 3);
+        let full = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Full).unwrap();
+        assert_eq!(full.num_rows(), 7);
+        assert_eq!(full.schema().len(), 4);
+        let right = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Right).unwrap();
+        assert_eq!(right.num_rows(), 4);
+        assert!(hash_join_composite(&l, &r, &[], &[], JoinKind::Inner).is_err());
+        assert!(hash_join_composite(&l, &r, &["idl"], &["regionr"], JoinKind::Inner).is_err());
+    }
+}
