@@ -1178,19 +1178,28 @@ pub fn scan_filtered(
 ) -> Result<FilteredParquetScan> {
     use crate::schema::DataType;
     predicate.validate_budget()?;
-    let path = path.as_ref();
-    let expected = file_schema(path)?;
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    // One reader builder can validate the schema, inspect row-group statistics
+    // and decode the selected groups. Do not reopen and reparse the footer.
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let expected = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
     if predicate.output_type(&expected)? != DataType::Boolean {
         return Err(Error::Type("Parquet filter predicate must be boolean".into()));
     }
-    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)
-        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
-    let candidates = int64_candidate_groups(builder.metadata(), builder.schema(), &predicate)?;
-    let scan = scan_with_options(path, batch_size, ParquetScanOptions {
-        row_groups: candidates.as_deref(),
-        ..ParquetScanOptions::default()
-    })?;
-    Ok(FilteredParquetScan { scan, predicate, finished: false })
+    if let Some(selected) = int64_candidate_groups(builder.metadata(), builder.schema(), &predicate)? {
+        builder = builder.with_row_groups(selected);
+    }
+    let rows = bounded_native_batch_rows(batch_size, builder.schema().fields().len());
+    let inner = builder.with_batch_size(rows)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(FilteredParquetScan {
+        scan: ParquetScan { inner, finished: false },
+        predicate,
+        finished: false,
+    })
 }
 
 #[cfg(test)]
