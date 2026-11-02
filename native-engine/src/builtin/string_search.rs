@@ -102,6 +102,18 @@ fn locate_values(needle: &Value, input: &Value, position: Option<&Value>) -> Res
         position
     } else { 1 };
     if position < 1 { return Err(Error::Execution("LOCATE position must be positive".into())); }
+    if position == 1 {
+        // Find first, then count Unicode scalars only in the matched
+        // prefix. An early hit should not scan the entire input just to
+        // determine whether its trailing bytes are ASCII.
+        let Some(found) = text.find(needle) else { return Ok(Value::Integer(0)); };
+        let prefix = &text[..found];
+        let characters = if prefix.is_ascii() { found } else { prefix.chars().count() };
+        let one_based = characters.checked_add(1)
+            .and_then(|n| i64::try_from(n).ok())
+            .ok_or_else(|| Error::Execution("LOCATE result overflow".into()))?;
+        return Ok(Value::Integer(one_based));
+    }
     let offset = usize::try_from(position - 1)
         .map_err(|_| Error::Execution("LOCATE position overflow".into()))?;
     let ascii = text.is_ascii();
@@ -622,5 +634,39 @@ mod shared_split_tail_buffer_tests {
                     "delimiter={delimiter:?} from_end={from_end}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod early_match_locate_tests {
+    use super::*;
+
+    #[test]
+    fn first_position_search_uses_unicode_scalar_positions() {
+        for (text, needle, expected) in [
+            ("é🙂foo", "foo", 3), ("a🙂é", "é", 3),
+            ("abcabc", "abc", 1), ("abc", "", 1),
+            ("abc", "x", 0), ("🙂🙂", "🙂", 1),
+            ("", "", 1), ("", "a", 0),
+        ] {
+            assert_eq!(locate(&[
+                Value::Text(needle.into()), Value::Text(text.into()),
+            ]).unwrap(), Value::Integer(expected), "{text:?} {needle:?}");
+        }
+    }
+
+    #[test]
+    fn early_hits_and_late_unicode_matches_keep_positions() {
+        let text = format!("a{}é", "x".repeat(100_000));
+        assert_eq!(locate(&[Value::Text("a".into()), Value::Text(text.clone())])
+            .unwrap(), Value::Integer(1));
+        assert_eq!(locate(&[Value::Text("é".into()), Value::Text(text.clone())])
+            .unwrap(), Value::Integer(100_002));
+        assert_eq!(locate(&[
+            Value::Text("é".into()), Value::Text(text), Value::Integer(2),
+        ]).unwrap(), Value::Integer(100_002));
+        assert_eq!(locate(&[
+            Value::Null, Value::Text("abc".into()),
+        ]).unwrap(), Value::Null);
     }
 }
