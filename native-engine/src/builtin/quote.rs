@@ -15,6 +15,18 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("QUOTE output exceeds native 16 MiB budget".into()));
     }
 
+    // Plain strings need only the surrounding quotes. Bypass escape
+    // counting and the repeated substring search for the common case.
+    if !text.contains(['\'', '\\']) {
+        let mut output = String::new();
+        output.try_reserve_exact(base_length)
+            .map_err(|_| Error::Execution("QUOTE output allocation failed".into()))?;
+        output.push('\'');
+        output.push_str(text);
+        output.push('\'');
+        return Ok(Value::Text(output));
+    }
+
     // Count escapes before allocation. Besides making output size exact,
     // this prevents late errors after a near-limit String has been built.
     let escapes = text.bytes().filter(|&byte| byte == b'\'' || byte == b'\\').count();
@@ -260,5 +272,34 @@ mod safe_ascii_json_quote_regressions {
             Value::Text(format!("\"{plain}\"")));
         assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
         assert!(json_quote(&[Value::Text("x".repeat(JSON_QUOTE_LIMIT - 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod quote_unescaped_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn quotes_plain_utf8_without_changing_escape_rules() {
+        for value in ["", "plain ASCII", "café🙂", "line\nbreak"] {
+            assert_eq!(evaluate(&[Value::Text(value.into())]).unwrap(),
+                Value::Text(format!("'{value}'")));
+        }
+        assert_eq!(evaluate(&[Value::Text("a'b".into())]).unwrap(),
+            Value::Text("'a\\'b'".into()));
+        assert_eq!(evaluate(&[Value::Text("a\\b".into())]).unwrap(),
+            Value::Text("'a\\\\b'".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn plain_text_respects_the_output_budget() {
+        const LIMIT: usize = 16 * 1024 * 1024;
+        let within = "x".repeat(LIMIT - 2);
+        let result = evaluate(&[Value::Text(within)]).unwrap();
+        let Value::Text(result) = result else { panic!("expected quoted text"); };
+        assert_eq!(result.len(), LIMIT);
+        assert!(matches!(evaluate(&[Value::Text("x".repeat(LIMIT - 1))]),
+            Err(Error::Execution(_))));
     }
 }
