@@ -216,8 +216,22 @@ impl Iterator for ExternalSort {
             return None;
         }
         let capacity = output_buffer_capacity(self.output_rows, self.schema.len());
-        let mut columns = (0..self.schema.len())
-            .map(|_| Vec::with_capacity(capacity)).collect::<Vec<_>>();
+        let mut columns = Vec::new();
+        if columns.try_reserve_exact(self.schema.len()).is_err() {
+            self.finished = true;
+            return Some(Err(Error::Execution("external sort column allocation failed".into())));
+        }
+        for _ in 0..self.schema.len() {
+            let mut column = Vec::new();
+            if column.try_reserve_exact(capacity).is_err() {
+                self.finished = true;
+                return Some(Err(Error::Execution("external sort output allocation failed".into())));
+            }
+            columns.push(column);
+        }
+        // Every column receives exactly one cell per emitted row. Only
+        // attempt a fallible growth when the shortest column is full.
+        let mut next_growth = columns.iter().map(Vec::capacity).min().unwrap_or(usize::MAX);
         let mut row_count = 0usize;
         let mut output_bytes = 0usize;
         while row_count < self.output_rows {
@@ -250,6 +264,21 @@ impl Iterator for ExternalSort {
             if row_count != 0 && output_bytes.saturating_add(bytes) > MAX_OUTPUT_BATCH_BYTES {
                 // Leave this winner and its cursor untouched for the next batch.
                 break;
+            }
+            if row_count == next_growth {
+                let admitted = columns.iter_mut().try_for_each(|column| {
+                    column.try_reserve(1)
+                        .map_err(|_| Error::Execution("external sort output growth failed".into()))
+                });
+                if let Err(error) = admitted {
+                    if row_count == 0 {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                    self.pending_error = Some(error);
+                    break;
+                }
+                next_growth = columns.iter().map(Vec::capacity).min().unwrap_or(usize::MAX);
             }
             let run = &mut self.runs[selected];
             let Some(batch) = run.batch.as_mut() else {
@@ -756,5 +785,33 @@ mod numeric_external_comparator_regressions {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fallible_external_merge_output_regressions {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn crosses_initial_output_capacity_without_losing_sort_order_or_payload() {
+        let schema = Schema::new(vec![
+            Field::new("order_key", DataType::Integer, false),
+            Field::new("payload", DataType::Text, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..600).rev().map(|i| vec![
+            Value::Integer(i),
+            if i % 19 == 0 { Value::Null }
+            else { Value::Text(format!("{i}-{}", "🙂".repeat(128))) },
+        ]).collect()).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("order_key".into()))];
+        let expected = sort::sort(&input, &keys).unwrap().rows().unwrap();
+        let output = external_sort(vec![input], &schema, &keys,
+            std::env::temp_dir(), 127, 600).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        let result = output.iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(result, expected);
+        assert_eq!(output.len(), 1);
+        assert!(output[0].num_rows() > 256);
     }
 }
