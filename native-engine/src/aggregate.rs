@@ -155,6 +155,7 @@ impl State {
 
     fn update(
         &mut self, op: &AggregateOp, batch: &Batch, row: usize,
+        direct_column: Option<usize>,
         total_distinct_bytes: &mut usize, available_distinct_bytes: usize,
     ) -> Result<()> {
         // Direct column aggregates can borrow the typed cell. Only computed
@@ -175,8 +176,8 @@ impl State {
             | AggregateOp::BitXor(expr) 
             | AggregateOp::First(expr, _) 
             | AggregateOp::Last(expr, _) => match expr {
-                Expr::Column(name) =>
-                    Cow::Borrowed(batch.value(row, batch.schema().column(name)?)?),
+                Expr::Column(_) =>
+                    Cow::Borrowed(batch.value(row, direct_column.expect("direct aggregate column is bound"))?),
                 _ => Cow::Owned(expr.evaluate(batch, row)?),
             },
         };
@@ -437,12 +438,34 @@ pub fn global_output_schema(input: &Schema, items: &[AggregateItem]) -> Result<S
 
 /// Update native scalar aggregate states incrementally across input batches.
 /// DISTINCT aggregates need a separate bounded spill path and are rejected here.
+// Resolve direct aggregate operands once per query instead of looking up
+// schema column names for every row and every aggregate state update.
+fn direct_aggregate_column(op: &AggregateOp, schema: &Schema) -> Result<Option<usize>> {
+    let expr = match op {
+        AggregateOp::CountAll => return Ok(None),
+        AggregateOp::Count(expr) | AggregateOp::CountDistinct(expr)
+        | AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr)
+        | AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr)
+        | AggregateOp::Min(expr) | AggregateOp::Max(expr)
+        | AggregateOp::BitAnd(expr) | AggregateOp::BitOr(expr)
+        | AggregateOp::BitXor(expr)
+        | AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) => expr,
+    };
+    match expr {
+        Expr::Column(name) => Ok(Some(schema.column(name)?)),
+        _ => Ok(None),
+    }
+}
+
 pub fn aggregate_global_stream(
     source: impl Iterator<Item = Result<Batch>>,
     input_schema: &Schema, items: &[AggregateItem],
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<Batch> {
     let schema = global_output_schema(input_schema, items)?;
+    let direct_columns = items.iter().map(|item|
+        direct_aggregate_column(&item.op, input_schema)
+    ).collect::<Result<Vec<_>>>()?;
     let mut states = items.iter().map(|item| State::new(&item.op))
         .collect::<Vec<_>>();
     // All global distinct states share a bounded retained-key budget,
@@ -456,8 +479,9 @@ pub fn aggregate_global_stream(
         }
         for row in 0..batch.num_rows() {
             if row % 1024 == 0 { check()?; }
-            for (state, item) in states.iter_mut().zip(items) {
-                state.update(&item.op, &batch, row, &mut distinct_bytes,
+            for ((state, item), &direct_column) in
+                states.iter_mut().zip(items).zip(&direct_columns) {
+                state.update(&item.op, &batch, row, direct_column, &mut distinct_bytes,
                     MAX_GROUP_KEY_BYTES)?;
             }
         }
@@ -518,6 +542,9 @@ pub fn aggregate_with_limits(
         fields.push(Field::new(&item.alias, item.output_type(batch.schema())?, nullable));
     }
     let schema = Schema::new(fields)?;
+    let direct_columns = items.iter().map(|item|
+        direct_aggregate_column(&item.op, batch.schema())
+    ).collect::<Result<Vec<_>>>()?;
     // Fingerprints point to candidate groups. Full key equality resolves
     // hash collisions, while repeated TEXT keys stay borrowed from input.
     let mut group_indices: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -598,8 +625,9 @@ pub fn aggregate_with_limits(
         previous_group = Some(index);
         // Even when a group key is cached, every aggregate expression must
         // be evaluated to preserve per-row counts, sums and execution errors.
-        for (state, item) in groups[index].1.iter_mut().zip(items) {
-            state.update(&item.op, batch, row, &mut retained_distinct_bytes,
+        for ((state, item), &direct_column) in
+            groups[index].1.iter_mut().zip(items).zip(&direct_columns) {
+            state.update(&item.op, batch, row, direct_column, &mut retained_distinct_bytes,
                 max_key_state_bytes.saturating_sub(retained_group_bytes))?;
         }
     }
@@ -1267,5 +1295,48 @@ mod streaming_exact_distinct_aggregates {
                     Ok(())
                 }
             }).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bound_direct_aggregate_column_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_direct_columns_and_leaves_computed_operands_unbound() {
+        let schema = Schema::new(vec![
+            Field::new("group", DataType::Integer, false),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        assert_eq!(direct_aggregate_column(&AggregateOp::Sum(Expr::Column("amount".into())), &schema).unwrap(), Some(1));
+        assert_eq!(direct_aggregate_column(&AggregateOp::CountAll, &schema).unwrap(), None);
+        assert_eq!(direct_aggregate_column(&AggregateOp::Count(Expr::Literal(Value::Integer(1))), &schema).unwrap(), None);
+        assert!(direct_aggregate_column(&AggregateOp::Min(Expr::Column("missing".into())), &schema).is_err());
+    }
+
+    #[test]
+    fn grouped_and_streaming_aggregates_preserve_nulls_and_counts() {
+        let schema = Schema::new(vec![
+            Field::new("group", DataType::Integer, false),
+            Field::new("amount", DataType::Integer, true),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1), Value::Integer(3)],
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(2), Value::Integer(5)],
+        ]).unwrap();
+        let items = vec![
+            AggregateItem::new(AggregateOp::Count(Expr::Column("amount".into())), "n"),
+            AggregateItem::new(AggregateOp::Sum(Expr::Column("amount".into())), "sum"),
+        ];
+        let grouped = aggregate(&batch, &[(Expr::Column("group".into()), "group".into())], &items).unwrap();
+        assert_eq!(grouped.rows().unwrap(), vec![
+            vec![Value::Integer(1), Value::Integer(1), Value::Integer(3)],
+            vec![Value::Integer(2), Value::Integer(1), Value::Integer(5)],
+        ]);
+        let global = aggregate_global_stream(std::iter::once(Ok(batch)), &schema, &items, || Ok(())).unwrap();
+        assert_eq!(global.rows().unwrap(), vec![
+            vec![Value::Integer(2), Value::Integer(8)],
+        ]);
     }
 }
