@@ -211,7 +211,9 @@ impl Batch {
             return self.take_sorted_owned(indices);
         }
         if indices.len() <= self.rows / 8 {
-            let mut last = std::collections::HashMap::with_capacity(indices.len());
+            let mut last = std::collections::HashMap::new();
+            last.try_reserve(indices.len())
+                .map_err(|_| Error::Execution("owned gather sparse index allocation failed".into()))?;
             let mut has_duplicates = false;
             for (position, &index) in indices.iter().enumerate() {
                 if index >= self.rows {
@@ -227,7 +229,10 @@ impl Batch {
             }
             return Ok(self.gather_owned_last_positions(indices, |row| last[&row]));
         }
-        let mut last = vec![usize::MAX; self.rows];
+        let mut last = Vec::new();
+        last.try_reserve_exact(self.rows)
+            .map_err(|_| Error::Execution("owned gather dense index allocation failed".into()))?;
+        last.resize(self.rows, usize::MAX);
         let mut has_duplicates = false;
         for (position, &index) in indices.iter().enumerate() {
             if index >= self.rows {
@@ -242,16 +247,21 @@ impl Batch {
         if indices.windows(2).all(|pair| pair[0] < pair[1]) {
             return self.take_sorted_owned(indices);
         }
-        Ok(self.gather_owned_last_positions(indices, |row| last[row]))
+        self.gather_owned_last_positions(indices, |row| last[row])
     }
 
     // A final reference takes the source cell in place. This avoids a second
     // O(input rows) Vec<Option<Value>> allocation for every source column.
     fn gather_owned_last_positions(
         self, indices: &[usize], last_position: impl Fn(usize) -> usize,
-    ) -> Self {
-        let columns = self.columns.into_iter().map(|mut source| {
-            let mut output = Vec::with_capacity(indices.len());
+    ) -> Result<Self> {
+        let mut columns = Vec::new();
+        columns.try_reserve_exact(self.columns.len())
+            .map_err(|_| Error::Execution("owned gather column allocation failed".into()))?;
+        for mut source in self.columns {
+            let mut output = Vec::new();
+            output.try_reserve_exact(indices.len())
+                .map_err(|_| Error::Execution("owned gather output allocation failed".into()))?;
             for (position, &index) in indices.iter().enumerate() {
                 output.push(if last_position(index) == position {
                     std::mem::replace(&mut source[index], Value::Null)
@@ -259,9 +269,9 @@ impl Batch {
                     source[index].clone()
                 });
             }
-            output
-        }).collect();
-        Self { schema: self.schema, columns, rows: indices.len() }
+            columns.push(output);
+        }
+        Ok(Self { schema: self.schema, columns, rows: indices.len() })
     }
 
     /// Gather unique row indices in any order from an owned batch.
@@ -1089,5 +1099,33 @@ mod ordered_owned_gather_no_index_regressions {
             _ => unreachable!(),
         }
         assert!(identity.take_owned(&[1, 2]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod owned_gather_index_allocation_regressions {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    fn input(rows: usize) -> Batch {
+        let schema = Schema::new(vec![Field::new("txt", DataType::Text, true)]).unwrap();
+        Batch::from_rows(schema, (0..rows).map(|i|
+            vec![if i % 7 == 0 { Value::Null }
+                else { Value::Text(format!("{i}-{}", "🙂".repeat(64))) }]
+        ).collect()).unwrap()
+    }
+
+    #[test]
+    fn sparse_and_dense_gathers_preserve_duplicates_nulls_and_order() {
+        let source = input(128);
+        for indices in [vec![126, 3, 126, 0, 50, 3],
+                        (0..90).rev().chain([0, 7, 3, 0]).collect::<Vec<_>>()] {
+            let expected = source.take(&indices).unwrap();
+            assert_eq!(source.clone().take_owned(&indices).unwrap(), expected);
+        }
+        assert!(source.clone().take_owned(&[128]).is_err());
+        let unique = (0..20).rev().collect::<Vec<_>>();
+        assert_eq!(source.clone().take_owned(&unique).unwrap(),
+                   source.take(&unique).unwrap());
     }
 }
