@@ -60,17 +60,22 @@ fn copy_manifest_text(text: &str) -> Result<String> {
     Ok(output)
 }
 
+fn validate_column_bounds(count: usize, oversized_name: bool) -> Result<()> {
+    if count == 0 || count > MAX_COLUMNS {
+        return Err(Error::Schema("catalog manifest has invalid column count".into()));
+    }
+    if oversized_name {
+        return Err(Error::Schema("catalog manifest column name exceeds 4096 bytes".into()));
+    }
+    Ok(())
+}
+
 fn encode_fields(schema: &Schema) -> Result<Vec<Column>> {
     // The writer must obey the same column bounds as the loader.
     // Otherwise save_atomic can publish metadata that load rejects.
-    if schema.is_empty() || schema.len() > MAX_COLUMNS {
-        return Err(Error::Schema("catalog manifest has invalid column count".into()));
-    }
-    // Apply the spill reader's column-name bound before cloning names into
-    // a second schema representation for the persistent manifest.
-    if schema.fields().iter().any(|field| field.name.len() > MAX_COLUMN_NAME_BYTES) {
-        return Err(Error::Schema("catalog manifest column name exceeds 4096 bytes".into()));
-    }
+    // Validate before copying field names into the persistent manifest.
+    validate_column_bounds(schema.len(),
+        schema.fields().iter().any(|field| field.name.len() > MAX_COLUMN_NAME_BYTES))?;
     let mut encoded = Vec::new();
     encoded.try_reserve_exact(schema.len())
         .map_err(|_| Error::Execution("catalog manifest field allocation failed".into()))?;
@@ -91,12 +96,8 @@ fn encode_fields(schema: &Schema) -> Result<Vec<Column>> {
 }
 
 fn decode_fields(columns: Vec<Column>) -> Result<Schema> {
-    if columns.is_empty() || columns.len() > MAX_COLUMNS {
-        return Err(Error::Schema("catalog manifest has invalid column count".into()));
-    }
-    if columns.iter().any(|column| column.name.len() > MAX_COLUMN_NAME_BYTES) {
-        return Err(Error::Schema("catalog manifest column name exceeds 4096 bytes".into()));
-    }
+    validate_column_bounds(columns.len(),
+        columns.iter().any(|column| column.name.len() > MAX_COLUMN_NAME_BYTES))?;
     let mut fields = Vec::new();
     fields.try_reserve_exact(columns.len())
         .map_err(|_| Error::Execution("catalog manifest decoded field allocation failed".into()))?;
