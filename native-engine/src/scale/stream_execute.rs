@@ -392,11 +392,7 @@ fn infer(
             let source = child(input)?;
             let mut fields = Vec::new();
             for (expr, alias) in group_by {
-                let Expr::Column(name) = expr else {
-                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
-                };
-                let source_field = source.field(source.column(name)?)?;
-                fields.push(Field::new(alias, source_field.data_type, true));
+                fields.push(Field::new(alias, expr.output_type(&source)?, true));
             }
             for item in aggregates {
                 let kind = match &item.op {
@@ -580,14 +576,37 @@ fn lower(
                 return Ok(Box::new(std::iter::once(Ok(result))));
             }
             let mut groups = Vec::with_capacity(group_by.len());
-            for (expr, alias) in group_by {
-                let Expr::Column(name) = expr else {
-                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
-                };
-                groups.push((name.clone(), alias.clone()));
+            let mut computed = Vec::<Selection>::new();
+            // Keep the source columns available to aggregate expressions.
+            // Materialize each computed grouping expression once per row.
+            for field in schema.fields() {
+                computed.push(Selection::new(Expr::Column(field.name.clone()), field.name.clone()));
             }
+            let mut needs_projection = false;
+            for (index, (expr, alias)) in group_by.iter().enumerate() {
+                if let Expr::Column(name) = expr {
+                    groups.push((name.clone(), alias.clone()));
+                } else {
+                    needs_projection = true;
+                    let mut hidden = format!("__rustspark_spill_key_{index}");
+                    while computed.iter().any(|selection|
+                        selection.alias.eq_ignore_ascii_case(&hidden)) {
+                        hidden.push('_');
+                    }
+                    computed.push(Selection::new(expr.clone(), hidden.clone()));
+                    groups.push((hidden, alias.clone()));
+                }
+            }
+            let input_stream = child(input)?;
+            let (input_stream, input_schema): (BatchStream, Schema) = if needs_projection {
+                // Projecting an empty typed batch resolves every computed key
+                // before touching input sources and creates the spill schema.
+                let projected = crate::project::project(&Batch::empty(schema.clone()), &computed)?;
+                let projected_schema = projected.schema().clone();
+                (Box::new(ProjectStream::new(input_stream, computed, control.clone())), projected_schema)
+            } else { (input_stream, schema) };
             let files = grouped_aggregate(
-                child(input)?, schema, &groups, aggregates,
+                input_stream, input_schema, &groups, aggregates,
                 &options.scratch_directory, 16, 200_000, options.batch_rows, control
             )?;
             Ok(Box::new(GroupedOutput {
@@ -1591,40 +1610,44 @@ mod streamed_distinct_adjacency_run_regressions {
 }
 
 #[cfg(test)]
-mod spilled_computed_sort_keys_tests {
+mod spilled_expression_grouping_tests {
     use super::*;
     use crate::{catalog::Catalog, executor, sql};
 
     fn memory_result(sql_text: &str) -> Vec<Vec<Value>> {
-        executor::execute(&sql::parse_sql(sql_text).unwrap(), &Catalog::new())
-            .unwrap().rows().unwrap()
+        let plan = sql::parse_sql(sql_text).unwrap();
+        let batch = executor::execute(&plan, &Catalog::new()).unwrap();
+        batch.rows().unwrap()
     }
 
-    fn stream_result(sql_text: &str) -> Vec<Vec<Value>> {
+    fn spill_result(sql_text: &str) -> Vec<Vec<Value>> {
         let plan = sql::parse_sql(sql_text).unwrap();
-        execute(&plan, &FileCatalog::new(), &StreamOptions {
-            batch_rows: 2,
-            sort_run_rows: 2,
-            ..StreamOptions::default()
-        }, QueryControl::default()).unwrap()
-            .flat_map(|batch| batch.unwrap().rows().unwrap()).collect()
+        let output = execute(&plan, &FileCatalog::new(),
+            &StreamOptions::default(), QueryControl::default()).unwrap();
+        output.flat_map(|batch| batch.unwrap().rows().unwrap()).collect()
+    }
+
+    fn canonical(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        rows
     }
 
     #[test]
-    fn expression_sorts_match_memory_across_many_merge_runs() {
-        for query in [
-            "SELECT col1 AS id, col2 AS tag FROM VALUES (2, 'bbb'), (1, 'a'), (3, 'cc'), (4, 'dddd') ORDER BY col1 * -1",
-            "SELECT col1 AS id, col2 AS tag FROM VALUES (2, 'bbb'), (1, 'a'), (3, 'cc'), (4, 'dddd') ORDER BY LENGTH(col2) DESC, col1",
-            "SELECT col1 AS id, col2 AS tag FROM VALUES (2, 'bbb'), (1, 'a'), (3, 'cc'), (4, 'dddd') ORDER BY col1 % 2, col1",
+    fn computed_integer_and_text_keys_match_in_memory_sql() {
+        for sql in [
+            "SELECT col1 + 1 AS k, SUM(col2) AS total FROM VALUES (1, 2), (2, 3), (1, 5) GROUP BY col1 + 1",
+            "SELECT LOWER(col1) AS k, COUNT(*) AS count FROM VALUES ('ABC'), ('abc'), ('XYZ') GROUP BY LOWER(col1)",
+            "SELECT col1 * 2 AS k, COUNT(*) AS count FROM VALUES (1), (2), (1), (NULL) GROUP BY col1 * 2",
         ] {
-            assert_eq!(stream_result(query), memory_result(query), "{query}");
+            assert_eq!(canonical(spill_result(sql)), canonical(memory_result(sql)), "{sql}");
         }
     }
 
     #[test]
-    fn computed_sort_keys_are_not_visible_and_nulls_keep_order() {
-        let query = "SELECT col1 AS id FROM VALUES (NULL), (3), (1) ORDER BY col1 + 1 NULLS FIRST";
-        assert_eq!(stream_result(query), memory_result(query));
-        assert!(stream_result(query).iter().all(|row| row.len() == 1));
+    fn mixed_column_and_expression_group_keys_preserve_values() {
+        let sql = "SELECT col1 AS region, col2 + 1 AS bucket, SUM(col3) AS total \
+            FROM VALUES ('east', 1, 4), ('east', 1, 6), ('west', 1, 3) \
+            GROUP BY col1, col2 + 1";
+        assert_eq!(canonical(spill_result(sql)), canonical(memory_result(sql)));
     }
 }
