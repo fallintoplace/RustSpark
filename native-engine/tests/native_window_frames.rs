@@ -74,3 +74,23 @@ fn rejects_integer_overflow_and_nonnumeric_sums() {
     assert!(aggregate_rows_frame(Batch::empty(schema), &[], &[], "amount", 1, 0,
         FrameAggregate::Sum, "amount").is_err());
 }
+
+
+#[test]
+fn floating_windows_recover_after_nan_and_infinities_leave_frame() {
+    let schema = Schema::new(vec![Field::new("amount", DataType::Float, true)]).unwrap();
+    let batch = Batch::from_rows(schema, vec![
+        vec![Value::Float(f64::NAN)],
+        vec![Value::Float(f64::INFINITY)],
+        vec![Value::Float(f64::NEG_INFINITY)],
+        vec![Value::Float(2.0)],
+        vec![Value::Float(3.0)],
+    ]).unwrap();
+    let values = aggregate_rows_frame(batch, &[], &[], "amount", 1, 0,
+        FrameAggregate::Sum, "sum").unwrap().column(1).unwrap().to_vec();
+    assert!(matches!(values[0], Value::Float(value) if value.is_nan()));
+    assert!(matches!(values[1], Value::Float(value) if value.is_nan()));
+    assert!(matches!(values[2], Value::Float(value) if value.is_nan()));
+    assert!(matches!(values[3], Value::Float(value) if value == f64::NEG_INFINITY));
+    assert_eq!(values[4], Value::Float(5.0));
+}
