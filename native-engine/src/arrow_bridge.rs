@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
+    Array, ArrayRef, BooleanArray, Date64Array, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
     builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
@@ -18,6 +18,29 @@ use crate::{
 };
 
 const MAX_ARROW_DECODED_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Convert Arrow DATE64's millisecond epoch day to ISO date text.
+/// Keep only midnight-aligned values to avoid silently losing time-of-day.
+fn date64_to_iso(milliseconds: i64) -> Result<String> {
+    const DAY_MS: i64 = 86_400_000;
+    if milliseconds.rem_euclid(DAY_MS) != 0 {
+        return Err(Error::Type("DATE64 has a non-midnight time component".into()));
+    }
+    let z = milliseconds.div_euclid(DAY_MS) + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    if !(1..=9999).contains(&year) {
+        return Err(Error::Unsupported("DATE64 date outside ISO year range".into()));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
 
 fn needs_large_utf8(payload_bytes: usize) -> bool {
     payload_bytes > i32::MAX as usize
@@ -151,7 +174,7 @@ pub fn schema_from_arrow(input: &ArrowSchema) -> Result<Schema> {
             ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 |
             ArrowType::UInt64 => DataType::Integer,
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
-            ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
+            ArrowType::Utf8 | ArrowType::LargeUtf8 | ArrowType::Date64 => DataType::Text,
             ArrowType::Dictionary(key, value)
                 if matches!(key.as_ref(),
                     ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
@@ -268,6 +291,18 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     if values.is_null(row) { Value::Null }
                     else { Value::Float(values.value(row)) }
                 }).collect())
+            }
+            ArrowType::Date64 => {
+                let values = array.as_any().downcast_ref::<Date64Array>()
+                    .ok_or_else(|| Error::Type("invalid Date64 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Ok(Value::Null) }
+                    else {
+                        remaining_text_bytes = remaining_text_bytes.checked_sub(10)
+                            .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                        Ok(Value::Text(date64_to_iso(values.value(row))?))
+                    }
+                }).collect::<Result<Vec<_>>>()?)
             }
             ArrowType::Utf8 => {
                 let values = array.as_any().downcast_ref::<StringArray>()
@@ -735,5 +770,32 @@ mod direct_arrow_metadata_contract_tests {
             ArrowField::new("bytes", ArrowType::Binary, true),
         ]);
         assert!(schema_from_arrow(&unsupported).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_arrow_date64_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_midnight_aligned_dates_and_nulls() {
+        let record = RecordBatch::try_from_iter(vec![(
+            "date", Arc::new(Date64Array::from(vec![
+                Some(-86_400_000), Some(0), Some(951_782_400_000), None,
+            ])) as ArrayRef,
+        )]).unwrap();
+        let decoded = from_arrow(&record).unwrap();
+        assert_eq!(decoded.column(0).unwrap(), &[
+            Value::Text("1969-12-31".into()),
+            Value::Text("1970-01-01".into()),
+            Value::Text("2000-02-29".into()),
+            Value::Null,
+        ]);
+    }
+
+    #[test]
+    fn rejects_subday_values_and_unrepresentable_years() {
+        assert!(date64_to_iso(1).is_err());
+        assert!(date64_to_iso(i64::MAX - i64::MAX.rem_euclid(86_400_000)).is_err());
     }
 }
