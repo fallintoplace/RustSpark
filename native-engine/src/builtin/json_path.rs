@@ -36,6 +36,24 @@ pub(super) fn serialize_bounded(value: &serde_json::Value, limit: usize) -> Resu
     Ok(String::from_utf8(writer.bytes).expect("serde_json writes UTF-8"))
 }
 
+/// Parse the digits and closing bracket of one array segment.
+fn parse_array_index(rest: &str) -> Result<(usize, &str)> {
+    let end = rest.find(']')
+        .ok_or_else(|| Error::Parse("JSON array index missing ]".into()))?;
+    let digits = &rest[..end];
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::Parse("JSON array indices must be unsigned integers".into()));
+    }
+    // Avoid generic decimal parsing for common single-digit JSON arrays.
+    let index = if digits.len() == 1 {
+        usize::from(digits.as_bytes()[0] - b'0')
+    } else {
+        digits.parse::<usize>()
+            .map_err(|_| Error::Parse("JSON array index overflow".into()))?
+    };
+    Ok((index, &rest[end + 1..]))
+}
+
 /// Support explicit, bounded $.field[0].nested JSON paths.
 pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
     -> Result<Option<&'a serde_json::Value>>
@@ -121,21 +139,9 @@ pub(super) fn lookup<'a>(mut node: Option<&'a serde_json::Value>, path: &str)
                 tail = &rest[end + 1..];
                 continue;
             }
-            let end = rest.find(']')
-                .ok_or_else(|| Error::Parse("JSON array index missing ]".into()))?;
-            let digits = &rest[..end];
-            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(Error::Parse("JSON array indices must be unsigned integers".into()));
-            }
-            // Avoid generic decimal parsing for common single-digit JSON arrays.
-            let index = if digits.len() == 1 {
-                usize::from(digits.as_bytes()[0] - b'0')
-            } else {
-                digits.parse::<usize>()
-                    .map_err(|_| Error::Parse("JSON array index overflow".into()))?
-            };
+            let (index, next) = parse_array_index(rest)?;
             node = node.and_then(|value| value.get(index));
-            tail = &rest[end + 1..];
+            tail = next;
         } else {
             return Err(Error::Parse("unsupported native JSON path syntax".into()));
         }
@@ -235,5 +241,20 @@ mod fallible_json_writer_admission_tests {
         assert_eq!(writer.bytes, b"abc");
         writer.write_all(b"def").unwrap();
         assert_eq!(writer.bytes, b"abcdef");
+    }
+}
+
+#[cfg(test)]
+mod array_segment_parser_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_following_member_path_and_existing_error_messages() {
+        assert_eq!(parse_array_index("12].name").unwrap(), (12, ".name"));
+        assert_eq!(parse_array_index("0][1]").unwrap(), (0, "[1]"));
+        assert!(parse_array_index("12").unwrap_err().to_string().contains("missing ]"));
+        assert!(parse_array_index("-1]").unwrap_err().to_string().contains("unsigned"));
+        assert!(parse_array_index(&format!("{}]", "9".repeat(100)))
+            .unwrap_err().to_string().contains("overflow"));
     }
 }
