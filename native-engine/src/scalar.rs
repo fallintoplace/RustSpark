@@ -139,6 +139,16 @@ mod tests {
     }
 }
 
+fn parse_text_boolean(input: &str) -> Option<bool> {
+    let input = input.trim();
+    match input {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ if input.eq_ignore_ascii_case("true") => Some(true),
+        _ if input.eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
+}
 
 impl Value {
     /// Convert native scalar values to an explicit SQL column type.
@@ -177,14 +187,9 @@ impl Value {
             (Self::Text(value), DataType::Float) => value.trim().parse::<f64>().ok()
                 .filter(|n| n.is_finite()).map(Self::Float)
                 .ok_or_else(|| Error::Type("invalid DOUBLE cast".into())),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("true") =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("false") =>
-                Ok(Self::Boolean(false)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "1" =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "0" =>
-                Ok(Self::Boolean(false)),
+            (Self::Text(value), DataType::Boolean) => parse_text_boolean(value)
+                .map(Self::Boolean)
+                .ok_or_else(|| Error::Type("unsupported native CAST conversion".into())),
             _ => Err(Error::Type("unsupported native CAST conversion".into())),
         }
     }
@@ -256,5 +261,22 @@ mod consolidated_native_cast_tests {
         assert_eq!(Value::Float(-0.0).cast_to(DataType::Text).unwrap(), Value::Text("-0.0".into()));
         assert_eq!(Value::Float(1.25).cast_to(DataType::Text).unwrap(), Value::Text("1.25".into()));
         assert_eq!(Value::Integer(1).cast_to(DataType::Text).unwrap(), Value::Text("1".into()));
+    }
+}
+
+#[cfg(test)]
+mod text_boolean_cast_refactor_tests {
+    use super::*;
+    use crate::schema::DataType;
+
+    #[test]
+    fn accepts_only_supported_boolean_literals_after_trimming() {
+        for (input, expected) in [(" TRUE ", true), ("FaLsE", false), (" 1 ", true), ("0", false)] {
+            assert_eq!(Value::Text(input.into()).cast_to(DataType::Boolean).unwrap(),
+                Value::Boolean(expected));
+        }
+        for input in ["yes", "2", "", " true false "] {
+            assert!(Value::Text(input.into()).cast_to(DataType::Boolean).is_err());
+        }
     }
 }
