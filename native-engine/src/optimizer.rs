@@ -130,6 +130,21 @@ pub fn optimize(plan: Plan) -> Plan {
                     count,
                 }
             } else {
+                // Each UNION ALL arm can contribute at most OFFSET + LIMIT rows.
+                // Apply a bounded prefix to both arms without changing output order.
+                // Never rewrite overflowing windows: the executor must still reject them.
+                let prefix = count.and_then(|limit| offset.checked_add(limit));
+                let child = match (child, prefix) {
+                    (Plan::UnionAll { left, right }, Some(prefix)) => Plan::UnionAll {
+                        left: Box::new(optimize(Plan::Limit {
+                            input: left, offset: 0, count: Some(prefix),
+                        })),
+                        right: Box::new(optimize(Plan::Limit {
+                            input: right, offset: 0, count: Some(prefix),
+                        })),
+                    },
+                    (other, _) => other,
+                };
                 Plan::Limit { input: Box::new(child), offset, count }
             }
         }
@@ -425,5 +440,62 @@ mod filter_before_distinct_regressions {
         };
         let original = Plan::Distinct { input: Box::new(Plan::scan("t")) }.filter(predicate);
         assert_eq!(optimize(original.clone()), original);
+    }
+}
+
+#[cfg(test)]
+mod bounded_union_limit_pushdown_tests {
+    use super::*;
+    use crate::{
+        batch::Batch, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn limits_both_union_inputs_without_changing_global_offset_or_order() {
+        let source = Plan::UnionAll {
+            left: Box::new(Plan::scan("left_input")),
+            right: Box::new(Plan::scan("right_input")),
+        };
+        let plan = source.clone().limit(7, Some(5));
+        let optimized = optimize(plan.clone());
+        let Plan::Limit { input, offset: 7, count: Some(5) } = &optimized else {
+            panic!("expected outer LIMIT");
+        };
+        let Plan::UnionAll { left, right } = input.as_ref() else {
+            panic!("expected a bounded UNION ALL");
+        };
+        assert_eq!(**left, Plan::scan("left_input").limit(0, Some(12)));
+        assert_eq!(**right, Plan::scan("right_input").limit(0, Some(12)));
+
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        for (name, start) in [("left_input", 0), ("right_input", 100)] {
+            let rows = (start..start + 20).map(|n| vec![Value::Integer(n)]).collect();
+            catalog.register(name, Batch::from_rows(schema.clone(), rows).unwrap()).unwrap();
+        }
+        let expected = (7..12).map(|n| vec![Value::Integer(n)]).collect::<Vec<_>>();
+        assert_eq!(executor::execute(&plan, &catalog).unwrap().rows().unwrap(), expected);
+
+        // The second input must still contribute when OFFSET crosses the first input.
+        let across = source.limit(18, Some(6));
+        let rows = executor::execute(&across, &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(18)], vec![Value::Integer(19)],
+            vec![Value::Integer(100)], vec![Value::Integer(101)],
+            vec![Value::Integer(102)], vec![Value::Integer(103)],
+        ]);
+    }
+
+    #[test]
+    fn unbounded_or_overflowing_windows_are_not_pushed() {
+        let source = Plan::UnionAll {
+            left: Box::new(Plan::scan("a")),
+            right: Box::new(Plan::scan("b")),
+        };
+        assert_eq!(optimize(source.clone().limit(1, None)),
+            source.clone().limit(1, None));
+        assert_eq!(optimize(source.clone().limit(usize::MAX, Some(1))),
+            source.limit(usize::MAX, Some(1)));
     }
 }

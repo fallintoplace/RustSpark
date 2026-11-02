@@ -127,14 +127,11 @@ pub(crate) fn scan_checked_open_file_pruned(
     for index in 0..builder.metadata().num_row_groups() {
         let group = builder.metadata().row_group(index);
         let mut columns = std::collections::HashMap::new();
-        // Only signed INT64 and INT32 flat root columns are interpreted.
-        // Nested and logical unsigned columns need their own sort semantics.
+        // Only flat scalar roots with matching physical statistics are safe.
+        // Float NaN/Infinity bounds are not suitable for min/max proofs.
+        // Nested, unsigned, and otherwise ambiguous logical types keep groups.
         for (column, field) in builder.schema().fields().iter().enumerate() {
-            if !matches!(field.data_type(),
-                arrow_schema::DataType::Int64 | arrow_schema::DataType::Int32) ||
-                column >= group.num_columns() {
-                continue;
-            }
+            if column >= group.num_columns() { continue; }
             let Some(stats) = group.column(column).statistics() else { continue; };
             let (min, max) = match (field.data_type(), stats) {
                 (arrow_schema::DataType::Int64, Statistics::Int64(stats)) =>
@@ -143,6 +140,19 @@ pub(crate) fn scan_checked_open_file_pruned(
                 (arrow_schema::DataType::Int32, Statistics::Int32(stats)) =>
                     (stats.min_opt().copied().map(|n| Value::Integer(n as i64)),
                      stats.max_opt().copied().map(|n| Value::Integer(n as i64))),
+                (arrow_schema::DataType::Boolean, Statistics::Boolean(stats)) =>
+                    (stats.min_opt().copied().map(Value::Boolean),
+                     stats.max_opt().copied().map(Value::Boolean)),
+                (arrow_schema::DataType::Float32, Statistics::Float(stats)) =>
+                    (stats.min_opt().filter(|n| n.is_finite())
+                        .map(|n| Value::Float(f64::from(*n))),
+                     stats.max_opt().filter(|n| n.is_finite())
+                        .map(|n| Value::Float(f64::from(*n)))),
+                (arrow_schema::DataType::Float64, Statistics::Double(stats)) =>
+                    (stats.min_opt().filter(|n| n.is_finite())
+                        .map(|n| Value::Float(*n)),
+                     stats.max_opt().filter(|n| n.is_finite())
+                        .map(|n| Value::Float(*n))),
                 _ => continue,
             };
             let Some(nulls) = stats.null_count_opt() else { continue; };
@@ -1242,5 +1252,58 @@ mod parquet_predicate_pushdown_tests {
         ] {
             assert!(!crate::pruning::can_skip(&summary, "n", &predicate));
         }
+    }
+}
+
+#[cfg(test)]
+mod boolean_float_parquet_pruning_tests {
+    use super::*;
+    use crate::{
+        batch::Batch, expr::{BinaryOp, Expr}, scalar::Value,
+        schema::{DataType, Field, Schema},
+    };
+    use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+
+    #[test]
+    fn prunes_boolean_and_float_row_groups_without_dropping_matches() {
+        let path = std::env::temp_dir().join(format!(
+            "native-parquet-bool-float-{}-{}.parquet",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let schema = Schema::new(vec![
+            Field::new("flag", DataType::Boolean, false),
+            Field::new("score", DataType::Float, false),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), (0..6).map(|n| {
+            vec![Value::Boolean(n >= 2), Value::Float(f64::from(n) + 7.0)]
+        }).collect()).unwrap();
+        let arrow = crate::arrow_bridge::to_arrow(&input).unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2)).build();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(), arrow.schema(), Some(props)
+        ).unwrap();
+        writer.write(&arrow).unwrap();
+        writer.close().unwrap();
+
+        let predicate = Expr::binary(
+            Expr::binary(Expr::Column("flag".into()), BinaryOp::Equal,
+                Expr::Literal(Value::Boolean(true))),
+            BinaryOp::And,
+            Expr::binary(Expr::Column("score".into()), BinaryOp::Greater,
+                Expr::Literal(Value::Float(10.0))),
+        );
+        let scan = scan_checked_open_file_pruned(
+            File::open(&path).unwrap(), 2, &schema, &predicate
+        ).unwrap();
+        let rows = scan.collect::<Result<Vec<_>>>().unwrap().into_iter()
+            .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Boolean(true), Value::Float(11.0)],
+            vec![Value::Boolean(true), Value::Float(12.0)],
+        ]);
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -47,34 +47,54 @@ where
             .map_err(|_| Error::Execution("local stage slot allocation failed".into()))?;
         slots.resize_with(stage.partitions, || None::<T>);
         let results = Mutex::new(slots);
-        std::thread::scope(|scope| {
+        let spawn_result: Result<()> = std::thread::scope(|scope| {
             for _ in 0..max_workers.min(stage.partitions) {
                 let next = &next;
                 let failed = &failed;
                 let error = &error;
                 let results = &results;
                 let task = &run;
-                scope.spawn(move || {
+                // Worker tasks may come from an embedding application.
+                // Report their panics as query failures instead of unwinding the
+                // entire scoped pool and losing the original stage context.
+                let spawn = std::thread::Builder::new().spawn_scoped(scope, move || {
                     loop {
                         if failed.load(Ordering::Acquire) { break; }
                         let partition = next.fetch_add(1, Ordering::Relaxed);
                         if partition >= stage.partitions { break; }
-                        match task(stage_id, partition) {
-                            Ok(value) => {
+                        let outcome = std::panic::catch_unwind(
+                            std::panic::AssertUnwindSafe(|| task(stage_id, partition))
+                        );
+                        match outcome {
+                            Ok(Ok(value)) => {
                                 results.lock().expect("stage results mutex poisoned")[partition]
                                     = Some(value);
                             }
-                            Err(err) => {
+                            Ok(Err(err)) => {
                                 if !failed.swap(true, Ordering::AcqRel) {
                                     *error.lock().expect("stage error mutex poisoned") = Some(err);
+                                }
+                                break;
+                            }
+                            Err(_) => {
+                                if !failed.swap(true, Ordering::AcqRel) {
+                                    *error.lock().expect("stage error mutex poisoned") = Some(
+                                        Error::Execution("native local stage worker panicked".into())
+                                    );
                                 }
                                 break;
                             }
                         }
                     }
                 });
+                if spawn.is_err() {
+                    failed.store(true, Ordering::Release);
+                    return Err(Error::Execution("failed to spawn local stage worker".into()));
+                }
             }
+            Ok(())
         });
+        spawn_result?;
         if let Some(err) = error.into_inner()
             .map_err(|_| Error::Execution("local stage error lock poisoned".into()))? {
             return Err(err);
@@ -88,4 +108,37 @@ where
         }
     }
     Ok(all)
+}
+
+#[cfg(test)]
+mod local_worker_failure_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn user_task_panic_becomes_a_query_error_without_unwinding_caller() {
+        let graph = StageGraph::new(vec![Stage {
+            id: 3, dependencies: vec![], partitions: 4,
+        }]).unwrap();
+        let result = execute_local_graph(&graph, 4, 4, |_stage, part| -> Result<usize> {
+            if part == 2 { panic!("task crashed"); }
+            Ok(part)
+        });
+        assert!(result.unwrap_err().to_string().contains("panicked"));
+    }
+
+    #[test]
+    fn multiple_stages_keep_deterministic_partition_order() {
+        let graph = StageGraph::new(vec![
+            Stage { id: 5, dependencies: vec![1], partitions: 3 },
+            Stage { id: 1, dependencies: vec![], partitions: 2 },
+        ]).unwrap();
+        let rows = execute_local_graph(&graph, 3, 5, |stage, part| {
+            Ok(format!("{stage}:{part}"))
+        }).unwrap();
+        assert_eq!(rows, vec![
+            (1, 0, "1:0".to_owned()), (1, 1, "1:1".to_owned()),
+            (5, 0, "5:0".to_owned()), (5, 1, "5:1".to_owned()),
+            (5, 2, "5:2".to_owned()),
+        ]);
+    }
 }

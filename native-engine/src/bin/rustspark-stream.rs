@@ -33,6 +33,7 @@ struct Args {
     table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
     explain: bool,
+    query_timeout: Option<u64>,
 }
 
 fn parse_schema(text: &str) -> Result<Schema> {
@@ -70,6 +71,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut record_bytes = 8 * 1024 * 1024;
     let mut scratch = env::temp_dir();
     let mut explain = false;
+    let mut query_timeout = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" { return Ok(None); }
@@ -113,6 +115,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "--max-record-bytes" => record_bytes = value.parse()
                 .map_err(|_| Error::Parse("invalid --max-record-bytes".into()))?,
             "--scratch-dir" => scratch = PathBuf::from(value),
+            "--query-timeout" => {
+                let seconds = value.parse::<u64>()
+                    .map_err(|_| Error::Parse("--query-timeout requires positive seconds".into()))?;
+                if seconds == 0 || query_timeout.replace(seconds).is_some() {
+                    return Err(Error::Parse("--query-timeout must be positive and unique".into()));
+                }
+            },
             _ => return Err(Error::Parse(format!("unknown option: {flag}"))),
         }
     }
@@ -141,7 +150,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     Ok(Some(Args {
         csv, parquet, catalog_manifest, parquet_tables,
         table, schema, sql, batch_rows, record_bytes, scratch,
-        explain,
+        explain, query_timeout,
     }))
 }
 
@@ -208,8 +217,13 @@ fn write_csv(
 
 fn run() -> Result<()> {
     let Some(args) = parse_args(env::args().skip(1))? else {
-        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE | --parquet-table NAME=FILE [--parquet-table NAME=FILE ...] | --catalog-manifest FILE) --sql QUERY");
+        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE | --parquet-table NAME=FILE [--parquet-table NAME=FILE ...] | --catalog-manifest FILE) --sql QUERY [--query-timeout SECONDS]");
         return Ok(());
+    };
+    let control = if let Some(seconds) = args.query_timeout {
+        QueryControl::with_timeout(std::time::Duration::from_secs(seconds))?
+    } else {
+        QueryControl::default()
     };
     let mut catalog = if let Some(path) = &args.catalog_manifest {
         catalog_manifest::load(path)?
@@ -236,10 +250,12 @@ fn run() -> Result<()> {
         print!("{}", graph.explain_text());
         return Ok(());
     }
-    let input = stream_execute::execute(&plan, &catalog, &options, QueryControl::default())?;
+    control.check()?;
+    let input = stream_execute::execute(&plan, &catalog, &options, control.clone())?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    write_csv(&schema, input, &mut output)
+    write_csv(&schema, input, &mut output)?;
+    control.check()
 }
 
 fn main() -> ExitCode {
@@ -387,5 +403,32 @@ mod explain_cli_regressions {
             .unwrap().unwrap();
         assert!(parsed.explain);
         assert_eq!(parsed.sql, "SELECT * FROM data");
+    }
+}
+
+#[cfg(test)]
+mod streamed_deadline_contract_tests {
+    use super::*;
+
+    #[test]
+    fn positive_timeout_is_parsed_and_invalid_deadlines_rejected() {
+        let parse = |options: &[&str]| parse_args(options.iter().map(|s| (*s).to_owned()));
+        let base = ["--parquet", "data.parquet", "--sql", "SELECT * FROM data"];
+        let valid = parse(&["--parquet", "data.parquet", "--sql", "SELECT * FROM data",
+            "--query-timeout", "9"]).unwrap().unwrap();
+        assert_eq!(valid.query_timeout, Some(9));
+        assert_eq!(parse(&base).unwrap().unwrap().query_timeout, None);
+        for timeout in ["0", "-2", "not-a-number", "1.5"] {
+            assert!(parse(&["--parquet", "data.parquet", "--sql", "SELECT * FROM data",
+                "--query-timeout", timeout]).is_err());
+        }
+        assert!(parse(&["--parquet", "data.parquet", "--sql", "SELECT * FROM data",
+            "--query-timeout", "2", "--query-timeout", "3"]).is_err());
+    }
+
+    #[test]
+    fn stream_control_rejects_an_expired_deadline() {
+        let control = QueryControl::with_timeout(std::time::Duration::ZERO).unwrap();
+        assert!(control.check().unwrap_err().to_string().contains("deadline"));
     }
 }

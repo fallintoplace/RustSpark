@@ -33,6 +33,7 @@ struct Args {
     jsonl: bool,
     json_array: bool,
     max_rows: Option<usize>,
+    query_timeout: Option<u64>,
 }
 
 const MAX_SQL_FILE_BYTES: u64 = 1024 * 1024;
@@ -51,7 +52,7 @@ fn read_sql_file(path: &Path) -> Result<String> {
 }
 
 fn usage() -> &'static str {
-    "Usage: rustspark-native (--csv FILE | --parquet FILE | --json FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
+    "Usage: rustspark-native (--csv FILE | --parquet FILE | --json FILE | --source TABLE=FILE [--source TABLE=FILE ...]) [--table NAME] (--sql QUERY | --sql-file FILE) [--stream] [--csv-schema NAME:TYPE,...] [--query-timeout SECONDS] [--jsonl]\n     Native --stream supports SELECT, WHERE, and LIMIT over bounded CSV or Parquet batches.\n     Parquet execution uses bounded in-memory batches (up to 1,000,000 rows).\n     Supported native scalar types: text, bool, int64, float64."
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
@@ -67,6 +68,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut jsonl = false;
     let mut json_array = false;
     let mut max_rows = None;
+    let mut query_timeout = None;
     let mut stdout_format_seen = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -127,6 +129,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 sources.push((table_name.to_string(), path));
             },
             "--table" => table = value,
+            "--query-timeout" => {
+                let seconds = value.parse::<u64>()
+                    .map_err(|_| Error::Parse("--query-timeout requires positive seconds".into()))?;
+                if seconds == 0 || query_timeout.replace(seconds).is_some() {
+                    return Err(Error::Parse("--query-timeout must be positive and unique".into()));
+                }
+            },
             "--max-rows" => {
                 let rows = value.parse::<usize>()
                     .map_err(|_| Error::Parse("--max-rows requires a nonnegative integer".into()))?;
@@ -188,6 +197,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if stream && !sources.is_empty() {
         return Err(Error::Unsupported("--stream does not yet support multiple file sources".into()));
     }
+    if stream && query_timeout.is_some() {
+        return Err(Error::Unsupported("--query-timeout is not supported by --stream; use rustspark-stream".into()));
+    }
     let sql = match (sql, sql_file) {
         (Some(query), None) => query,
         (None, Some(path)) => read_sql_file(&path)?,
@@ -196,7 +208,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if sql.trim().is_empty() {
         return Err(Error::Parse("SQL query cannot be empty".into()));
     }
-    Ok(Some(Args { csv, parquet, json, sources, table, sql, stream, csv_schema, jsonl, json_array, max_rows }))
+    Ok(Some(Args {
+        csv, parquet, json, sources, table, sql, stream, csv_schema,
+        jsonl, json_array, max_rows, query_timeout,
+    }))
 }
 
 
@@ -510,6 +525,16 @@ fn run() -> Result<()> {
     if args.stream {
         return run_stream(&args);
     }
+    // Start the deadline before loading inputs so expensive scan setup
+    // cannot extend the query's allowed execution window.
+    let guard = if let Some(seconds) = args.query_timeout {
+        rustspark_native::cancel::QueryGuard::with_timeout(
+            rustspark_native::cancel::Cancellation::new(),
+            std::time::Duration::from_secs(seconds),
+        )?
+    } else {
+        rustspark_native::cancel::QueryGuard::default()
+    };
     let mut catalog = Catalog::new();
     if args.sources.is_empty() {
         let data = if let Some(path) = &args.csv {
@@ -535,7 +560,9 @@ fn run() -> Result<()> {
         }
     }
     let plan = sql::parse_sql(&args.sql)?;
-    let batch = executor::execute(&plan, &catalog)?;
+    let batch = executor::execute_with_guard(
+        &plan, &catalog, executor::ExecutionOptions::default(), &guard,
+    )?;
     let batch = if let Some(rows) = args.max_rows {
         batch.slice_rows(0, rows.min(batch.num_rows()))?
     } else { batch };
@@ -894,5 +921,39 @@ mod bounded_owned_parquet_materialization_tests {
             vec![Value::Integer(3)]
         ]).unwrap();
         assert!(collect_parquet_batches(base, [Ok(batch)], 10, 10000).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cli_deadline_contract_tests {
+    use super::*;
+
+    #[test]
+    fn query_timeout_accepts_positive_seconds_and_rejects_duplicates() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(|s| (*s).to_string()));
+        let valid = parse(&["--csv", "t.csv", "--sql", "SELECT 1",
+            "--query-timeout", "10"]).unwrap().unwrap();
+        assert_eq!(valid.query_timeout, Some(10));
+        for value in ["0", "-1", "1.5", "invalid"] {
+            assert!(parse(&["--csv", "t.csv", "--sql", "SELECT 1",
+                "--query-timeout", value]).is_err());
+        }
+        assert!(parse(&["--csv", "t.csv", "--sql", "SELECT 1",
+            "--query-timeout", "2", "--query-timeout", "3"]).is_err());
+        assert!(parse(&["--csv", "t.csv", "--sql", "SELECT 1",
+            "--stream", "--query-timeout", "2"]).is_err());
+    }
+
+    #[test]
+    fn expired_guard_is_honored_by_materialized_executor() {
+        let plan = sql::parse_sql("SELECT 1 AS n").unwrap();
+        let guard = rustspark_native::cancel::QueryGuard::with_timeout(
+            rustspark_native::cancel::Cancellation::new(),
+            std::time::Duration::ZERO,
+        ).unwrap();
+        let err = executor::execute_with_guard(
+            &plan, &Catalog::new(), executor::ExecutionOptions::default(), &guard,
+        ).unwrap_err();
+        assert!(err.to_string().contains("deadline"));
     }
 }
