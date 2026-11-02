@@ -16,6 +16,20 @@ fn bounded_substring_index_result(text: &str) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
+fn trailing_delimiter_suffix<'a>(
+    text: &'a str, delimiter: &str, positions: &mut [usize],
+) -> &'a str {
+    let from_end = positions.len();
+    debug_assert!(from_end > 0);
+    let mut seen = 0usize;
+    for (position, _) in text.match_indices(delimiter) {
+        positions[seen % from_end] = position;
+        seen += 1;
+    }
+    if seen < from_end { text }
+    else { &text[positions[seen % from_end] + delimiter.len()..] }
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -38,39 +52,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .map_or(text, |(position, _)| &text[position + delimiter.len()..]);
         return bounded_substring_index_result(tail);
     }
-    if (-16..=-2).contains(&count) {
-        // Track only the requested trailing delimiter positions. Forward
-        // match_indices preserves the nonoverlapping split contract even
-        // when the delimiter can overlap with itself.
+    if (-256..=-2).contains(&count) {
+        // Forward match order is required for self-overlapping delimiters.
         let from_end = (-count) as usize;
-        let mut recent = [0_usize; 16];
-        let mut seen = 0usize;
-        for (position, _) in text.match_indices(delimiter) {
-            recent[seen % from_end] = position;
-            seen += 1;
-        }
-        let suffix = if seen < from_end {
-            text
+        let suffix = if from_end <= 16 {
+            let mut positions = [0_usize; 16];
+            trailing_delimiter_suffix(text, delimiter, &mut positions[..from_end])
         } else {
-            &text[recent[seen % from_end] + delimiter.len()..]
-        };
-        return bounded_substring_index_result(suffix);
-    }
-    if (-256..=-17).contains(&count) {
-        // For moderately deep tail lookups, one pass and a bounded position
-        // ring beat counting every match then scanning them all again.
-        // Forward match_indices remains necessary for overlapping delimiters.
-        let from_end = (-count) as usize;
-        let mut recent = vec![0_usize; from_end];
-        let mut seen = 0usize;
-        for (position, _) in text.match_indices(delimiter) {
-            recent[seen % from_end] = position;
-            seen += 1;
-        }
-        let suffix = if seen < from_end {
-            text
-        } else {
-            &text[recent[seen % from_end] + delimiter.len()..]
+            let mut positions = vec![0_usize; from_end];
+            trailing_delimiter_suffix(text, delimiter, &mut positions)
         };
         return bounded_substring_index_result(suffix);
     }
@@ -376,5 +366,33 @@ mod fallible_substring_index_output_tests {
         assert_eq!(check(&long, "|", 1), Value::Text(long));
         assert!(matches!(bounded_substring_index_result(&"x".repeat(16 * 1024 * 1024 + 1)),
             Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod shared_trailing_delimiter_scan_tests {
+    use super::*;
+
+    #[test]
+    fn negative_counts_keep_forward_nonoverlapping_delimiters() {
+        for (text, delimiter) in [
+            ("ab".repeat(300) + "x", "ab"),
+            ("a".repeat(610) + "x", "aa"),
+        ] {
+            let positions: Vec<_> = text.match_indices(delimiter)
+                .map(|(index, _)| index).collect();
+            for count in [2_i64, 15, 16, 17, 255, 256, 257, 301] {
+                let expected = if count as usize > positions.len() {
+                    text.as_str()
+                } else {
+                    &text[positions[positions.len() - count as usize] + delimiter.len()..]
+                };
+                assert_eq!(evaluate(&[
+                    Value::Text(text.clone()), Value::Text(delimiter.into()),
+                    Value::Integer(-count),
+                ]).unwrap(), Value::Text(expected.into()),
+                    "delimiter={delimiter:?} count={count}");
+            }
+        }
     }
 }
