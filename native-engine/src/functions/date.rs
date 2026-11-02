@@ -54,6 +54,51 @@ pub(crate) fn shift_days(date: &str, amount: i64) -> Result<String> {
     Ok(format!("{y:04}-{m:02}-{d:02}"))
 }
 
+/// Shift months and clamp the day to the destination month's last day.
+pub(crate) fn shift_months(date: &str, amount: i64) -> Result<String> {
+    let (year, month, day) = parse_iso_date(date)
+        .ok_or_else(|| Error::Execution("invalid ISO calendar date".into()))?;
+    if !(-120_000..=120_000).contains(&amount) {
+        return Err(Error::Execution("month shift exceeds calendar range".into()));
+    }
+    let absolute_month = i64::from(year) * 12 + i64::from(month) - 1 + amount;
+    let new_year = absolute_month.div_euclid(12);
+    let new_month = absolute_month.rem_euclid(12) + 1;
+    if !(1..=9999).contains(&new_year) {
+        return Err(Error::Execution("month shift exceeds calendar range".into()));
+    }
+    let leap = new_year % 4 == 0 && (new_year % 100 != 0 || new_year % 400 == 0);
+    let max_day = match new_month {
+        4 | 6 | 9 | 11 => 30_u32,
+        2 if leap => 29,
+        2 => 28,
+        _ => 31,
+    };
+    Ok(format!("{new_year:04}-{new_month:02}-{:02}", day.min(max_day)))
+}
+
+pub(crate) fn add_months_output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
+    if args.len() != 2 {
+        return Err(Error::Parse("ADD_MONTHS expects date and months".into()));
+    }
+    if args[0].output_type(schema)? != DataType::Text
+        || args[1].output_type(schema)? != DataType::Integer {
+        return Err(Error::Type("ADD_MONTHS requires text date and integer months".into()));
+    }
+    Ok(DataType::Text)
+}
+
+pub(crate) fn eval_add_months(args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
+    let date = args[0].evaluate(batch, row)?;
+    let months = args[1].evaluate(batch, row)?;
+    match (date, months) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Text(date), Value::Integer(months)) =>
+            Ok(Value::Text(shift_months(&date, months)?)),
+        _ => Err(Error::Type("ADD_MONTHS requires text date and integer months".into())),
+    }
+}
+
 pub(crate) fn shift_output_type(args: &[Expr], schema: &Schema) -> Result<DataType> {
     if args.len() != 2 {
         return Err(Error::Parse("DATE_ADD expects date and days".into()));
@@ -143,5 +188,29 @@ mod date_add_tpch_tests {
         let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
             .unwrap().rows().unwrap();
         assert_eq!(rows, vec![vec![Value::Text("1999-03-01".into()), Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod tpch_add_months_tests {
+    use super::*;
+
+    #[test]
+    fn month_end_shift_clamps_days_and_keeps_leap_years() {
+        assert_eq!(shift_months("1996-01-31", 1).unwrap(), "1996-02-29");
+        assert_eq!(shift_months("1997-01-31", 1).unwrap(), "1997-02-28");
+        assert_eq!(shift_months("2000-02-29", 12).unwrap(), "2001-02-28");
+        assert_eq!(shift_months("1998-01-15", -1).unwrap(), "1997-12-15");
+        assert!(shift_months("0001-01-01", -1).is_err());
+    }
+
+    #[test]
+    fn native_add_months_handles_nulls_and_month_boundaries() {
+        let plan = crate::sql::parse_sql(
+            "SELECT ADD_MONTHS('1998-11-30', 3), ADD_MONTHS(NULL, 1)"
+        ).unwrap();
+        let rows = crate::executor::execute(&plan, &crate::catalog::Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("1999-02-28".into()), Value::Null]]);
     }
 }
