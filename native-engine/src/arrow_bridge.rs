@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
+    Array, ArrayRef, BooleanArray, Date32Array, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
     builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
@@ -151,6 +151,9 @@ pub fn schema_from_arrow(input: &ArrowSchema) -> Result<Schema> {
             ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 |
             ArrowType::UInt64 => DataType::Integer,
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
+            // TPC-H uses calendar dates. Keep ISO dates sortable until the
+            // native engine gains a dedicated date scalar type.
+            ArrowType::Date32 => DataType::Text,
             ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
             ArrowType::Dictionary(key, value)
                 if matches!(key.as_ref(),
@@ -182,6 +185,19 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     if values.is_null(row) { Value::Null }
                     else { Value::Boolean(values.value(row)) }
                 }).collect())
+            }
+            ArrowType::Date32 => {
+                let dates = array.as_any().downcast_ref::<Date32Array>()
+                    .ok_or_else(|| Error::Type("invalid Date32 Arrow array".into()))?;
+                Some((0..dates.len()).map(|row| {
+                    if dates.is_null(row) { return Ok(Value::Null); }
+                    let date = dates.value_as_date(row)
+                        .ok_or_else(|| Error::Type("Date32 day out of range".into()))?;
+                    let text = date.to_string();
+                    remaining_text_bytes = remaining_text_bytes.checked_sub(text.len())
+                        .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                    Ok(Value::Text(text))
+                }).collect::<Result<Vec<_>>>()?)
             }
             ArrowType::Int8 => {
                 let values = array.as_any().downcast_ref::<Int8Array>()
@@ -735,5 +751,46 @@ mod direct_arrow_metadata_contract_tests {
             ArrowField::new("bytes", ArrowType::Binary, true),
         ]);
         assert!(schema_from_arrow(&unsupported).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_date32_tests {
+    use super::*;
+
+    #[test]
+    fn date32_parquet_columns_decode_as_iso_calendar_dates() {
+        let dates = Date32Array::from(vec![
+            Some(8035), Some(9555), Some(10561), None,
+        ]);
+        let input = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                ArrowField::new("l_shipdate", ArrowType::Date32, true),
+            ])),
+            vec![Arc::new(dates)],
+        ).unwrap();
+        let native = from_arrow(&input).unwrap();
+        assert_eq!(native.schema().field(0).unwrap().data_type, DataType::Text);
+        assert_eq!(native.rows().unwrap(), vec![
+            vec![Value::Text("1992-01-01".into())],
+            vec![Value::Text("1996-02-29".into())],
+            vec![Value::Text("1998-12-01".into())],
+            vec![Value::Null],
+        ]);
+        assert_eq!(
+            schema_from_arrow(input.schema().as_ref()).unwrap(),
+            native.schema().clone(),
+        );
+    }
+
+    #[test]
+    fn invalid_date32_days_fail_without_panicking() {
+        let input = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                ArrowField::new("shipdate", ArrowType::Date32, false),
+            ])),
+            vec![Arc::new(Date32Array::from(vec![i32::MAX]))],
+        ).unwrap();
+        assert!(from_arrow(&input).is_err());
     }
 }
