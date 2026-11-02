@@ -1821,3 +1821,89 @@ mod sql_parquet_rowgroup_pruning_regressions {
         fs::remove_file(file).unwrap();
     }
 }
+
+#[cfg(test)]
+mod computed_group_by_stream_tests {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp}, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema}, sql};
+
+    fn rows_sorted(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        // The partitioned aggregator emits shards in hash-bucket order.
+        rows.sort_by_key(|row| format!("{row:?}"));
+        rows
+    }
+
+    #[test]
+    fn computed_group_keys_match_in_memory_across_spill_batches() {
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+            Field::new("price", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(-3), Value::Integer(8)],
+            vec![Value::Integer(-2), Value::Integer(5)],
+            vec![Value::Integer(2), Value::Integer(9)],
+            vec![Value::Integer(3), Value::Integer(7)],
+            vec![Value::Null, Value::Integer(4)],
+            vec![Value::Integer(-3), Value::Integer(1)],
+        ]).unwrap();
+        let key = Expr::Call { name: "abs".into(),
+            args: vec![Expr::Column("n".into())] };
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::Values { batch: input }),
+            group_by: vec![(key, "magnitude".into())],
+            aggregates: vec![
+                AggregateItem::new(AggregateOp::CountAll, "rows"),
+                AggregateItem::new(AggregateOp::Sum(Expr::Column("price".into())), "total"),
+            ],
+        };
+        let options = StreamOptions { batch_rows: 2, ..StreamOptions::default() };
+        let schema = output_schema(&plan, &FileCatalog::new(), &options).unwrap();
+        let source = execute(&plan, &FileCatalog::new(), &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let mut rows = Vec::new();
+        for batch in source {
+            assert_eq!(batch.schema(), &schema);
+            rows.extend(batch.rows().unwrap());
+        }
+        let expected = executor::execute(&plan, &Catalog::new()).unwrap();
+        assert_eq!(rows_sorted(rows), rows_sorted(expected.rows().unwrap()));
+    }
+
+    #[test]
+    fn expression_names_never_override_real_input_columns() {
+        let source = Batch::from_rows(Schema::new(vec![
+            Field::new("__rustspark_spill_key_0", DataType::Text, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Text("a".into()), Value::Integer(-2)],
+            vec![Value::Text("b".into()), Value::Integer(2)],
+        ]).unwrap();
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::Values { batch: source }),
+            group_by: vec![(
+                Expr::Call { name: "abs".into(), args: vec![Expr::Column("n".into())] },
+                "bucket".into(),
+            )],
+            aggregates: vec![AggregateItem::new(AggregateOp::CountAll, "count")],
+        };
+        let output = execute(&plan, &FileCatalog::new(), &StreamOptions::default(),
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = output.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Value::Integer(2), Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn computed_grouping_is_accepted_in_native_sql() {
+        let query = "SELECT ABS(n) AS magnitude, COUNT(*) AS count FROM \
+(VALUES (-2), (2), (-3)) AS t(n) GROUP BY ABS(n)";
+        let plan = sql::parse_sql(query).unwrap();
+        let options = StreamOptions { batch_rows: 1, ..StreamOptions::default() };
+        let actual = execute(&plan, &FileCatalog::new(), &options,
+            QueryControl::default()).unwrap().collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        let expected = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows_sorted(actual), rows_sorted(expected));
+    }
+}
