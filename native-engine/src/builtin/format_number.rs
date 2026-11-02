@@ -41,6 +41,11 @@ fn grouped_float(formatted: &str, digits: usize) -> String {
         .map_or(("", formatted), |rest| ("-", rest));
     let (whole, fractional) = unsigned.split_once('.')
         .map_or((unsigned, None), |(whole, fractional)| (whole, Some(fractional)));
+    // Most small FLOAT values do not need a thousands separator. Keep the
+    // formatted allocation instead of constructing an identical second String.
+    if whole.len() <= 3 {
+        return Ok(Value::Text(formatted));
+    }
     let mut result = String::with_capacity(formatted.len().saturating_add(whole.len() / 3)
         .saturating_add(digits + 1));
     result.push_str(negative);
@@ -200,5 +205,34 @@ mod grouped_float_refactor_tests {
         assert_eq!(grouped_float("999", 0), "999");
         assert_eq!(grouped_float("1000", 0), "1,000");
         assert_eq!(grouped_float("0.000", 3), "0.000");
+    }
+}
+
+#[cfg(test)]
+mod small_float_direct_format_tests {
+    use super::*;
+
+    #[test]
+    fn small_floats_skip_grouping_without_changing_rounding_or_sign() {
+        for (value, precision) in [
+            (0.0, 0), (-0.0, 2), (1.25, 2), (-12.5, 1),
+            (999.5, 0), (999.499, 0), (-0.005, 2), (12.345, 3),
+        ] {
+            let actual = evaluate(&[Value::Float(value), Value::Integer(precision)]).unwrap();
+            let expected = format!("{value:.prec$}", prec = precision as usize);
+            // The grouping boundary must be decided after decimal rounding.
+            let (unsigned, _) = expected.strip_prefix('-')
+                .unwrap_or(expected.as_str()).split_once('.')
+                .map_or((expected.strip_prefix('-').unwrap_or(expected.as_str()), None),
+                    |(whole, fraction)| (whole, Some(fraction)));
+            if unsigned.len() <= 3 {
+                assert_eq!(actual, Value::Text(expected));
+            }
+        }
+        assert_eq!(evaluate(&[Value::Float(1234.5), Value::Integer(1)]).unwrap(),
+            Value::Text("1,234.5".into()));
+        assert_eq!(evaluate(&[Value::Float(-1234567.25), Value::Integer(2)]).unwrap(),
+            Value::Text("-1,234,567.25".into()));
+        assert_eq!(evaluate(&[Value::Null, Value::Integer(0)]).unwrap(), Value::Null);
     }
 }
