@@ -734,7 +734,31 @@ impl Parser {
             }
             _ => None,
         };
-        if let Some(function) = function {
+        // SUM(x) / SUM(y) starts with an aggregate name but is a scalar
+        // expression *containing* aggregates. Let the generic expression
+        // parser handle it, then hoist the calls in select_body.
+        let aggregate_is_expression = function.is_some() && {
+            let mut nesting = 0usize;
+            let mut closing = None;
+            for index in self.index + 1..self.tokens.len() {
+                match &self.tokens[index] {
+                    Token::Symbol('(') => nesting += 1,
+                    Token::Symbol(')') => {
+                        nesting = nesting.saturating_sub(1);
+                        if nesting == 0 { closing = Some(index + 1); break; }
+                    }
+                    _ => {}
+                }
+            }
+            closing.is_some_and(|index| match self.tokens.get(index) {
+                Some(Token::Symbol('*')) => true,
+                Some(Token::Operator(op)) =>
+                    ["+", "-", "/", "%", "||", "=", ">", "<", ">=", "<=", "<>"]
+                        .contains(&op.as_str()),
+                _ => false,
+            })
+        };
+        if let Some(function) = function.filter(|_| !aggregate_is_expression) {
             let _ = self.next();
             self.expect_symbol('(')?;
             let distinct = self.take_word("DISTINCT");
