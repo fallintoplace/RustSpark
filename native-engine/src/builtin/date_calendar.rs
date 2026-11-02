@@ -83,6 +83,22 @@ fn weekday(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer((days_since_epoch(date) + 3).rem_euclid(7)))
 }
 
+fn date_text_type(types: &[DataType]) -> Result<DataType> {
+    if types[0] == DataType::Text { Ok(DataType::Text) }
+    else { Err(Error::Type("calendar function requires date text".into())) }
+}
+
+fn iso_text(date: CalendarDate) -> String {
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+}
+
+fn last_day(args: &[Value]) -> Result<Value> {
+    let Some(date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    Ok(Value::Text(iso_text(CalendarDate {
+        day: month_length(date.year, date.month), ..date
+    })))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
@@ -92,6 +108,8 @@ pub(super) const FUNCTIONS: &[Function] = &[
         result_type: date_integer_type, call: dayofweek },
     Function { name: "weekday", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: weekday },
+    Function { name: "last_day", min_args: 1, max_args: 1,
+        result_type: date_text_type, call: last_day },
 ];
 
 #[cfg(test)]
@@ -168,5 +186,20 @@ mod weekday_tests {
         assert_eq!(weekday(&[Value::Text("2023-01-01".into())]).unwrap(), Value::Integer(6));
         assert_eq!(weekday(&[Value::Text("1970-01-01".into())]).unwrap(), Value::Integer(3));
         assert_eq!(weekday(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod last_day_tests {
+    use super::*;
+    #[test]
+    fn observes_gregorian_month_ends() {
+        assert_eq!(last_day(&[Value::Text("2024-02-01".into())]).unwrap(), Value::Text("2024-02-29".into()));
+        assert_eq!(last_day(&[Value::Text("1900-02-20".into())]).unwrap(), Value::Text("1900-02-28".into()));
+        assert_eq!(last_day(&[Value::Text("2000-02-20".into())]).unwrap(), Value::Text("2000-02-29".into()));
+        assert_eq!(last_day(&[Value::Text("9999-12-01".into())]).unwrap(), Value::Text("9999-12-31".into()));
+        assert_eq!(last_day(&[Value::Null]).unwrap(), Value::Null);
+        assert!(last_day(&[Value::Text("2024-04-31".into())]).is_err());
     }
 }
