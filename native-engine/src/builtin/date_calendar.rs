@@ -118,6 +118,49 @@ fn monthname(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(MONTH_NAMES[(date.month - 1) as usize].into()))
 }
 
+fn text_pair_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)
+}
+
+fn named_weekday(text: &str) -> Option<i64> {
+    const NAMES: &[(&str, i64)] = &[
+        ("MO", 0), ("MON", 0), ("MONDAY", 0),
+        ("TU", 1), ("TUE", 1), ("TUESDAY", 1),
+        ("WE", 2), ("WED", 2), ("WEDNESDAY", 2),
+        ("TH", 3), ("THU", 3), ("THURSDAY", 3),
+        ("FR", 4), ("FRI", 4), ("FRIDAY", 4),
+        ("SA", 5), ("SAT", 5), ("SATURDAY", 5),
+        ("SU", 6), ("SUN", 6), ("SUNDAY", 6),
+    ];
+    NAMES.iter().find(|(name, _)| text.eq_ignore_ascii_case(name))
+        .map(|(_, day)| *day)
+}
+
+fn next_day(args: &[Value]) -> Result<Value> {
+    let Some(mut date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    let Some(day_name) = super::string(&args[1])? else { return Ok(Value::Null); };
+    let Some(target) = named_weekday(day_name) else { return Ok(Value::Null); };
+    let today = (days_since_epoch(date) + 3).rem_euclid(7);
+    let offset = (target - today).rem_euclid(7);
+    // NEXT_DAY is strictly later than the supplied date.
+    let offset = if offset == 0 { 7 } else { offset };
+    for _ in 0..offset {
+        date.day += 1;
+        if date.day > month_length(date.year, date.month) {
+            date.day = 1;
+            date.month += 1;
+            if date.month > 12 {
+                date.month = 1;
+                date.year += 1;
+                if date.year > 9_999 {
+                    return Err(Error::Execution("NEXT_DAY exceeds supported date range".into()));
+                }
+            }
+        }
+    }
+    Ok(Value::Text(iso_text(date)))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
@@ -133,6 +176,8 @@ pub(super) const FUNCTIONS: &[Function] = &[
         result_type: date_text_type, call: dayname },
     Function { name: "monthname", min_args: 1, max_args: 1,
         result_type: date_text_type, call: monthname },
+    Function { name: "next_day", min_args: 2, max_args: 2,
+        result_type: text_pair_type, call: next_day },
 ];
 
 #[cfg(test)]
@@ -251,5 +296,25 @@ mod monthname_tests {
         assert_eq!(monthname(&[Value::Text("2024-12-01".into())]).unwrap(), Value::Text("December".into()));
         assert_eq!(monthname(&[Value::Null]).unwrap(), Value::Null);
         assert!(monthname(&[Value::Text("2024-00-01".into())]).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod next_day_tests {
+    use super::*;
+    #[test]
+    fn finds_strictly_later_weekdays_and_preserves_null() {
+        assert_eq!(next_day(&[Value::Text("2024-01-01".into()), Value::Text("MONDAY".into())]).unwrap(),
+            Value::Text("2024-01-08".into()));
+        assert_eq!(next_day(&[Value::Text("2024-02-28".into()), Value::Text("Fri".into())]).unwrap(),
+            Value::Text("2024-03-01".into()));
+        assert_eq!(next_day(&[Value::Text("2024-12-29".into()), Value::Text("mo".into())]).unwrap(),
+            Value::Text("2024-12-30".into()));
+        assert_eq!(next_day(&[Value::Text("2024-01-01".into()), Value::Text("unknown".into())]).unwrap(),
+            Value::Null);
+        assert_eq!(next_day(&[Value::Null, Value::Text("FRI".into())]).unwrap(), Value::Null);
+        assert_eq!(next_day(&[Value::Text("2024-01-01".into()), Value::Null]).unwrap(), Value::Null);
+        assert!(next_day(&[Value::Text("9999-12-31".into()), Value::Text("SUN".into())]).is_err());
     }
 }
