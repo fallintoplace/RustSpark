@@ -5,6 +5,16 @@ fn output(types: &[DataType]) -> Result<DataType> {
     super::text_type(types)?;
     Ok(DataType::Integer)
 }
+fn find_member(haystack: &str, needle: &str) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle).find_map(|(start, _)| {
+        let end = start + needle.len();
+        ((start == 0 || bytes[start - 1] == b',')
+            && (end == bytes.len() || bytes[end] == b','))
+            .then_some(start)
+    })
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(needle) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(haystack) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -17,13 +27,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     } else {
         // Search for the full needle rather than comparing every short CSV
         // field. Only delimiter-bounded matches are valid set members.
-        haystack.match_indices(needle).find_map(|(start, _)| {
-            let end = start + needle.len();
-            let bytes = haystack.as_bytes();
-            ((start == 0 || bytes[start - 1] == b',')
-                && (end == bytes.len() || bytes[end] == b','))
-                .then_some(start)
-        }).map_or(0, |start| {
+        find_member(haystack, needle).map_or(0, |start| {
             haystack.as_bytes()[..start].iter().filter(|&&byte| byte == b',').count() + 1
         })
     };
@@ -33,6 +37,20 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "find_in_set", min_args: 2, max_args: 2, result_type: output, call: evaluate,
 }];
+
+#[cfg(test)]
+mod delimiter_bounded_member_tests {
+    use super::*;
+
+    #[test]
+    fn matches_only_complete_unicode_safe_fields() {
+        assert_eq!(find_member("é,ab,abb", "ab"), Some("é,".len()));
+        assert_eq!(find_member("foobar,xyz", "bar"), None);
+        assert_eq!(evaluate(&[
+            Value::Text("ab".into()), Value::Text("é,ab,abb".into()),
+        ]).unwrap(), Value::Integer(2));
+    }
+}
 
 #[cfg(test)]
 mod tests {
