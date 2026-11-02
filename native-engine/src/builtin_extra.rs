@@ -11,6 +11,39 @@ fn normalized_uppercase(name: &str) -> Cow<'_, str> {
 }
 
 
+/// Accept ISO calendar dates used by TPC-H CSV fixtures. Date32 is not yet
+/// part of the native scalar type system; this function only accepts text.
+fn iso_date_year(value: &str) -> Result<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 && !(bytes.len() > 10 && matches!(bytes[10], b' ' | b'T')) {
+        return Err(Error::Type("YEAR expects an ISO date string".into()));
+    }
+    if bytes.len() < 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || !bytes.iter().enumerate().take(10)
+            .all(|(i, ch)| i == 4 || i == 7 || ch.is_ascii_digit())
+    {
+        return Err(Error::Type("YEAR expects an ISO date string".into()));
+    }
+    let year: i64 = value[..4].parse()
+        .map_err(|_| Error::Type("invalid ISO year".into()))?;
+    let month: usize = value[5..7].parse()
+        .map_err(|_| Error::Type("invalid ISO month".into()))?;
+    let day: usize = value[8..10].parse()
+        .map_err(|_| Error::Type("invalid ISO day".into()))?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || day == 0 || day > max_day {
+        return Err(Error::Type("invalid ISO calendar date".into()));
+    }
+    Ok(year)
+}
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
@@ -33,6 +66,15 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
                 return Err(Error::Type("NULLIF arguments must have the same type".into()));
             }
             Ok(first)
+        },
+        "YEAR" => {
+            if args.len() != 1 {
+                return Err(Error::Parse("YEAR requires one argument".into()));
+            }
+            if args[0].output_type(schema)? != DataType::Text {
+                return Err(Error::Type("YEAR requires ISO date text".into()));
+            }
+            Ok(DataType::Integer)
         },
         "ABS" => {
             if args.len() != 1 { return Err(Error::Parse("ABS requires one argument".into())); }
@@ -285,6 +327,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "YEAR" => match args {
+            [Value::Text(value)] => Ok(Value::Integer(iso_date_year(value)?)),
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("YEAR requires ISO date text".into())),
         },
         "ABS" => match args {
             [Value::Integer(value)] => value.checked_abs().map(Value::Integer).ok_or_else(|| Error::Execution("ABS integer overflow".into())),
