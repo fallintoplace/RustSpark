@@ -27,10 +27,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
     // Plain start-anchored identifiers cannot match anywhere else. Avoid
     // compiling a regex for a common token-extraction predicate.
-    if let Some(prefix) = pattern.strip_prefix('^')
-        && prefix.len() <= 4095
-        && prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
-    {
+    if let Some(prefix) = regex_support::anchored_identifier(pattern) {
         return if text.starts_with(prefix) { copy_match(prefix) }
             else { Ok(Value::Null) };
     }
