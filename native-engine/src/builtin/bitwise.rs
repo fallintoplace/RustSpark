@@ -13,8 +13,11 @@ fn binary(args: &[Value], f: fn(i64, i64) -> i64) -> Result<Value> {
 fn and(args: &[Value]) -> Result<Value> { binary(args, |a, b| a & b) }
 fn or(args: &[Value]) -> Result<Value> { binary(args, |a, b| a | b) }
 fn xor(args: &[Value]) -> Result<Value> { binary(args, |a, b| a ^ b) }
+fn unary(args: &[Value], f: fn(i64) -> i64) -> Result<Value> {
+    Ok(super::integer(&args[0])?.map_or(Value::Null, |value| Value::Integer(f(value))))
+}
 fn not(args: &[Value]) -> Result<Value> {
-    Ok(super::integer(&args[0])?.map_or(Value::Null, |value| Value::Integer(!value)))
+    unary(args, |value| !value)
 }
 
 fn rotate_right(args: &[Value]) -> Result<Value> {
@@ -24,9 +27,7 @@ fn rotate_right(args: &[Value]) -> Result<Value> {
 }
 
 fn bitmap_bucket_number(args: &[Value]) -> Result<Value> {
-    let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null); };
-    let bucket = (i128::from(value) - 1).div_euclid(32_768) + 1;
-    Ok(Value::Integer(bucket as i64))
+    unary(args, |value| ((i128::from(value) - 1).div_euclid(32_768) + 1) as i64)
 }
 
 fn bitmap_bucket_number_type(types: &[DataType]) -> Result<DataType> {
