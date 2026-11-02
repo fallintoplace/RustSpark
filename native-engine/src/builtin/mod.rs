@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::OnceLock};
 use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema}, Error, Result};
 
 mod nullif;
+mod sql_assertions;
 mod conditional;
 mod abs_sign;
 mod floor_ceil;
@@ -117,6 +118,7 @@ const CORE: &[Function] = &[
 
 const MODULES: &[&[Function]] = &[
     &nullif::FUNCTIONS,
+    &sql_assertions::FUNCTIONS,
     &conditional::FUNCTIONS,
     &abs_sign::FUNCTIONS,
     &floor_ceil::FUNCTIONS,
