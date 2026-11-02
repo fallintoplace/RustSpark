@@ -1370,6 +1370,11 @@ fn rewrite_having(
 /// syntax is rejected instead of being silently executed by a fallback engine.
 pub fn parse_sql(sql: &str) -> Result<Plan> {
     let mut parser = Parser::new(tokenize(sql)?);
+    let explain = parser.take_word("EXPLAIN");
+    let extended = explain && parser.take_word("EXTENDED");
+    if explain && parser.peek_word("ANALYZE") {
+        return Err(Error::Unsupported("EXPLAIN ANALYZE requires execution metrics".into()));
+    }
     parser.parse_ctes()?;
     let mut plan = parser.select_with_intersections()?;
     loop {
@@ -1399,6 +1404,25 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
             "unsupported SQL syntax near {:?}",
             parser.peek()
         )));
+    }
+    if explain {
+        // Keep EXPLAIN independent of catalog registration and input scans.
+        // It reports the owned native logical plan, not a physical plan or
+        // measured runtime profile.
+        let mut description = format!("Logical plan:\n{plan:#?}");
+        if extended {
+            let optimized = crate::optimizer::optimize(plan.clone());
+            description.push_str(&format!("\nOptimized logical plan:\n{optimized:#?}"));
+        }
+        if description.len() > 1024 * 1024 {
+            return Err(Error::Execution("EXPLAIN output exceeds 1 MiB".into()));
+        }
+        let schema = Schema::new(vec![
+            Field::new("logical_plan", DataType::Text, false),
+        ])?;
+        return Ok(Plan::Values {
+            batch: Batch::from_rows(schema, vec![vec![Value::Text(description)]])?,
+        });
     }
     Ok(plan)
 }
@@ -2187,3 +2211,4 @@ mod spark_minus_alias_sql_tests {
         assert!(parse_sql("SELECT 1 MINUS").is_err());
     }
 }
+
