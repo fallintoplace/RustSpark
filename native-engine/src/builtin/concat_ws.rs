@@ -7,7 +7,13 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(separator) = super::string(&args[0])? else { return Ok(Value::Null); };
     if args.len() == 2 {
         return match super::string(&args[1])? {
-            Some(value) if value.len() <= 16 * 1024 * 1024 => Ok(Value::Text(value.to_owned())),
+            Some(value) if value.len() <= 16 * 1024 * 1024 => {
+                let mut output = String::new();
+                output.try_reserve_exact(value.len())
+                    .map_err(|_| Error::Execution("CONCAT_WS output allocation failed".into()))?;
+                output.push_str(value);
+                Ok(Value::Text(output))
+            },
             Some(_) => Err(Error::Execution("CONCAT_WS output exceeds 16 MiB".into())),
             None => Ok(Value::Text(String::new())),
         };
@@ -30,7 +36,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
 
     // The first pass validates the bound; the second writes once into the result.
-    let mut output = String::with_capacity(length);
+    let mut output = String::new();
+    output.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("CONCAT_WS output allocation failed".into()))?;
     let mut first = true;
     // The sizing pass already checked every argument's type and NULL state.
     for arg in &args[1..] {
@@ -120,5 +128,21 @@ mod validated_concat_ws_output_regressions {
         assert_eq!(actual, Value::Text(expected));
         args[30] = Value::Integer(42);
         assert!(matches!(evaluate(&args), Err(Error::Type(_))));
+    }
+}
+
+#[cfg(test)]
+mod fallible_concat_ws_reservation_tests {
+    use super::*;
+    #[test]
+    fn one_and_many_items_keep_unicode_and_null_semantics() {
+        assert_eq!(evaluate(&[Value::Text(":".into()), Value::Text("é🙂".into())]).unwrap(),
+            Value::Text("é🙂".into()));
+        assert_eq!(evaluate(&[
+            Value::Text(":".into()), Value::Text("é".into()),
+            Value::Null, Value::Text("🙂".into()),
+        ]).unwrap(), Value::Text("é:🙂".into()));
+        assert_eq!(evaluate(&[Value::Text(":".into()), Value::Null]).unwrap(),
+            Value::Text(String::new()));
     }
 }
