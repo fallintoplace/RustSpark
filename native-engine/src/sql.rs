@@ -550,6 +550,13 @@ impl Parser {
                 self.expect_symbol('(')?;
                 let expression = self.expression(0)?;
                 self.expect_word("AS")?;
+                if self.take_word("DATE") {
+                    self.expect_symbol(')')?;
+                    return Ok(Expr::Call {
+                        name: "to_date".into(),
+                        args: vec![expression],
+                    });
+                }
                 let target = match self.identifier()?.to_ascii_uppercase().as_str() {
                     "BIGINT" | "INT" | "INTEGER" => DataType::Integer,
                     "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
@@ -2455,5 +2462,28 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_cast_date_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor::execute};
+
+    #[test]
+    fn cast_as_date_validates_and_preserves_calendar_values() {
+        let query = "SELECT CAST('1998-12-01' AS DATE) AS start_date";
+        assert_eq!(execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap(),
+            vec![vec![Value::Text("1998-12-01".into())]]);
+        assert!(execute(&parse_sql("SELECT CAST('1998-02-30' AS DATE)").unwrap(),
+            &Catalog::new()).is_err());
+    }
+
+    #[test]
+    fn cast_date_keeps_nulls() {
+        let query = "SELECT CAST(NULL AS DATE)";
+        assert_eq!(execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap(), vec![vec![Value::Null]]);
     }
 }
