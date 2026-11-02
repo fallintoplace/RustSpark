@@ -63,7 +63,7 @@ def prepare(connection, destination, scale):
         ).fetchone()[0]
         table_sha256[table] = sha256_file(parquet_path)
     queries = connection.execute(
-        "SELECT query_nr, query FROM tpch_queries() ORDER BY query_nr"
+        f"SELECT query_nr, query FROM tpch_queries(sf = {scale:g}) ORDER BY query_nr"
     ).fetchall()
     entries = write_queries(sql_dir, queries)
     manifest = {
