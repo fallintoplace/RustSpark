@@ -52,6 +52,14 @@ struct Column {
     nullable: bool,
 }
 
+fn copy_manifest_text(text: &str) -> Result<String> {
+    let mut output = String::new();
+    output.try_reserve_exact(text.len())
+        .map_err(|_| Error::Execution("catalog manifest text allocation failed".into()))?;
+    output.push_str(text);
+    Ok(output)
+}
+
 fn encode_fields(schema: &Schema) -> Result<Vec<Column>> {
     // The writer must obey the same column bounds as the loader.
     // Otherwise save_atomic can publish metadata that load rejects.
@@ -63,16 +71,23 @@ fn encode_fields(schema: &Schema) -> Result<Vec<Column>> {
     if schema.fields().iter().any(|field| field.name.len() > MAX_COLUMN_NAME_BYTES) {
         return Err(Error::Schema("catalog manifest column name exceeds 4096 bytes".into()));
     }
-    Ok(schema.fields().iter().map(|field| Column {
-        name: field.name.clone(),
-        kind: match field.data_type {
+    let mut encoded = Vec::new();
+    encoded.try_reserve_exact(schema.len())
+        .map_err(|_| Error::Execution("catalog manifest field allocation failed".into()))?;
+    for field in schema.fields() {
+        let kind = match field.data_type {
             DataType::Boolean => "boolean",
             DataType::Integer => "integer",
             DataType::Float => "float",
             DataType::Text => "text",
-        }.into(),
-        nullable: field.nullable,
-    }).collect())
+        };
+        encoded.push(Column {
+            name: copy_manifest_text(&field.name)?,
+            kind: copy_manifest_text(kind)?,
+            nullable: field.nullable,
+        });
+    }
+    Ok(encoded)
 }
 
 fn decode_fields(columns: Vec<Column>) -> Result<Schema> {
@@ -82,7 +97,10 @@ fn decode_fields(columns: Vec<Column>) -> Result<Schema> {
     if columns.iter().any(|column| column.name.len() > MAX_COLUMN_NAME_BYTES) {
         return Err(Error::Schema("catalog manifest column name exceeds 4096 bytes".into()));
     }
-    Schema::new(columns.into_iter().map(|column| {
+    let mut fields = Vec::new();
+    fields.try_reserve_exact(columns.len())
+        .map_err(|_| Error::Execution("catalog manifest decoded field allocation failed".into()))?;
+    for column in columns {
         let data_type = match column.kind.as_str() {
             "boolean" => DataType::Boolean,
             "integer" => DataType::Integer,
@@ -90,8 +108,9 @@ fn decode_fields(columns: Vec<Column>) -> Result<Schema> {
             "text" => DataType::Text,
             _ => return Err(Error::Schema("unknown catalog column type".into())),
         };
-        Ok(Field::new(column.name, data_type, column.nullable))
-    }).collect::<Result<Vec<_>>>()?)
+        fields.push(Field::new(column.name, data_type, column.nullable));
+    }
+    Schema::new(fields)
 }
 
 fn canonical_source(path: &Path) -> Result<PathBuf> {
@@ -132,7 +151,7 @@ fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
     for (index, name) in names.into_iter().enumerate() {
         let table = if let Some(parquet) = catalog.get_parquet(name)? {
             Table::Parquet {
-                name: name.to_string(),
+                name: copy_manifest_text(name)?,
                 path: canonical_source(parquet.path())?,
                 fields: encode_fields(parquet.schema())?,
             }
@@ -142,7 +161,7 @@ fn snapshot(catalog: &FileCatalog) -> Result<Vec<u8>> {
                 return Err(Error::Execution("catalog CSV record limit too large".into()));
             }
             Table::Csv {
-                name: name.to_string(),
+                name: copy_manifest_text(name)?,
                 path: canonical_source(csv.path())?,
                 fields: encode_fields(csv.schema())?,
                 max_record_bytes: csv.max_record_bytes(),
@@ -522,5 +541,39 @@ mod streaming_manifest_serialization_regressions {
             tables: Vec::new(),
         }).unwrap();
         assert_eq!(snapshot(&FileCatalog::new()).unwrap(), expected);
+    }
+}
+
+#[cfg(test)]
+mod fallible_manifest_field_materialization_regressions {
+    use super::*;
+
+    #[test]
+    fn maximum_width_schema_roundtrips_exact_types_and_nullability() {
+        let schema = Schema::new((0..MAX_COLUMNS).map(|index|
+            Field::new(format!("column_{index}"), match index % 4 {
+                0 => DataType::Boolean,
+                1 => DataType::Integer,
+                2 => DataType::Float,
+                _ => DataType::Text,
+            }, index % 3 == 0)
+        ).collect()).unwrap();
+        let encoded = encode_fields(&schema).unwrap();
+        assert_eq!(encoded.len(), MAX_COLUMNS);
+        assert_eq!(decode_fields(encoded).unwrap(), schema);
+    }
+
+    #[test]
+    fn refuses_oversized_fields_before_cloning_or_serialization() {
+        let oversized = Schema::new(vec![Field::new(
+            "x".repeat(MAX_COLUMN_NAME_BYTES + 1), DataType::Text, false,
+        )]).unwrap();
+        assert!(encode_fields(&oversized).is_err());
+        let bad = vec![Column {
+            name: "x".repeat(MAX_COLUMN_NAME_BYTES + 1),
+            kind: "text".into(),
+            nullable: true,
+        }];
+        assert!(decode_fields(bad).is_err());
     }
 }

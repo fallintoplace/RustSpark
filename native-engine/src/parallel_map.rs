@@ -74,7 +74,9 @@ where
     let count = input.len();
     if count == 0 { return Ok(Vec::new()); }
     if max_workers == 1 || count == 1 {
-        let mut results = Vec::with_capacity(count);
+        let mut results = Vec::new();
+        results.try_reserve_exact(count)
+            .map_err(|_| Error::Execution("parallel result allocation failed".into()))?;
         for batch in input {
             results.push(catch_unwind(AssertUnwindSafe(|| operator(batch)))
                 .unwrap_or_else(|_| Err(Error::Execution("native worker panicked".into())))?);
@@ -87,8 +89,10 @@ where
     let failed = AtomicBool::new(false);
     // Each task has a unique index, so results can be published without a
     // contended global output mutex.
-    let mut output: Vec<OnceLock<Result<Batch>>> =
-        std::iter::repeat_with(OnceLock::new).take(count).collect();
+    let mut output: Vec<OnceLock<Result<Batch>>> = Vec::new();
+    output.try_reserve_exact(count)
+        .map_err(|_| Error::Execution("parallel task result slots allocation failed".into()))?;
+    output.resize_with(count, OnceLock::new);
     std::thread::scope(|scope| {
         // Keep the caller busy as one worker and spawn only the remainder.
         for _ in 1..workers {
@@ -122,9 +126,14 @@ where
         };
         return Err(error);
     }
-    output.into_iter()
-        .map(|slot| slot.into_inner().unwrap_or_else(|| Err(Error::Execution("missing partition result".into()))))
-        .collect()
+    let mut completed = Vec::new();
+    completed.try_reserve_exact(count)
+        .map_err(|_| Error::Execution("parallel result allocation failed".into()))?;
+    for slot in output {
+        completed.push(slot.into_inner()
+            .unwrap_or_else(|| Err(Error::Execution("missing partition result".into())))?);
+    }
+    Ok(completed)
 }
 
 #[cfg(test)]
@@ -521,5 +530,37 @@ mod caller_worker_parallel_map_tests {
             Ok(batch)
         }).unwrap_err();
         assert!(failure.to_string().contains("caller worker failure"));
+    }
+}
+
+#[cfg(test)]
+mod fallible_parallel_output_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn parallel_and_serial_preserve_order_of_many_independent_partitions() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let partitions = (0..257).map(|value| Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(value)]]).unwrap()).collect::<Vec<_>>();
+        let serial = map_partitions(partitions.clone(), 1, Ok).unwrap();
+        let parallel = map_partitions(partitions.clone(), 32, Ok).unwrap();
+        assert_eq!(serial, parallel);
+        assert_eq!(serial, partitions);
+    }
+
+    #[test]
+    fn errors_keep_source_identity_and_zero_partitions_return_empty() {
+        assert!(map_partitions(Vec::new(), 4, Ok).unwrap().is_empty());
+        let schema = Schema::new(vec![Field::new("id", DataType::Integer, false)]).unwrap();
+        let batches = (0..8).map(|id| Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(id)]]).unwrap()).collect::<Vec<_>>();
+        let error = map_partitions(batches, 4, |batch| {
+            if batch.value(0, 0)? == &Value::Integer(3) {
+                return Err(Error::Execution("partition three failed".into()));
+            }
+            Ok(batch)
+        }).unwrap_err();
+        assert!(error.to_string().contains("partition three failed"));
     }
 }

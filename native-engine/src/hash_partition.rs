@@ -203,6 +203,20 @@ pub fn partition_batches(input: &[Batch], keys: &[&str], partitions: usize) -> R
  * allocates exactly the number of retained cells. The placement vector is
  * bounded by input row count and is reused across all source columns.
  */
+// Reserve every destination column before moving any source payloads.
+fn allocate_owned_bucket(width: usize, rows: usize) -> Result<Vec<Vec<crate::scalar::Value>>> {
+    let mut columns = Vec::new();
+    columns.try_reserve_exact(width)
+        .map_err(|_| Error::Execution("shuffle bucket column allocation failed".into()))?;
+    for _ in 0..width {
+        let mut column = Vec::new();
+        column.try_reserve_exact(rows)
+            .map_err(|_| Error::Execution("shuffle bucket row allocation failed".into()))?;
+        columns.push(column);
+    }
+    Ok(columns)
+}
+
 pub fn partition_batches_owned(
     input: Vec<Batch>, keys: &[&str], partitions: usize,
 ) -> Result<Vec<Batch>> {
@@ -227,8 +241,7 @@ pub fn partition_batches_owned(
         if input.len() == 1 {
             return Ok(input);
         }
-        let mut combined = (0..schema.len())
-            .map(|_| Vec::with_capacity(total)).collect::<Vec<_>>();
+        let mut combined = allocate_owned_bucket(schema.len(), total)?;
         for batch in input {
             for (destination, source) in combined.iter_mut().zip(batch.into_columns()) {
                 destination.extend(source);
@@ -238,7 +251,9 @@ pub fn partition_batches_owned(
     }
 
     let mut counts = vec![0usize; partitions];
-    let mut placements = Vec::with_capacity(input.len());
+    let mut placements = Vec::new();
+    placements.try_reserve_exact(input.len())
+        .map_err(|_| Error::Execution("shuffle placement list allocation failed".into()))?;
     let mask = partitions.is_power_of_two().then_some(partitions - 1);
     // Bind key slices across all incoming batches before moving their cells.
     // Preserve the final key of each nonempty batch for the next batch.
@@ -250,7 +265,9 @@ pub fn partition_batches_owned(
     let mut previous_bucket = 0usize;
     for (batch_index, batch) in input.iter().enumerate() {
         let columns = &bound_keys[batch_index];
-        let mut destinations = Vec::with_capacity(batch.num_rows());
+        let mut destinations = Vec::new();
+        destinations.try_reserve_exact(batch.num_rows())
+            .map_err(|_| Error::Execution("shuffle placement allocation failed".into()))?;
         for row in 0..batch.num_rows() {
             let bucket = if previous_key.is_some_and(|(previous_batch, previous_row)|
                 columns.iter().zip(&bound_keys[previous_batch])
@@ -278,10 +295,13 @@ pub fn partition_batches_owned(
     // Release borrowed key slices before consuming the owned batches.
     drop(bound_keys);
     let width = schema.len();
-    let mut output = counts.iter().map(|&count| {
-        (count != 0).then(|| (0..width)
-            .map(|_| Vec::with_capacity(count)).collect::<Vec<_>>())
-    }).collect::<Vec<_>>();
+    let mut output = Vec::new();
+    output.try_reserve_exact(counts.len())
+        .map_err(|_| Error::Execution("shuffle output list allocation failed".into()))?;
+    for &count in &counts {
+        output.push(if count == 0 { None }
+            else { Some(allocate_owned_bucket(width, count)?) });
+    }
     for (batch, destinations) in input.into_iter().zip(placements) {
         for (column, source) in batch.into_columns().into_iter().enumerate() {
             for (bucket, value) in destinations.iter().copied().zip(source) {
@@ -294,6 +314,33 @@ pub fn partition_batches_owned(
         Batch::from_validated_columns(schema.clone(),
             columns.unwrap_or_else(|| vec![Vec::new(); width]), rows)
     }).collect()
+}
+
+#[cfg(test)]
+mod fallible_owned_shuffle_admission_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn shards_many_batches_with_null_and_unicode_keys_without_copying_payloads() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let batches = (0..19).map(|batch| Batch::from_rows(schema.clone(),
+            (0..7).map(|row| vec![
+                if (batch + row) % 6 == 0 { Value::Null }
+                else { Value::Text(format!("key-{}", (batch + row) % 13)) },
+                Value::Text(format!("{batch}-{row}-{}", "🙂".repeat(2048))),
+            ]).collect()).unwrap()).collect::<Vec<_>>();
+        for shards in [1, 2, 7, 64, 4096] {
+            let expected = partition_batches(&batches, &["key"], shards).unwrap();
+            let actual = partition_batches_owned(batches.clone(), &["key"], shards).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.iter().map(Batch::num_rows).sum::<usize>(), 19 * 7);
+        }
+        assert!(partition_batches_owned(batches, &["missing"], 3).is_err());
+    }
 }
 
 /// Consume a single input batch without duplicating heap-backed payloads.
@@ -810,3 +857,4 @@ mod cross_batch_clustered_partition_regressions {
         }
     }
 }
+

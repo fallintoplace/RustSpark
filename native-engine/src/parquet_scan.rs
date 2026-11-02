@@ -130,7 +130,9 @@ fn projection_indices(
         return Err(Error::Schema("Parquet projection exceeds available columns".into()));
     }
     let indexed = if columns.len().saturating_mul(fields.len()) >= 2048 {
-        let mut indices = std::collections::HashMap::with_capacity(fields.len());
+        let mut indices = std::collections::HashMap::new();
+        indices.try_reserve(fields.len())
+            .map_err(|_| Error::Execution("Parquet column lookup allocation failed".into()))?;
         for (position, field) in fields.iter().enumerate() {
             // A case-insensitive collision must not silently read a different
             // physical column. None marks an ambiguous root field name.
@@ -147,8 +149,12 @@ fn projection_indices(
     } else {
         None
     };
-    let mut selected = Vec::with_capacity(columns.len());
-    let mut seen = std::collections::HashSet::with_capacity(columns.len());
+    let mut selected = Vec::new();
+    selected.try_reserve_exact(columns.len())
+        .map_err(|_| Error::Execution("Parquet projection allocation failed".into()))?;
+    let mut seen = std::collections::HashSet::new();
+    seen.try_reserve(columns.len())
+        .map_err(|_| Error::Execution("Parquet projection index allocation failed".into()))?;
     for &name in columns {
         let position = if let Some(indices) = &indexed {
             match indices.get(&name.to_ascii_lowercase()) {
@@ -192,7 +198,9 @@ fn validate_row_groups(indices: &[usize], available: usize) -> Result<()> {
         }
         return Ok(());
     }
-    let mut seen = std::collections::HashSet::with_capacity(indices.len());
+    let mut seen = std::collections::HashSet::new();
+    seen.try_reserve(indices.len())
+        .map_err(|_| Error::Execution("Parquet row-group index allocation failed".into()))?;
     for &index in indices {
         if index >= available || !seen.insert(index) {
             return Err(Error::Execution("invalid or repeated Parquet row group".into()));
@@ -221,7 +229,11 @@ pub fn scan_with_options(
     }
     if let Some(row_groups) = options.row_groups {
         validate_row_groups(row_groups, builder.metadata().num_row_groups())?;
-        builder = builder.with_row_groups(row_groups.to_vec());
+        let mut selected = Vec::new();
+        selected.try_reserve_exact(row_groups.len())
+            .map_err(|_| Error::Execution("Parquet row-group selection allocation failed".into()))?;
+        selected.extend_from_slice(row_groups);
+        builder = builder.with_row_groups(selected);
     }
     builder = builder.with_offset(options.offset);
     if let Some(limit) = options.limit {
@@ -925,5 +937,33 @@ mod row_group_small_selection_admission_tests {
                 .collect::<Vec<_>>();
             assert!(validate_row_groups(&indices, count * 2).is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod fallible_parquet_scan_selection_regressions {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn wide_projection_preserves_requested_columns_and_rejects_duplicates() {
+        let fields = (0..192).map(|i| Arc::new(arrow_schema::Field::new(
+            format!("column_{i}"), arrow_schema::DataType::Int64, true
+        ))).collect::<Vec<_>>();
+        let names = (0..192).rev().map(|i| format!("column_{i}")).collect::<Vec<_>>();
+        let requested = names.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(projection_indices(&fields, &requested).unwrap(),
+            (0..192).rev().collect::<Vec<_>>());
+        assert!(projection_indices(&fields, &["column_1", "COLUMN_1"]).is_err());
+        assert!(projection_indices(&fields, &["missing"]).is_err());
+    }
+
+    #[test]
+    fn large_row_group_selections_are_bounded_and_exact() {
+        let selection = (0..64).rev().collect::<Vec<_>>();
+        assert!(validate_row_groups(&selection, 64).is_ok());
+        assert!(validate_row_groups(&[0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+            12, 13, 14, 15, 16], 64).is_err());
+        assert!(validate_row_groups(&[64], 64).is_err());
     }
 }
