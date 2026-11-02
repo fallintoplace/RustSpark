@@ -70,6 +70,7 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::AvgDistinct(_) => Ok(State::AvgDistinct {
             keys: HashSet::new(), bytes: 0, sum: 0.0, compensation: 0.0, count: 0,
         }),
+        _ => Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     }
 }
 
@@ -169,6 +170,7 @@ fn add_to_state(
             Some(index) => Cow::Borrowed(batch.value(row, index)?),
             None => Cow::Owned(expr.evaluate(batch, row)?),
         },
+        _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     };
     if value.is_null() { return Ok(()); }
     let is_min = matches!(state, State::Min(_));
@@ -215,6 +217,7 @@ fn bind_aggregate_column(op: &AggregateOp, schema: &Schema) -> Result<Option<usi
         AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) |
         AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) |
         AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr,
+        _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     };
     match expression {
         Expr::Column(name) => Ok(Some(schema.column(name)?)),
@@ -242,6 +245,7 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
                 DataType::Integer | DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("AVG requires numeric input".into())),
             },
+            _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
         };
         let nullable = !matches!(&item.op, AggregateOp::CountAll | AggregateOp::Count(_) | AggregateOp::CountDistinct(_));
         fields.push(Field::new(&item.alias, ty, nullable));
