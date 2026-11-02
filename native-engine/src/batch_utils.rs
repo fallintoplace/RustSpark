@@ -2,6 +2,20 @@ use crate::{batch::Batch, schema::Schema, Error, Result};
 #[cfg(test)]
 use crate::scalar::Value;
 
+fn checked_concat_rows(
+    schema: &Schema, batch: &Batch, current: usize, max_rows: usize,
+) -> Result<usize> {
+    if batch.schema() != schema {
+        return Err(Error::Schema("cannot concatenate different batch schemas".into()));
+    }
+    let total = current.checked_add(batch.num_rows())
+        .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
+    if total > max_rows {
+        return Err(Error::Execution("batch collection row limit exceeded".into()));
+    }
+    Ok(total)
+}
+
 pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     if rows_per_batch == 0 {
         return Err(Error::Execution("batch size must be positive".into()));
@@ -19,46 +33,25 @@ pub fn concat(
     // Inspect at most two owned batches before deciding whether concatenation
     // actually needs to duplicate any column buffers.
     let Some(first) = inputs.next() else { return Ok(Batch::empty(schema.clone())); };
-    if first.schema() != schema {
-        return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-    }
-    if first.num_rows() > max_rows {
-        return Err(Error::Execution("batch collection row limit exceeded".into()));
-    }
+    let mut total = checked_concat_rows(schema, &first, 0, max_rows)?;
     let Some(second) = inputs.next() else { return Ok(first); };
     // A provably exhausted iterator with one empty batch can move its
     // nonempty batch directly instead of duplicating all column values.
     if inputs.size_hint().1 == Some(0) {
-        if second.schema() != schema {
-            return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-        }
+        checked_concat_rows(schema, &second, total, max_rows)?;
         if second.num_rows() == 0 {
-            if first.num_rows() > max_rows {
-                return Err(Error::Execution("batch collection row limit exceeded".into()));
-            }
             return Ok(first);
         }
         if first.num_rows() == 0 {
-            if second.num_rows() > max_rows {
-                return Err(Error::Execution("batch collection row limit exceeded".into()));
-            }
             return Ok(second);
         }
     }
     // The first owned batch already owns validated column buffers. Use
     // them as accumulation buffers instead of allocating one Vec per column
     // and copying the first batch into those fresh vectors.
-    let mut total = first.num_rows();
     let mut columns = first.into_columns();
     for batch in std::iter::once(second).chain(inputs) {
-        if batch.schema() != schema {
-            return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-        }
-        total = total.checked_add(batch.num_rows())
-            .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
-        if total > max_rows {
-            return Err(Error::Execution("batch collection row limit exceeded".into()));
-        }
+        total = checked_concat_rows(schema, &batch, total, max_rows)?;
         // The iterator owns each batch. Move its column values rather than
         // deep-cloning TEXT payloads for every concatenated row.
         for (output, values) in columns.iter_mut().zip(batch.into_columns()) {
@@ -326,5 +319,24 @@ mod reuse_first_concat_column_buffers_tests {
         let batches = (1..=4).map(|count|
             Batch::new_with_row_count(zero_width.clone(), vec![], count).unwrap());
         assert_eq!(concat(&zero_width, batches, 10).unwrap().num_rows(), 10);
+    }
+}
+
+#[cfg(test)]
+mod checked_concat_refactor_tests {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn shared_check_rejects_schema_changes_and_budget_overflow() {
+        let schema = Schema::new(vec![Field::new("x", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        assert_eq!(checked_concat_rows(&schema, &batch, 1, 3).unwrap(), 3);
+        assert!(checked_concat_rows(&schema, &batch, 2, 3).is_err());
+        assert!(checked_concat_rows(&schema, &batch, usize::MAX, usize::MAX).is_err());
+        let different = Schema::new(vec![Field::new("y", DataType::Integer, false)]).unwrap();
+        assert!(checked_concat_rows(&different, &batch, 0, 3).is_err());
     }
 }
