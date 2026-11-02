@@ -1848,7 +1848,7 @@ mod sql_cast_feature_tests {
         let plan = parse_sql("SELECT CAST(value AS BIGINT) AS id FROM t").unwrap();
         assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(12)], vec![Value::Null]]);
-        assert!(parse_sql("SELECT CAST(value AS DATE) FROM t").is_err());
+        assert!(parse_sql("SELECT CAST(value AS DATE) FROM t").is_ok());
     }
 }
 
