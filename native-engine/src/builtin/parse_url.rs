@@ -24,6 +24,18 @@ fn find_authority(input: &str) -> Option<&str> {
     Some(remainder.split(['/', '?', '#']).next().unwrap_or(""))
 }
 
+fn raw_components(url: &str) -> (&str, Option<&str>, Option<&str>) {
+    let (without_ref, fragment) = match url.split_once('#') {
+        Some((left, right)) => (left, Some(right)),
+        None => (url, None),
+    };
+    let (without_query, query) = match without_ref.split_once('?') {
+        Some((left, right)) => (left, Some(right)),
+        None => (without_ref, None),
+    };
+    (without_query, query, fragment)
+}
+
 fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
     if url.len() > MAX_URL_BYTES {
         return Err(Error::Execution("PARSE_URL input exceeds 16 MiB budget".into()));
@@ -45,20 +57,14 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
         }
         Err(error) => return Err(Error::Parse(format!("invalid URL: {error}"))),
     };
-    let (without_ref, fragment) = match url.split_once('#') {
-        Some((left, right)) => (left, Some(right)),
-        None => (url, None),
-    };
-    let (without_query, query) = match without_ref.split_once('?') {
-        Some((left, right)) => (left, Some(right)),
-        None => (without_ref, None),
-    };
+    let (without_query, query, fragment) = raw_components(url);
+    let authority = find_authority(without_query);
     // Opaque URIs have a scheme-specific part, not a hierarchical path.
     // Keep relative paths intact, but do not report the entire URI as PATH.
     let raw_path = if parsed.as_ref().is_some_and(Url::cannot_be_a_base) {
         None
     } else {
-        Some(match find_authority(without_query) {
+        Some(match authority {
             Some(authority) => {
                 let after_scheme = without_query.split_once("://")
                     .map(|(_, rest)| rest).unwrap_or("");
@@ -92,9 +98,9 @@ fn extract(url: &str, part: &str, key: Option<&str>) -> Result<Value> {
     } else if part.eq_ignore_ascii_case("HOST") {
         parsed.as_ref().and_then(|parsed| parsed.host_str())
     } else if part.eq_ignore_ascii_case("AUTHORITY") {
-        find_authority(without_query)
+        authority
     } else if part.eq_ignore_ascii_case("USERINFO") {
-        find_authority(without_query)
+        authority
             .and_then(|authority| authority.rsplit_once('@').map(|(user, _)| user))
     } else if part.eq_ignore_ascii_case("PATH") {
         raw_path
@@ -323,5 +329,27 @@ mod fallible_url_part_tests {
         assert_eq!(extract("relative/path?q=", "FILE", None).unwrap(),
             Value::Text("relative/path?q=".into()));
         assert_eq!(extract("mailto:user@example.org", "FILE", None).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod raw_uri_component_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn query_fragment_and_authority_keep_raw_component_boundaries() {
+        let url = "https://user@example.org/x?x=1&empty=#frag?still-ref";
+        assert_eq!(extract(url, "AUTHORITY", None).unwrap(),
+            Value::Text("user@example.org".into()));
+        assert_eq!(extract(url, "USERINFO", None).unwrap(),
+            Value::Text("user".into()));
+        assert_eq!(extract(url, "QUERY", Some("empty")).unwrap(),
+            Value::Text(String::new()));
+        assert_eq!(extract(url, "FILE", None).unwrap(),
+            Value::Text("/x?x=1&empty=".into()));
+        assert_eq!(extract(url, "REF", None).unwrap(),
+            Value::Text("frag?still-ref".into()));
+        assert_eq!(extract("relative/path?x=1#z", "PATH", None).unwrap(),
+            Value::Text("relative/path".into()));
     }
 }
