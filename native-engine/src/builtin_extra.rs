@@ -84,6 +84,14 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             }
             Ok(first)
         },
+        "UNIX_DATE" => {
+            if args.len() != 1 { return Err(Error::Parse("UNIX_DATE requires one argument".into())); }
+            if !matches!(&args[0], Expr::Literal(Value::Null))
+                && args[0].output_type(schema)? != DataType::Text {
+                return Err(Error::Type("UNIX_DATE requires ISO date text".into()));
+            }
+            Ok(DataType::Integer)
+        },
         "DATE_ADD" | "DATE_SUB" => {
             if args.len() != 2 {
                 return Err(Error::Parse(format!("{name} requires date and day offset")));
@@ -346,6 +354,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "UNIX_DATE" => match args {
+            [Value::Text(date)] => Ok(Value::Integer(tpch_iso_days(date)?)),
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("UNIX_DATE requires ISO date text".into())),
         },
         "DATE_ADD" | "DATE_SUB" => match args {
             [Value::Text(text), Value::Integer(amount)] => {
