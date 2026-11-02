@@ -111,6 +111,13 @@ impl FileCatalog {
         self.tables.contains_key(key) || self.parquet.contains_key(key)
     }
 
+    fn ensure_available(&self, key: &str, name: &str) -> Result<()> {
+        if self.contains_key(key) {
+            return Err(Error::Schema(format!("file-backed table already exists: {name}")));
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self { Self::default() }
 
     pub fn register_csv(
@@ -121,9 +128,7 @@ impl FileCatalog {
         if schema.is_empty() || max_record_bytes == 0 {
             return Err(Error::Schema("CSV source requires a schema and byte limit".into()));
         }
-        if self.contains_key(key.as_ref()) {
-            return Err(Error::Schema(format!("file-backed table already exists: {name}")));
-        }
+        self.ensure_available(key.as_ref(), name)?;
         self.tables.try_reserve(1)
             .map_err(|_| Error::Execution("CSV catalog allocation failed".into()))?;
         self.tables.insert(key.into_owned(), CsvTable {
@@ -134,9 +139,7 @@ impl FileCatalog {
 
     pub fn register_parquet(&mut self, name: &str, path: impl AsRef<Path>) -> Result<()> {
         let key = normalized(name)?;
-        if self.contains_key(key.as_ref()) {
-            return Err(Error::Schema(format!("file-backed table already exists: {name}")));
-        }
+        self.ensure_available(key.as_ref(), name)?;
         let path = path.as_ref();
         let file = open_regular_source(path)?;
         let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
@@ -162,20 +165,12 @@ impl FileCatalog {
             match entry {
                 FileRegistration::Csv { name, path, schema, max_record_bytes } => {
                     let key = normalized(&name)?;
-                    if self.contains_key(key.as_ref()) {
-                        return Err(Error::Schema(format!(
-                            "file-backed table already exists: {name}"
-                        )));
-                    }
+                    self.ensure_available(key.as_ref(), &name)?;
                     staged.register_csv(&name, path, schema, max_record_bytes)?;
                 }
                 FileRegistration::Parquet { name, path } => {
                     let key = normalized(&name)?;
-                    if self.contains_key(key.as_ref()) {
-                        return Err(Error::Schema(format!(
-                            "file-backed table already exists: {name}"
-                        )));
-                    }
+                    self.ensure_available(key.as_ref(), &name)?;
                     staged.register_parquet(&name, path)?;
                 }
             }
