@@ -41,17 +41,32 @@ impl<'de> Deserialize<'de> for UniqueObject {
     }
 }
 
+enum NativeNumber {
+    Integer(i64),
+    Float(f64),
+}
+
+fn native_number(number: &serde_json::Number) -> Result<NativeNumber> {
+    if let Some(value) = number.as_i64() {
+        return Ok(NativeNumber::Integer(value));
+    }
+    if number.as_u64().is_some() {
+        return Err(Error::Type("JSONL unsigned integer exceeds BIGINT range".into()));
+    }
+    number.as_f64().filter(|n| n.is_finite())
+        .map(NativeNumber::Float)
+        .ok_or_else(|| Error::Type("invalid JSONL number".into()))
+}
+
 fn native_type(value: &Json) -> Result<Option<DataType>> {
     match value {
         Json::Null => Ok(None),
         Json::Bool(_) => Ok(Some(DataType::Boolean)),
         Json::String(_) => Ok(Some(DataType::Text)),
-        Json::Number(number) if number.as_i64().is_some() => Ok(Some(DataType::Integer)),
-        Json::Number(number) if number.as_u64().is_some() =>
-            Err(Error::Type("JSONL unsigned integer exceeds BIGINT range".into())),
-        Json::Number(number) if number.as_f64().is_some_and(f64::is_finite) =>
-            Ok(Some(DataType::Float)),
-        Json::Number(_) => Err(Error::Type("invalid JSONL number".into())),
+        Json::Number(number) => Ok(Some(match native_number(number)? {
+            NativeNumber::Integer(_) => DataType::Integer,
+            NativeNumber::Float(_) => DataType::Float,
+        })),
         _ => Err(Error::Unsupported("native JSONL supports scalar values only".into())),
     }
 }
@@ -61,13 +76,10 @@ fn native_value(value: Json) -> Result<Value> {
         Json::Null => Ok(Value::Null),
         Json::Bool(flag) => Ok(Value::Boolean(flag)),
         Json::String(text) => Ok(Value::Text(text)),
-        Json::Number(number) if number.as_i64().is_some() =>
-            Ok(Value::Integer(number.as_i64().expect("checked signed integer"))),
-        Json::Number(number) if number.as_u64().is_some() =>
-            Err(Error::Type("JSONL unsigned integer exceeds BIGINT range".into())),
-        Json::Number(number) => number.as_f64()
-            .filter(|n| n.is_finite()).map(Value::Float)
-            .ok_or_else(|| Error::Type("invalid JSONL number".into())),
+        Json::Number(number) => Ok(match native_number(&number)? {
+            NativeNumber::Integer(value) => Value::Integer(value),
+            NativeNumber::Float(value) => Value::Float(value),
+        }),
         _ => Err(Error::Unsupported("native JSONL supports scalar values only".into())),
     }
 }

@@ -24,6 +24,22 @@ def _kill_process_group(process: subprocess.Popen) -> None:
             pass
 
 
+def _collect_bounded_pipe(
+    pipe, target: bytearray, limit: int,
+    exceeded: threading.Event, process: subprocess.Popen,
+) -> None:
+    """Stop the entire child group when either output pipe exceeds its cap."""
+    while True:
+        chunk = pipe.read1(min(65536, limit - len(target) + 1))
+        if not chunk:
+            return
+        if len(target) + len(chunk) > limit:
+            exceeded.set()
+            _kill_process_group(process)
+            return
+        target.extend(chunk)
+
+
 def run_bounded(
     command: list[str], *, timeout: float | None,
     max_output_bytes: int,
@@ -48,22 +64,17 @@ def run_bounded(
     try:
         assert process.stdout is not None and process.stderr is not None
 
-        def collect(pipe, target: bytearray, limit: int):
-            while True:
-                chunk = pipe.read1(min(65536, limit - len(target) + 1))
-                if not chunk:
-                    return
-                if len(target) + len(chunk) > limit:
-                    exceeded.set()
-                    _kill_process_group(process)
-                    return
-                target.extend(chunk)
-
         workers = [
-            threading.Thread(target=collect, args=(process.stdout, stdout, max_output_bytes),
-                             daemon=True),
-            threading.Thread(target=collect, args=(process.stderr, stderr, max_error_bytes),
-                             daemon=True),
+            threading.Thread(
+                target=_collect_bounded_pipe,
+                args=(process.stdout, stdout, max_output_bytes, exceeded, process),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_collect_bounded_pipe,
+                args=(process.stderr, stderr, max_error_bytes, exceeded, process),
+                daemon=True,
+            ),
         ]
         for worker in workers:
             worker.start()

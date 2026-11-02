@@ -6,6 +6,11 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Integer)
 }
 
+fn checked_count(count: usize) -> Result<Value> {
+    i64::try_from(count).map(Value::Integer)
+        .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -14,9 +19,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if pattern.is_empty() {
         let characters = if text.is_ascii() { text.len() } else { text.chars().count() };
         let count = characters.checked_add(1)
-            .and_then(|n| i64::try_from(n).ok())
             .ok_or_else(|| Error::Execution("REGEXP_COUNT overflow".into()))?;
-        return Ok(Value::Integer(count));
+        return checked_count(count);
     }
     // An anchored identifier literal can match at most once.
     if let Some(prefix) = pattern.strip_prefix('^') {
@@ -35,8 +39,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             if letter && (!runs || !previous_letter) { count += 1; }
             previous_letter = letter;
         }
-        return i64::try_from(count).map(Value::Integer)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+        return checked_count(count);
     }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
         // These exact classes match ASCII bytes, not Unicode-wide \\d.
@@ -49,37 +52,31 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             if digit && (!runs || !previous_digit) { count += 1; }
             previous_digit = digit;
         }
-        return i64::try_from(count).map(Value::Integer)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+        return checked_count(count);
     }
     if pattern == ".+" {
         // Greedy dot-plus matches each maximal nonempty run excluding LF.
         // Counting those runs avoids compiling or traversing regex matches.
         let runs = text.split('\n').filter(|part| !part.is_empty()).count();
-        return i64::try_from(runs).map(Value::Integer)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()));
+        return checked_count(runs);
     }
     if pattern == "." {
         // Rust regex dot matches a Unicode scalar except LF by default.
         let count = text.chars().filter(|&ch| ch != '\n').count();
-        return Ok(Value::Integer(i64::try_from(count)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
+        return checked_count(count);
     }
     if pattern.len() == 1 && pattern.as_bytes()[0].is_ascii_alphanumeric() {
         let needle = pattern.as_bytes()[0];
         let count = text.bytes().filter(|&byte| byte == needle).count();
-        return Ok(Value::Integer(i64::try_from(count)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
+        return checked_count(count);
     }
     if pattern.len() <= 4096 && pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
         let count = text.match_indices(pattern).count();
-        return Ok(Value::Integer(i64::try_from(count)
-            .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?));
+        return checked_count(count);
     }
     let re = regex_support::compile(pattern)?;
     let count = re.find_iter(text).count();
-    Ok(Value::Integer(i64::try_from(count)
-        .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?))
+    checked_count(count)
 }
 
 fn regexp_predicate_type(types: &[DataType]) -> Result<DataType> {
@@ -319,5 +316,18 @@ mod native_regexp_predicate_alias_tests {
         assert_eq!(regexp_predicate(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
         assert!(regexp_predicate(&[Value::Text("a".into()), Value::Text("(".into())]).is_err());
         assert!(regexp_predicate_type(&[DataType::Text, DataType::Integer]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod checked_count_result_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_exact_regex_count_results() {
+        assert_eq!(checked_count(0).unwrap(), Value::Integer(0));
+        assert_eq!(checked_count(42).unwrap(), Value::Integer(42));
+        #[cfg(target_pointer_width = "64")]
+        assert!(checked_count(usize::MAX).unwrap_err().to_string().contains("REGEXP_COUNT overflow"));
     }
 }

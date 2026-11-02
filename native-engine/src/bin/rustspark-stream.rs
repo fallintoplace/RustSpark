@@ -32,6 +32,7 @@ struct Args {
     parquet_tables: Vec<(String, PathBuf)>,
     table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
+    sort_run_rows: usize, merge_fan_in: usize,
     explain: bool,
     query_timeout: Option<u64>,
     max_rows: Option<usize>,
@@ -70,6 +71,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut sql_file = None;
     let mut batch_rows = 4096;
     let mut record_bytes = 8 * 1024 * 1024;
+    let mut sort_run_rows = 4096;
+    let mut merge_fan_in = 16;
     let mut scratch = env::temp_dir();
     let mut explain = false;
     let mut query_timeout = None;
@@ -114,6 +117,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "--sql-file" => sql_file = Some(PathBuf::from(value)),
             "--batch-rows" => batch_rows = value.parse()
                 .map_err(|_| Error::Parse("invalid --batch-rows".into()))?,
+            "--sort-run-rows" => sort_run_rows = value.parse()
+                .map_err(|_| Error::Parse("invalid --sort-run-rows".into()))?,
+            "--merge-fan-in" => merge_fan_in = value.parse()
+                .map_err(|_| Error::Parse("invalid --merge-fan-in".into()))?,
             "--max-record-bytes" => record_bytes = value.parse()
                 .map_err(|_| Error::Parse("invalid --max-record-bytes".into()))?,
             "--scratch-dir" => scratch = PathBuf::from(value),
@@ -135,7 +142,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
         }
     }
     if batch_rows == 0 || batch_rows > 65_536 ||
-        record_bytes == 0 || record_bytes > 64 * 1024 * 1024 {
+        record_bytes == 0 || record_bytes > 64 * 1024 * 1024 ||
+        !(1..=65_536).contains(&sort_run_rows) ||
+        !(2..=64).contains(&merge_fan_in) {
         return Err(Error::Execution("streaming input limit out of bounds".into()));
     }
     let sql = match (sql, sql_file) {
@@ -159,7 +168,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     Ok(Some(Args {
         csv, parquet, catalog_manifest, parquet_tables,
         table, schema, sql, batch_rows, record_bytes, scratch,
-        explain, query_timeout, max_rows,
+        sort_run_rows, merge_fan_in, explain, query_timeout, max_rows,
     }))
 }
 
@@ -264,6 +273,8 @@ fn run() -> Result<()> {
     } else {
         QueryControl::default()
     };
+    // Reject invalid SQL before reading Parquet metadata or CSV headers.
+    let plan = sql::parse_sql(&args.sql)?;
     let mut catalog = if let Some(path) = &args.catalog_manifest {
         catalog_manifest::load(path)?
     } else {
@@ -278,9 +289,9 @@ fn run() -> Result<()> {
     for (name, path) in &args.parquet_tables {
         catalog.register_parquet(name, path)?;
     }
-    let plan = sql::parse_sql(&args.sql)?;
     let options = StreamOptions {
         batch_rows: args.batch_rows, scratch_directory: args.scratch,
+        sort_run_rows: args.sort_run_rows, merge_fan_in: args.merge_fan_in,
         ..StreamOptions::default()
     };
     let schema = stream_execute::output_schema(&plan, &catalog, &options)?;
@@ -288,6 +299,15 @@ fn run() -> Result<()> {
         let graph = rustspark_native::stages::StageGraph::from_plan(&plan)?;
         print!("{}", graph.explain_text());
         return Ok(());
+    }
+    // A zero output cap needs only a validated result schema. Blocking
+    // operators such as GROUP BY otherwise scan and spill the entire input.
+    if args.max_rows == Some(0) {
+        control.check()?;
+        let stdout = io::stdout();
+        let mut output = io::BufWriter::new(stdout.lock());
+        write_csv(&schema, std::iter::empty::<Result<Batch>>(), &mut output)?;
+        return control.check();
     }
     control.check()?;
     let input = stream_execute::execute(&plan, &catalog, &options, control.clone())?;
@@ -512,6 +532,32 @@ mod output_row_limit_tests {
         }
         assert!(parse(&["--parquet", "t.parquet", "--sql", "SELECT 1",
             "--max-rows", "1", "--max-rows", "2"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sort_tuning_flags_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_bounded_spill_sort_settings() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["--parquet", "data.parquet", "--sql", "SELECT n FROM data ORDER BY n"];
+            args.extend_from_slice(extra);
+            parse_args(args.into_iter().map(String::from))
+        };
+        let defaults = parse(&[]).unwrap().unwrap();
+        assert_eq!(defaults.sort_run_rows, 4096);
+        assert_eq!(defaults.merge_fan_in, 16);
+        let tuned = parse(&["--sort-run-rows", "2", "--merge-fan-in", "3"]).unwrap().unwrap();
+        assert_eq!(tuned.sort_run_rows, 2);
+        assert_eq!(tuned.merge_fan_in, 3);
+        for value in ["0", "65537", "-1", "oops"] {
+            assert!(parse(&["--sort-run-rows", value]).is_err());
+        }
+        for value in ["0", "1", "65", "oops"] {
+            assert!(parse(&["--merge-fan-in", value]).is_err());
+        }
     }
 }
 

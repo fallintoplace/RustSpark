@@ -96,27 +96,30 @@ def make_command(binary: str, database_dir: Path, template: Path,
     return arguments
 
 
+def _reject_nonfinite(value: str):
+    raise ValueError(f"Nonfinite SQL JSON constant: {value}")
+
+
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("Nonfinite SQL JSON number")
+    return parsed
+
+
+def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    fields = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError(f"Duplicate SQL result key: {key}")
+        fields[key] = value
+    return fields
+
+
 def parse_query_rows(text: str) -> list[dict]:
-    def reject_nonfinite(value):
-        raise ValueError(f"Nonfinite SQL JSON constant: {value}")
-
-    def parse_finite_float(value):
-        parsed = float(value)
-        if not math.isfinite(parsed):
-            raise ValueError("Nonfinite SQL JSON number")
-        return parsed
-
-    def unique_fields(pairs):
-        fields = {}
-        for key, value in pairs:
-            if key in fields:
-                raise ValueError(f"Duplicate SQL result key: {key}")
-            fields[key] = value
-        return fields
-
     try:
-        rows = json.loads(text, object_pairs_hook=unique_fields,
-                          parse_constant=reject_nonfinite, parse_float=parse_finite_float)
+        rows = json.loads(text, object_pairs_hook=_unique_fields,
+                          parse_constant=_reject_nonfinite, parse_float=_parse_finite_float)
     except RecursionError as error:
         raise ValueError("SQL result exceeds JSON nesting limit") from error
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):

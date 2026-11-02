@@ -104,6 +104,18 @@ pub struct Function {
     pub call: fn(&[Value]) -> Result<Value>,
 }
 
+// Both ROUND and BROUND decode nullable decimal scales before evaluating input.
+fn bounded_rounding_scale(args: &[Value], range_error: &'static str) -> Result<Option<i64>> {
+    let scale = if args.len() == 2 {
+        let Some(value) = integer(&args[1])? else { return Ok(None); };
+        value
+    } else { 0 };
+    if !(-15..=15).contains(&scale) {
+        return Err(Error::Execution(range_error.into()));
+    }
+    Ok(Some(scale))
+}
+
 fn coalesce_type(types: &[DataType]) -> Result<DataType> {
     same_type(types)
 }
@@ -293,6 +305,15 @@ pub fn finite(value: f64) -> Result<Value> {
     else { Err(Error::Execution("SQL function produced nonfinite number".into())) }
 }
 
+// Shared by unary math builtins. Preserve NULL propagation and reject
+// nonfinite results after applying the operation.
+fn unary_float(args: &[Value], operation: fn(f64) -> f64) -> Result<Value> {
+    match number(&args[0])? {
+        Some(value) => finite(operation(value)),
+        None => Ok(Value::Null),
+    }
+}
+
 pub fn output_type(name: &str, arguments: &[Expr], schema: &Schema) -> Result<DataType> {
     let function = lookup(name)?;
     check_arity(function, arguments.len())?;
@@ -443,5 +464,19 @@ mod nullable_if_branch_type_tests {
         let args = [literal(Value::Boolean(true)), literal(Value::Integer(1)),
                     literal(Value::Text("bad".into()))];
         assert!(output_type("if", &args, &schema).is_err());
+    }
+}
+
+#[cfg(test)]
+mod unary_float_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_nulls_numeric_coercion_and_finite_checks() {
+        assert_eq!(unary_float(&[Value::Integer(9)], f64::sqrt).unwrap(),
+            Value::Float(3.0));
+        assert_eq!(unary_float(&[Value::Null], f64::sqrt).unwrap(), Value::Null);
+        assert!(unary_float(&[Value::Integer(-1)], f64::sqrt).is_err());
+        assert!(unary_float(&[Value::Text("9".into())], f64::sqrt).is_err());
     }
 }

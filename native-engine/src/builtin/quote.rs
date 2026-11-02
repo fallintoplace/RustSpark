@@ -6,8 +6,7 @@ fn output(types: &[DataType]) -> Result<DataType> {
     else { Err(Error::Type("QUOTE has incompatible SQL argument types".into())) }
 }
 
-fn evaluate(args: &[Value]) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+fn quoted_length(text: &str) -> Result<usize> {
     const MAX_OUTPUT: usize = 16 * 1024 * 1024;
     let base_length = text.len().checked_add(2)
         .ok_or_else(|| Error::Execution("QUOTE output length overflow".into()))?;
@@ -15,12 +14,29 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("QUOTE output exceeds native 16 MiB budget".into()));
     }
 
+    // Plain strings need only the surrounding quotes. Bypass escape
+    // counting and the repeated substring search for the common case.
+    if !text.contains(['\'', '\\']) {
+        let mut output = String::new();
+        output.try_reserve_exact(base_length)
+            .map_err(|_| Error::Execution("QUOTE output allocation failed".into()))?;
+        output.push('\'');
+        output.push_str(text);
+        output.push('\'');
+        return Ok(Value::Text(output));
+    }
+
     // Count escapes before allocation. Besides making output size exact,
     // this prevents late errors after a near-limit String has been built.
     let escapes = text.bytes().filter(|&byte| byte == b'\'' || byte == b'\\').count();
-    let final_length = base_length.checked_add(escapes)
+    base_length.checked_add(escapes)
         .filter(|&bytes| bytes <= MAX_OUTPUT)
-        .ok_or_else(|| Error::Execution("QUOTE output exceeds native 16 MiB budget".into()))?;
+        .ok_or_else(|| Error::Execution("QUOTE output exceeds native 16 MiB budget".into()))
+}
+
+fn evaluate(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let final_length = quoted_length(text)?;
     let mut output = String::new();
     output.try_reserve_exact(final_length)
         .map_err(|_| Error::Execution("QUOTE output allocation failed".into()))?;
@@ -260,5 +276,34 @@ mod safe_ascii_json_quote_regressions {
             Value::Text(format!("\"{plain}\"")));
         assert_eq!(json_quote(&[Value::Null]).unwrap(), Value::Null);
         assert!(json_quote(&[Value::Text("x".repeat(JSON_QUOTE_LIMIT - 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod quote_unescaped_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn quotes_plain_utf8_without_changing_escape_rules() {
+        for value in ["", "plain ASCII", "café🙂", "line\nbreak"] {
+            assert_eq!(evaluate(&[Value::Text(value.into())]).unwrap(),
+                Value::Text(format!("'{value}'")));
+        }
+        assert_eq!(evaluate(&[Value::Text("a'b".into())]).unwrap(),
+            Value::Text("'a\\'b'".into()));
+        assert_eq!(evaluate(&[Value::Text("a\\b".into())]).unwrap(),
+            Value::Text("'a\\\\b'".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn plain_text_respects_the_output_budget() {
+        const LIMIT: usize = 16 * 1024 * 1024;
+        let within = "x".repeat(LIMIT - 2);
+        let result = evaluate(&[Value::Text(within)]).unwrap();
+        let Value::Text(result) = result else { panic!("expected quoted text"); };
+        assert_eq!(result.len(), LIMIT);
+        assert!(matches!(evaluate(&[Value::Text("x".repeat(LIMIT - 1))]),
+            Err(Error::Execution(_))));
     }
 }

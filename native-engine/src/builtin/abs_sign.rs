@@ -5,11 +5,17 @@ fn abs_type(types: &[DataType]) -> Result<DataType> {
     numeric(types[0])?;
     Ok(types[0])
 }
+fn checked_integer_unary(
+    value: i64, operation: fn(i64) -> Option<i64>, message: &str,
+) -> Result<Value> {
+    operation(value).map(Value::Integer)
+        .ok_or_else(|| Error::Execution(message.into()))
+}
+
 fn abs(args: &[Value]) -> Result<Value> {
     match args[0] {
         Value::Null => Ok(Value::Null),
-        Value::Integer(n) => n.checked_abs().map(Value::Integer)
-            .ok_or_else(|| Error::Execution("ABS integer overflow".into())),
+        Value::Integer(n) => checked_integer_unary(n, i64::checked_abs, "ABS integer overflow"),
         Value::Float(n) => super::finite(n.abs()),
         _ => Err(Error::Type("ABS expects numeric value".into())),
     }
@@ -17,8 +23,7 @@ fn abs(args: &[Value]) -> Result<Value> {
 fn negative(args: &[Value]) -> Result<Value> {
     match &args[0] {
         Value::Null => Ok(Value::Null),
-        Value::Integer(number) => number.checked_neg().map(Value::Integer)
-            .ok_or_else(|| Error::Execution("NEGATIVE integer overflow".into())),
+        Value::Integer(number) => checked_integer_unary(*number, i64::checked_neg, "NEGATIVE integer overflow"),
         Value::Float(number) => super::finite(-number),
         _ => Err(Error::Type("NEGATIVE requires numeric input".into())),
     }
@@ -64,6 +69,19 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "sign", min_args: 1, max_args: 1, result_type: float_type, call: sign },
     Function { name: "signum", min_args: 1, max_args: 1, result_type: float_type, call: sign },
 ];
+
+#[cfg(test)]
+mod checked_integer_unary_tests {
+    use super::*;
+
+    #[test]
+    fn checked_operations_preserve_overflow_diagnostics() {
+        assert!(abs(&[Value::Integer(i64::MIN)]).unwrap_err().to_string().contains("ABS"));
+        assert!(negative(&[Value::Integer(i64::MIN)]).unwrap_err().to_string().contains("NEGATIVE"));
+        assert_eq!(abs(&[Value::Integer(-7)]).unwrap(), Value::Integer(7));
+        assert_eq!(negative(&[Value::Integer(-7)]).unwrap(), Value::Integer(7));
+    }
+}
 
 #[cfg(test)]
 mod tests {

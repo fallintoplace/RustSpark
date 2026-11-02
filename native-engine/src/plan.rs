@@ -74,8 +74,26 @@ pub enum Plan {
         right: Box<Plan>,
     },
 }
+ 
+struct PlanNodes<'a> {
+    pending: Vec<&'a Plan>,
+}
+
+impl<'a> Iterator for PlanNodes<'a> {
+    type Item = &'a Plan;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let plan = self.pending.pop()?;
+        plan.push_children(&mut self.pending);
+        Some(plan)
+    }
+}
 
 impl Plan {
+    fn nodes(&self) -> PlanNodes<'_> {
+        PlanNodes { pending: vec![self] }
+    }
+
     /// Shared preflight for the materialized and streaming query engines.
     pub(crate) fn validate_expressions(&self) -> crate::Result<()> {
         match self {
@@ -132,24 +150,16 @@ impl Plan {
 
     /// Count nodes in an owned native logical tree without recursive walking.
     pub fn operator_count(&self) -> usize {
-        let mut pending = vec![self];
-        let mut count = 0usize;
-        while let Some(plan) = pending.pop() {
-            count += 1;
-            plan.push_children(&mut pending);
-        }
-        count
+        self.nodes().count()
     }
 
     /// Return all distinct native table scan dependencies in lexical order.
     pub fn scanned_tables(&self) -> Vec<&str> {
-        let mut pending = vec![self];
         let mut names = std::collections::BTreeSet::new();
-        while let Some(plan) = pending.pop() {
+        for plan in self.nodes() {
             if let Self::Scan { table } = plan {
                 names.insert(table.as_str());
             }
-            plan.push_children(&mut pending);
         }
         names.into_iter().collect()
     }
@@ -231,5 +241,23 @@ mod native_plan_inspection_tests {
         assert_eq!(plan.operator_count(), 6);
         assert_eq!(plan.scanned_tables(), vec!["customers", "sales"]);
         assert_eq!(Plan::scan("alone").operator_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod iterative_plan_walker_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn walker_preserves_order_and_scan_deduplication() {
+        let plan = Plan::UnionAll {
+            left: Box::new(Plan::scan("orders").limit(0, Some(5))),
+            right: Box::new(Plan::scan("orders").filter(Expr::Literal(
+                crate::scalar::Value::Boolean(true),
+            ))),
+        };
+        assert_eq!(plan.operator_count(), 5);
+        assert_eq!(plan.scanned_tables(), vec!["orders"]);
+        assert_eq!(plan.nodes().count(), plan.operator_count());
     }
 }

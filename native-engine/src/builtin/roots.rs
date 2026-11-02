@@ -1,12 +1,8 @@
 use super::{float_type, Function};
 use crate::{scalar::Value, schema::DataType, Result};
 
-fn unary(args: &[Value], f: fn(f64) -> f64) -> Result<Value> {
-    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null) };
-    super::finite(f(value))
-}
-fn sqrt(args: &[Value]) -> Result<Value> { unary(args, f64::sqrt) }
-fn cbrt(args: &[Value]) -> Result<Value> { unary(args, f64::cbrt) }
+fn sqrt(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::sqrt) }
+fn cbrt(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::cbrt) }
 
 
 fn isinfinite_type(types: &[DataType]) -> Result<DataType> {

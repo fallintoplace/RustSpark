@@ -22,6 +22,36 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 
 const HASH_TEXT_BUDGET: usize = 16 * 1024 * 1024;
 
+// Hash one complete Murmur3 word without a chunk iterator.
+#[inline]
+fn murmur_block(hash: u32, word: u32) -> u32 {
+    let mixed = word.wrapping_mul(0xCC9E_2D51)
+        .rotate_left(15).wrapping_mul(0x1B87_3593);
+    (hash ^ mixed).rotate_left(13)
+        .wrapping_mul(5).wrapping_add(0xE654_6B64)
+}
+
+#[inline]
+fn murmur_finish(mut hash: u32, size: u32) -> u32 {
+    hash ^= size;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85EB_CA6B);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(0xC2B2_AE35);
+    hash ^ (hash >> 16)
+}
+
+#[inline]
+fn murmur_u32(value: u32, seed: u32) -> u32 {
+    murmur_finish(murmur_block(seed, value), 4)
+}
+
+#[inline]
+fn murmur_u64(value: u64, seed: u32) -> u32 {
+    let hash = murmur_block(seed, value as u32);
+    murmur_finish(murmur_block(hash, (value >> 32) as u32), 8)
+}
+
 // MurmurHash3 x86_32, including Spark's 32-bit seed and final mixing.
 fn murmur3_x86_32(input: &[u8], seed: u32) -> u32 {
     const C1: u32 = 0xCC9E_2D51;
@@ -29,10 +59,8 @@ fn murmur3_x86_32(input: &[u8], seed: u32) -> u32 {
     let mut hash = seed;
     let mut chunks = input.chunks_exact(4);
     for chunk in &mut chunks {
-        let mut key = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        key = key.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
-        hash ^= key;
-        hash = hash.rotate_left(13).wrapping_mul(5).wrapping_add(0xE654_6B64);
+        let key = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        hash = murmur_block(hash, key);
     }
     let tail = chunks.remainder();
     if !tail.is_empty() {
@@ -43,12 +71,7 @@ fn murmur3_x86_32(input: &[u8], seed: u32) -> u32 {
         key = key.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
         hash ^= key;
     }
-    hash ^= input.len() as u32;
-    hash ^= hash >> 16;
-    hash = hash.wrapping_mul(0x85EB_CA6B);
-    hash ^= hash >> 13;
-    hash = hash.wrapping_mul(0xC2B2_AE35);
-    hash ^ (hash >> 16)
+    murmur_finish(hash, input.len() as u32)
 }
 
 fn spark_hash_type(types: &[DataType]) -> Result<DataType> {
@@ -66,15 +89,13 @@ fn spark_hash(args: &[Value]) -> Result<Value> {
     for value in args {
         seed = match value {
             Value::Null => seed,
-            Value::Boolean(value) =>
-                murmur3_x86_32(&i32::from(*value).to_le_bytes(), seed),
-            Value::Integer(value) =>
-                murmur3_x86_32(&value.to_le_bytes(), seed),
+            Value::Boolean(value) => murmur_u32(u32::from(*value), seed),
+            Value::Integer(value) => murmur_u64(*value as u64, seed),
             Value::Float(value) => {
                 let bits = if *value == 0.0 { 0.0_f64.to_bits() }
                     else if value.is_nan() { f64::NAN.to_bits() }
                     else { value.to_bits() };
-                murmur3_x86_32(&bits.to_le_bytes(), seed)
+                murmur_u64(bits, seed)
             }
             Value::Text(value) => {
                 text_bytes = text_bytes.checked_add(value.len())
@@ -150,5 +171,42 @@ mod spark_murmur3_hash_tests {
         let plan = sql::parse_sql("SELECT HASH('Spark'), HASH(0)").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(-684_278_310), Value::Integer(-1_670_924_195)]]);
+    }
+}
+
+#[cfg(test)]
+mod murmur_fixed_scalar_fast_path_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_width_rounds_match_full_murmur3_for_many_seeds() {
+        for seed in [0_u32, 42, u32::MAX, 0x1234_5678] {
+            for value in [0_u32, 1, 42, u32::MAX, 0x8000_0000] {
+                assert_eq!(murmur_u32(value, seed),
+                    murmur3_x86_32(&value.to_le_bytes(), seed));
+            }
+            for value in [0_u64, 1, 42, u64::MAX, 0x8000_0000_0000_0000,
+                0x0123_4567_89ab_cdef] {
+                assert_eq!(murmur_u64(value, seed),
+                    murmur3_x86_32(&value.to_le_bytes(), seed));
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_numeric_hash_still_preserves_spark_seed_chaining() {
+        let values = [Value::Integer(i64::MIN), Value::Boolean(true),
+            Value::Float(-0.0), Value::Text("é🙂".into())];
+        let mut seed = 42_u32;
+        for value in &values {
+            seed = match value {
+                Value::Integer(n) => murmur3_x86_32(&n.to_le_bytes(), seed),
+                Value::Boolean(b) => murmur3_x86_32(&i32::from(*b).to_le_bytes(), seed),
+                Value::Float(_) => murmur3_x86_32(&0_u64.to_le_bytes(), seed),
+                Value::Text(text) => murmur3_x86_32(text.as_bytes(), seed),
+                Value::Null => seed,
+            };
+        }
+        assert_eq!(spark_hash(&values).unwrap(), Value::Integer(i64::from(seed as i32)));
     }
 }

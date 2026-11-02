@@ -3,6 +3,19 @@ use crate::{batch::Batch, scalar::Value, schema::Schema, Error, Result};
 
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
+fn validate_row(schema: &Schema, row: &[Value]) -> Result<()> {
+    if row.len() != schema.len() {
+        return Err(Error::Schema("row width does not match schema".into()));
+    }
+    if let Some(field) = schema.fields().iter().zip(row).find_map(|(field, value)| {
+        (!field.data_type.accepts(value) || (!field.nullable && value.is_null()))
+            .then_some(field)
+    }) {
+        return Err(Error::Type(format!("invalid value in column {}", field.name)));
+    }
+    Ok(())
+}
+
 fn estimated_row_bytes(row: &[Value], base: usize) -> usize {
     row.iter().fold(base, |used, value| {
         used.saturating_add(match value {
@@ -106,25 +119,9 @@ where I: Iterator<Item = Result<Vec<Value>>>
             let next = self.pending_row.take().map(Ok).or_else(|| self.input.next());
             match next {
                 Some(Ok(row)) => {
-                    if row.len() != self.schema.len() {
-                        let error = Error::Schema("row width does not match schema".into());
-                        if row_count == 0 {
-                            self.finished = true;
-                            return Some(Err(error));
-                        }
-                        self.pending_error = Some(error);
-                        break;
-                    }
-                    // Validate each incoming row before adding it to the current
-                    // batch. A late invalid cell must not discard earlier good rows
-                    // when Batch::new_with_row_count validates the final columns.
-                    if let Some(field) = self.schema.fields().iter().zip(&row)
-                        .find_map(|(field, value)| {
-                            (!field.data_type.accepts(value) ||
-                                (!field.nullable && value.is_null())).then_some(field)
-                        })
-                    {
-                        let error = Error::Type(format!("invalid value in column {}", field.name));
+                    // Validate before admission. A later malformed row must
+                    // not discard an already completed prefix of the batch.
+                    if let Err(error) = validate_row(&self.schema, &row) {
                         if row_count == 0 {
                             self.finished = true;
                             return Some(Err(error));

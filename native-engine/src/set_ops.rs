@@ -87,12 +87,22 @@ fn bounded_right_keys<'a>(
     columns: &'a [&'a [Value]], rows: usize, max_keys: usize,
 ) -> Result<HashSet<BorrowedSetRow<'a>>> {
     let mut keys = HashSet::new();
+    let mut previous = None;
     for row in 0..rows {
         let key = BorrowedSetRow { columns, row };
-        if keys.len() >= max_keys && !keys.contains(&key) {
-            return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+        // Sorted inputs can contain long adjacent runs of the same key.
+        // An equality check avoids hashing every repeated row.
+        if previous == Some(key) { continue; }
+        previous = Some(key);
+        if keys.len() >= max_keys {
+            // When the limit is full, a duplicate needs no insertion or
+            // second hash probe. Only a genuinely new key is an error.
+            if !keys.contains(&key) {
+                return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+            }
+        } else {
+            keys.insert(key);
         }
-        keys.insert(key);
     }
     Ok(keys)
 }
@@ -131,10 +141,13 @@ pub fn intersect_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
         for value in right.column(0)? {
-            if right_values.len() >= MAX_DISTINCT_SET_KEYS && !right_values.contains(value) {
-                return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+            if right_values.len() >= MAX_DISTINCT_SET_KEYS {
+                if !right_values.contains(value) {
+                    return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+                }
+            } else {
+                right_values.insert(value);
             }
-            right_values.insert(value);
         }
         let mut emitted = HashSet::<&Value>::new();
         let mut rows = Vec::new();
@@ -191,10 +204,13 @@ pub fn except_distinct(left: &Batch, right: &Batch) -> Result<Batch> {
     if schema.len() == 1 {
         let mut right_values = HashSet::<&Value>::new();
         for value in right.column(0)? {
-            if right_values.len() >= MAX_DISTINCT_SET_KEYS && !right_values.contains(value) {
-                return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+            if right_values.len() >= MAX_DISTINCT_SET_KEYS {
+                if !right_values.contains(value) {
+                    return Err(Error::Execution("set operation distinct-key budget exceeded".into()));
+                }
+            } else {
+                right_values.insert(value);
             }
-            right_values.insert(value);
         }
         let mut emitted = HashSet::<&Value>::new();
         let mut rows = Vec::new();
@@ -768,5 +784,58 @@ mod clustered_multiset_run_regressions {
             [vec![a.clone(); 3], vec![b.clone()]].concat());
         assert_eq!(except_all(&left, &right).unwrap().rows().unwrap(),
             [vec![a; 2], vec![b], vec![c]].concat());
+    }
+}
+
+#[cfg(test)]
+mod bounded_set_build_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn repeated_borrowed_keys_do_not_consume_extra_admissions() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("é".into()), Value::Integer(1)],
+            vec![Value::Text("é".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("é".into()), Value::Integer(1)],
+        ]).unwrap();
+        let columns = borrowed_columns(&batch).unwrap();
+        assert_eq!(bounded_right_keys(&columns, batch.num_rows(), 2).unwrap().len(), 2);
+        assert!(bounded_right_keys(&columns, batch.num_rows(), 1).is_err());
+        let first_only = Batch::from_rows(schema, vec![
+            vec![Value::Text("é".into()), Value::Integer(1)],
+            vec![Value::Text("é".into()), Value::Integer(1)],
+        ]).unwrap();
+        let values = borrowed_columns(&first_only).unwrap();
+        assert_eq!(bounded_right_keys(&values, 2, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn both_distinct_set_directions_preserve_first_occurrence() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("amount", DataType::Integer, false),
+        ]).unwrap();
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Text("a".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+            vec![Value::Text("a".into()), Value::Integer(1)],
+        ]).unwrap();
+        let right = Batch::from_rows(schema, vec![
+            vec![Value::Text("a".into()), Value::Integer(1)],
+            vec![Value::Text("a".into()), Value::Integer(1)],
+            vec![Value::Text("other".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]).unwrap();
+        assert_eq!(intersect_distinct(&left, &right).unwrap().rows().unwrap(), vec![
+            vec![Value::Text("a".into()), Value::Integer(1)],
+            vec![Value::Null, Value::Integer(2)],
+        ]);
+        assert!(except_distinct(&left, &right).unwrap().rows().unwrap().is_empty());
     }
 }

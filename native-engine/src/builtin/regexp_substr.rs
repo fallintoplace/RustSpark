@@ -10,39 +10,42 @@ fn copy_match(text: &str) -> Result<Value> {
     Ok(Value::Text(output))
 }
 
+fn first_ascii_class_match<'a>(
+    text: &'a str, runs: bool, matches: impl Fn(u8) -> bool,
+) -> Option<&'a str> {
+    let start = text.bytes().position(|byte| matches(byte))?;
+    let width = if runs {
+        text[start..].bytes().take_while(|byte| matches(*byte)).count()
+    } else {
+        1
+    };
+    Some(&text[start..start + width])
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
     regex_support::check_input(text)?;
     if pattern.is_empty() { return Ok(Value::Text(String::new())); }
     if pattern == "[A-Za-z]" || pattern == "[A-Za-z]+" {
-        // ASCII letters always end on UTF-8 boundaries. Find the first run
-        // without constructing a regex or materializing an intermediate copy.
-        let Some(start) = text.bytes().position(|byte| byte.is_ascii_alphabetic())
-            else { return Ok(Value::Null); };
-        let width = if pattern == "[A-Za-z]" { 1 } else {
-            text[start..].bytes().take_while(u8::is_ascii_alphabetic).count()
+        return match first_ascii_class_match(text, pattern.ends_with('+'),
+            |byte| byte.is_ascii_alphabetic()) {
+            Some(matched) => copy_match(matched),
+            None => Ok(Value::Null),
         };
-        return copy_match(&text[start..start + width]);
     }
     // Plain start-anchored identifiers cannot match anywhere else. Avoid
     // compiling a regex for a common token-extraction predicate.
-    if let Some(prefix) = pattern.strip_prefix('^')
-        && prefix.len() <= 4095
-        && prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
-    {
+    if let Some(prefix) = regex_support::anchored_identifier(pattern) {
         return if text.starts_with(prefix) { copy_match(prefix) }
             else { Ok(Value::Null) };
     }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
-        // Byte-wise digit searches preserve UTF-8 boundaries because all
-        // matched bytes are ASCII. Only copy the resulting match.
-        let Some(start) = text.bytes().position(|byte| byte.is_ascii_digit())
-            else { return Ok(Value::Null); };
-        let width = if pattern == "[0-9]" { 1 } else {
-            text[start..].bytes().take_while(u8::is_ascii_digit).count()
+        return match first_ascii_class_match(text, pattern.ends_with('+'),
+            |byte| byte.is_ascii_digit()) {
+            Some(matched) => copy_match(matched),
+            None => Ok(Value::Null),
         };
-        return copy_match(&text[start..start + width]);
     }
     if pattern == ".+" {
         // The first greedy nonempty dot run ends before the next LF.
@@ -285,5 +288,23 @@ mod fallible_regexp_substr_copy_tests {
         assert_eq!(match_value("aab123", "a+b"), Value::Text("aab".into()));
         assert_eq!(match_value("abc", "[0-9]+"), Value::Null);
         assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod ascii_class_substring_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_class_matches_equal_regex_first_match() {
+        for text in ["", "abc123", "é🙂a11", "٩a٣2", "abc\n123", "東京🙂"] {
+            for pattern in ["[A-Za-z]", "[A-Za-z]+", "[0-9]", "[0-9]+"] {
+                let expected = regex_support::compile(pattern).unwrap().find(text)
+                    .map_or(Value::Null, |found| Value::Text(found.as_str().into()));
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(pattern.into()),
+                ]).unwrap(), expected, "text={text:?} pattern={pattern:?}");
+            }
+        }
     }
 }

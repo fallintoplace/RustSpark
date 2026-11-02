@@ -131,8 +131,7 @@ impl<R: BufRead> CsvRows<R> {
             // Bulk-copy runs until a quote or record terminator. Retain the
             // exact field-start state so quoted fields remain validated.
             if matches!(state, QuoteState::Start | QuoteState::Unquoted) {
-                let plain = available.iter()
-                    .position(|&byte| matches!(byte, b'"' | b'\n' | b'\r'))
+                let plain = memchr::memchr3(b'"', b'\n', b'\r', available)
                     .unwrap_or(available.len());
                 if plain > 0 {
                     if bytes.len().saturating_add(plain) > self.max_record_bytes {
@@ -149,24 +148,9 @@ impl<R: BufRead> CsvRows<R> {
             // A quoted field can contain delimiters and newlines. Only a
             // quote changes its state, so copy the entire buffered byte run.
             if state == QuoteState::Quoted {
-                let plain = available.iter().position(|&byte| byte == b'"')
+                let plain = memchr::memchr(b'"', available)
                     .unwrap_or(available.len());
                 if plain != 0 {
-                    if bytes.len().saturating_add(plain) > self.max_record_bytes {
-                        return Err(Error::Execution("CSV record exceeds byte limit".into()));
-                    }
-                    append_record_bytes(&mut bytes, &available[..plain])?;
-                    self.reader.consume(plain);
-                    continue;
-                }
-            }
-            if state == QuoteState::Quoted {
-                // Commas and line breaks inside a quoted value are data.
-                // Copy the span up to the next quote without dispatching a
-                // CSV state transition for every byte of a wide text field.
-                let plain = available.iter().position(|&byte| byte == b'"')
-                    .unwrap_or(available.len());
-                if plain > 0 {
                     if bytes.len().saturating_add(plain) > self.max_record_bytes {
                         return Err(Error::Execution("CSV record exceeds byte limit".into()));
                     }
@@ -673,5 +657,33 @@ mod fallible_record_and_text_materialization_tests {
             schema, 64).unwrap();
         assert!(rows.next().unwrap().is_err());
         assert!(rows.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod memchr_record_scanning_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+    use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn long_plain_and_quoted_fields_keep_record_boundaries() {
+        let schema = Schema::new(vec![
+            Field::new("content", DataType::Text, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let plain = "a".repeat(65_537);
+        let quoted = format!("{}\n{}", "é".repeat(300), "z".repeat(8192));
+        let input = format!(
+            "content,n\r\n{plain},1\r\n\"{quoted}\",2\nend,3\r\n",
+        );
+        let reader = BufReader::with_capacity(7, Cursor::new(input));
+        let rows = CsvRows::new(reader, schema, 128 * 1024)
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Text(plain), Value::Integer(1)],
+            vec![Value::Text(quoted), Value::Integer(2)],
+            vec![Value::Text("end".into()), Value::Integer(3)],
+        ]);
     }
 }

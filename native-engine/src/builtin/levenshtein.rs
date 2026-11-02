@@ -23,7 +23,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         // Distance from the empty string is just the Unicode character count.
         // No dynamic-programming state or character vector is required.
         let other = if first.is_empty() { second } else { first };
-        let distance = if other.is_ascii() { other.len() } else { other.chars().count() };
+        let distance = super::char_length::character_count(other);
         if threshold.is_some_and(|limit| distance > limit) {
             return Ok(Value::Integer(-1));
         }
@@ -33,8 +33,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if let Some(limit) = threshold {
         // An edit changes Unicode scalar length by at most one.
         // Reject impossible thresholds without allocating character arrays.
-        let first_len = if first.is_ascii() { first.len() } else { first.chars().count() };
-        let second_len = if second.is_ascii() { second.len() } else { second.chars().count() };
+        let first_len = super::char_length::character_count(first);
+        let second_len = super::char_length::character_count(second);
         if first_len.abs_diff(second_len) > limit {
             return Ok(Value::Integer(-1));
         }
@@ -843,5 +843,23 @@ mod fallible_levenshtein_dp_rows_regressions {
         let a = vec![b'a'; 2000];
         let b = vec![b'b'; 2000];
         assert!(distance_units(&a, &b, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shared_character_count_levenshtein_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_lengths_are_used_for_empty_and_threshold_cases() {
+        assert_eq!(evaluate(&[
+            Value::Text(String::new()), Value::Text("é🙂".into()),
+        ]).unwrap(), Value::Integer(2));
+        assert_eq!(evaluate(&[
+            Value::Text("a".into()), Value::Text("aé🙂".into()), Value::Integer(1),
+        ]).unwrap(), Value::Integer(-1));
+        assert_eq!(evaluate(&[
+            Value::Text("a".into()), Value::Text("aé🙂".into()), Value::Integer(2),
+        ]).unwrap(), Value::Integer(2));
     }
 }

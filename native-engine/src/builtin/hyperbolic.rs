@@ -1,13 +1,9 @@
 use super::{float_type, Function};
 use crate::{scalar::Value, Result};
 
-fn apply(args: &[Value], f: fn(f64) -> f64) -> Result<Value> {
-    let Some(value) = super::number(&args[0])? else { return Ok(Value::Null) };
-    super::finite(f(value))
-}
-fn sinh(args: &[Value]) -> Result<Value> { apply(args, f64::sinh) }
-fn cosh(args: &[Value]) -> Result<Value> { apply(args, f64::cosh) }
-fn tanh(args: &[Value]) -> Result<Value> { apply(args, f64::tanh) }
+fn sinh(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::sinh) }
+fn cosh(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::cosh) }
+fn tanh(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::tanh) }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "sinh", min_args: 1, max_args: 1, result_type: float_type, call: sinh },
     Function { name: "cosh", min_args: 1, max_args: 1, result_type: float_type, call: cosh },

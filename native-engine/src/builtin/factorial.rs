@@ -22,11 +22,10 @@ fn lcm(args: &[Value]) -> Result<Value> {
     let Some(a) = super::integer(&args[0])? else { return Ok(Value::Null); };
     let Some(b) = super::integer(&args[1])? else { return Ok(Value::Null); };
     if a == 0 || b == 0 { return Ok(Value::Integer(0)); }
-    let a = u128::from(a.unsigned_abs());
-    let b = u128::from(b.unsigned_abs());
-    let (mut x, mut y) = (a, b);
-    while y != 0 { (x, y) = (y, x % y); }
-    let multiple = (a / x).checked_mul(b)
+    let (a, b) = (a.unsigned_abs(), b.unsigned_abs());
+    let divisor = super::modular::gcd_unsigned(a, b);
+    let multiple = (u128::from(a) / u128::from(divisor))
+        .checked_mul(u128::from(b))
         .ok_or_else(|| Error::Execution("LCM integer overflow".into()))?;
     i64::try_from(multiple).map(Value::Integer)
         .map_err(|_| Error::Execution("LCM result exceeds BIGINT range".into()))

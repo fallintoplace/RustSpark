@@ -190,6 +190,13 @@ mod tests {
 }
 
  
+fn reservation_list(count: usize) -> Result<Vec<Reservation>> {
+    let mut reservations = Vec::new();
+    reservations.try_reserve_exact(count)
+        .map_err(|_| Error::Execution("memory reservation list allocation failed".into()))?;
+    Ok(reservations)
+}
+
 /// Reserve a group of budgets with one atomic pool charge.
 pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Reservation>> {
     let total = requests.iter().try_fold(0usize, |sum, &bytes| {
@@ -199,9 +206,7 @@ pub fn reserve_many(pool: &Arc<MemoryPool>, requests: &[usize]) -> Result<Vec<Re
     let mut combined = pool.reserve(total)?;
     // A caller can request many small guards. If the guard array cannot
     // be allocated, return an error and release the combined charge via Drop.
-    let mut reservations = Vec::new();
-    reservations.try_reserve_exact(requests.len())
-        .map_err(|_| Error::Execution("memory reservation list allocation failed".into()))?;
+    let mut reservations = reservation_list(requests.len())?;
     for &bytes in requests {
         reservations.push(combined.split_off(bytes)?);
     }
@@ -222,9 +227,7 @@ pub fn reserve_many_up_to(
     });
     let mut grant = pool.reserve_up_to(requested)?;
     let mut available = grant.bytes();
-    let mut reservations = Vec::new();
-    reservations.try_reserve_exact(requests.len())
-        .map_err(|_| Error::Execution("memory reservation list allocation failed".into()))?;
+    let mut reservations = reservation_list(requests.len())?;
     for &requested_bytes in requests {
         let bytes = requested_bytes.min(available);
         reservations.push(grant.split_off(bytes)?);

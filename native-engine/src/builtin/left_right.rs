@@ -17,20 +17,17 @@ fn copy_text(text: &str) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
-fn slice(args: &[Value], from_right: bool) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let width = match &args[1] {
-        Value::Integer(width) => *width,
-        Value::Text(text) => match text.trim().parse::<i64>() {
-            Ok(width) => width,
-            Err(_) => return Ok(Value::Null),
-        },
-        Value::Null => return Ok(Value::Null),
-        _ => return Err(Error::Type("LEFT/RIGHT width must be integer or numeric text".into())),
-    };
-    // Spark returns an empty string when length is zero or negative.
-    let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
-    let result = if count == 0 {
+fn parse_width(value: &Value) -> Result<Option<i64>> {
+    match value {
+        Value::Integer(width) => Ok(Some(*width)),
+        Value::Text(text) => Ok(text.trim().parse::<i64>().ok()),
+        Value::Null => Ok(None),
+        _ => Err(Error::Type("LEFT/RIGHT width must be integer or numeric text".into())),
+    }
+}
+
+fn slice_chars(text: &str, count: usize, from_right: bool) -> &str {
+    if count == 0 {
         ""
     } else if count >= text.len() {
         // There cannot be more Unicode characters than UTF-8 bytes.
@@ -49,7 +46,15 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
         let end = text.char_indices().nth(count)
             .map_or(text.len(), |(byte, _)| byte);
         &text[..end]
-    };
+    }
+}
+
+fn slice(args: &[Value], from_right: bool) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(width) = parse_width(&args[1])? else { return Ok(Value::Null); };
+    // Spark returns an empty string when length is zero or negative.
+    let count = usize::try_from(width.max(0)).unwrap_or(usize::MAX);
+    let result = slice_chars(text, count, from_right);
     if result.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("LEFT/RIGHT result exceeds native 16 MiB budget".into()));
     }
@@ -307,5 +312,20 @@ mod fallible_text_slice_tests {
         assert_eq!(common_prefix(&[Value::Text("é🙂".into()),
             Value::Text("é🙂".into())]).unwrap(), Value::Text("é🙂".into()));
         assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod text_slice_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn separates_nullable_widths_from_unicode_slicing() {
+        assert_eq!(parse_width(&Value::Text(" 2 ".into())).unwrap(), Some(2));
+        assert_eq!(parse_width(&Value::Text("not-a-number".into())).unwrap(), None);
+        assert_eq!(parse_width(&Value::Null).unwrap(), None);
+        assert_eq!(slice_chars("abé🙂", 2, false), "ab");
+        assert_eq!(slice_chars("abé🙂", 2, true), "é🙂");
+        assert_eq!(slice_chars("abé🙂", 0, false), "");
     }
 }

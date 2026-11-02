@@ -368,12 +368,25 @@ pub fn hash_join_composite(
         .map(|index| left.column(index)).collect::<Result<Vec<_>>>()?;
     let right_columns = (0..right.schema().len())
         .map(|index| right.column(index)).collect::<Result<Vec<_>>>()?;
+    // SEMI/ANTI joins only need to know whether a key exists. A build
+    // row-position vector is unnecessary, especially for duplicate keys.
+    let membership_mode = matches!(kind, JoinKind::Semi | JoinKind::Anti);
     let mut build: HashMap<Vec<&Value>, Vec<usize>> = HashMap::new();
-    build.try_reserve(right.num_rows())
-        .map_err(|_| Error::Execution("composite join hash allocation failed".into()))?;
+    let mut membership: HashSet<Vec<&Value>> = HashSet::new();
+    if membership_mode {
+        membership.try_reserve(right.num_rows().min(1_024))
+            .map_err(|_| Error::Execution("composite join membership allocation failed".into()))?;
+    } else {
+        build.try_reserve(right.num_rows())
+            .map_err(|_| Error::Execution("composite join hash allocation failed".into()))?;
+    }
     for row in 0..right.num_rows() {
+        // NULL join keys never match. Skip temporary key vectors for them.
+        if !rhs.iter().all(|column| joinable(&column[row])) { continue; }
         let key = rhs.iter().map(|column| &column[row]).collect::<Vec<_>>();
-        if key.iter().all(|value| joinable(value)) {
+        if membership_mode {
+            membership.insert(key);
+        } else {
             build.entry(key).or_default().push(row);
         }
     }
@@ -404,15 +417,27 @@ pub fn hash_join_composite(
         Ok(())
     };
     for left_row in 0..left.num_rows() {
-        let key = lhs.iter().map(|column| &column[left_row]).collect::<Vec<_>>();
-        let matches = if key.iter().all(|value| joinable(value)) {
-            build.get(&key)
+        let joinable_key = lhs.iter().all(|column| joinable(&column[left_row]));
+        // Skip allocating key slices for null rows, and avoid a row-index
+        // table probe on existence-only joins.
+        let key = if joinable_key {
+            Some(lhs.iter().map(|column| &column[left_row]).collect::<Vec<_>>())
         } else {
             None
         };
+        let matches = if membership_mode {
+            None
+        } else {
+            key.as_ref().and_then(|key| build.get(key))
+        };
+        let found = if membership_mode {
+            key.as_ref().is_some_and(|key| membership.contains(key))
+        } else {
+            matches.is_some()
+        };
         match kind {
-            JoinKind::Semi if matches.is_some() => append(Some(left_row), None)?,
-            JoinKind::Anti if matches.is_none() => append(Some(left_row), None)?,
+            JoinKind::Semi if found => append(Some(left_row), None)?,
+            JoinKind::Anti if !found => append(Some(left_row), None)?,
             JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
                 if let Some(indices) = matches {
                     for &right_row in indices {
@@ -1331,5 +1356,45 @@ mod native_composite_hash_join_regressions {
         assert_eq!(right.num_rows(), 4);
         assert!(hash_join_composite(&l, &r, &[], &[], JoinKind::Inner).is_err());
         assert!(hash_join_composite(&l, &r, &["idl"], &["regionr"], JoinKind::Inner).is_err());
+    }
+}
+
+#[cfg(test)]
+mod composite_join_membership_perf_tests {
+    use super::*;
+    use crate::schema::{DataType, Field, Schema};
+
+    #[test]
+    fn repeated_wide_composite_build_keys_preserve_semi_anti_and_inner_fanout() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("region", DataType::Text, true),
+        ]).unwrap();
+        let long = "é🙂".repeat(1_024);
+        let left = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(7), Value::Text(long.clone())],
+            vec![Value::Integer(9), Value::Text("other".into())],
+            vec![Value::Null, Value::Text(long.clone())],
+            vec![Value::Integer(7), Value::Null],
+            vec![Value::Integer(7), Value::Text(long.clone())],
+        ]).unwrap();
+        let mut right_rows = (0..128).map(|_| vec![
+            Value::Integer(7), Value::Text(long.clone()),
+        ]).collect::<Vec<_>>();
+        right_rows.push(vec![Value::Null, Value::Text(long)]);
+        let right = Batch::from_rows(schema, right_rows).unwrap();
+        for (kind, expected) in [
+            (JoinKind::Semi, vec![0, 4]),
+            (JoinKind::Anti, vec![1, 2, 3]),
+        ] {
+            let actual = hash_join_composite(
+                &left, &right, &["id", "region"], &["id", "region"], kind,
+            ).unwrap();
+            assert_eq!(actual.rows().unwrap(), expected.into_iter()
+                .map(|index| left.row(index).unwrap()).collect::<Vec<_>>());
+        }
+        assert_eq!(hash_join_composite(
+            &left, &right, &["id", "region"], &["id", "region"], JoinKind::Inner,
+        ).unwrap().num_rows(), 256);
     }
 }

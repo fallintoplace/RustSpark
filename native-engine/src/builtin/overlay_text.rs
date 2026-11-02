@@ -10,6 +10,17 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Text)
 }
 
+fn byte_offset(text: &str, character_index: usize) -> usize {
+    if character_index >= text.len() {
+        text.len()
+    } else if text.is_ascii() {
+        character_index
+    } else {
+        text.char_indices().nth(character_index)
+            .map_or(text.len(), |(byte, _)| byte)
+    }
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(replacement) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -29,19 +40,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let index = usize::try_from(start - 1).unwrap_or(usize::MAX);
     // A byte count bounds the number of UTF-8 characters, so impossible
     // character positions need no iterator traversal.
-    let ascii = text.is_ascii();
-    let begin = if index >= text.len() { text.len() } else if ascii {
-        // Byte and character offsets are identical for ASCII text.
-        index
-    } else {
-        text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
-    };
-    let remaining = &text[begin..];
-    let end = if count >= remaining.len() { text.len() } else if ascii {
-        begin + count
-    } else {
-        remaining.char_indices().nth(count).map_or(text.len(), |(byte, _)| begin + byte)
-    };
+    let begin = byte_offset(text, index);
+    let end = begin + byte_offset(&text[begin..], count);
     let result_len = begin.checked_add(replacement.len())
         .and_then(|n| n.checked_add(text.len() - end))
         .filter(|&n| n <= MAX_BYTES)
@@ -265,5 +265,22 @@ mod fallible_overlay_reservation_tests {
         assert_eq!(evaluate(&[
             Value::Null, Value::Text("x".into()), Value::Integer(1),
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod shared_overlay_byte_offset_tests {
+    use super::*;
+
+    #[test]
+    fn byte_offsets_respect_ascii_unicode_and_clamping() {
+        assert_eq!(byte_offset("abc", 2), 2);
+        assert_eq!(byte_offset("abc", usize::MAX), 3);
+        assert_eq!(byte_offset("aé🙂b", 1), 1);
+        assert_eq!(byte_offset("aé🙂b", 2), 3);
+        assert_eq!(byte_offset("aé🙂b", 3), 7);
+        assert_eq!(byte_offset("aé🙂b", 4), 8);
+        assert_eq!(byte_offset("aé🙂b", usize::MAX), 8);
+        assert_eq!(byte_offset("🙂abc", 2), 5);
     }
 }

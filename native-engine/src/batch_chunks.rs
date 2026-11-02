@@ -1,6 +1,17 @@
 //! Batch chunking and reconstruction for streaming physical operators.
 use crate::{batch::Batch, scalar::Value, Error, Result};
 
+fn validate_chunk_size(size: usize) -> Result<()> {
+    if size == 0 {
+        return Err(Error::Execution("batch chunk size must be positive".into()));
+    }
+    Ok(())
+}
+
+fn remaining_chunks(rows: usize, size: usize) -> usize {
+    rows.div_ceil(size)
+}
+
 pub struct BatchChunks<'a> {
     batch: &'a Batch,
     size: usize,
@@ -8,9 +19,7 @@ pub struct BatchChunks<'a> {
 }
 
 pub fn chunks(batch: &Batch, size: usize) -> Result<BatchChunks<'_>> {
-    if size == 0 {
-        return Err(Error::Execution("batch chunk size must be positive".into()));
-    }
+    validate_chunk_size(size)?;
     Ok(BatchChunks { batch, size, position: 0 })
 }
 
@@ -36,7 +45,7 @@ impl Iterator for BatchChunks<'_> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.batch.num_rows().saturating_sub(self.position);
-        let batches = remaining.div_ceil(self.size);
+        let batches = remaining_chunks(remaining, self.size);
         (batches, Some(batches))
     }
 
@@ -63,9 +72,7 @@ pub struct OwnedBatchChunks {
 }
 
 pub fn chunks_owned(batch: Batch, size: usize) -> Result<OwnedBatchChunks> {
-    if size == 0 {
-        return Err(Error::Execution("batch chunk size must be positive".into()));
-    }
+    validate_chunk_size(size)?;
     let remaining = batch.num_rows();
     let schema = batch.schema().clone();
     let columns = batch.into_columns().into_iter().map(Vec::into_iter).collect();
@@ -95,7 +102,7 @@ impl Iterator for OwnedBatchChunks {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let batches = self.remaining.div_ceil(self.size);
+        let batches = remaining_chunks(self.remaining, self.size);
         (batches, Some(batches))
     }
 
@@ -126,15 +133,11 @@ fn allocate_concatenated_columns(width: usize, rows: usize) -> Result<Vec<Vec<Va
     Ok(columns)
 }
 
-pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
-    let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
-    // A single input is already a valid batch. Avoid allocating fresh
-    // column vectors and revalidating every scalar during reconstruction.
-    if batches.len() == 1 {
-        return Ok(first.clone());
-    }
+fn validated_concatenation_shape(batches: &[Batch]) -> Result<(crate::schema::Schema, usize)> {
+    let first = batches.first()
+        .ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
     let schema = first.schema().clone();
-    let mut total = 0_usize;
+    let mut total = 0usize;
     for batch in batches {
         if batch.schema() != &schema {
             return Err(Error::Schema("batch schemas must match exactly".into()));
@@ -142,6 +145,17 @@ pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
         total = total.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
     }
+    Ok((schema, total))
+}
+
+pub fn concatenate(batches: &[Batch]) -> Result<Batch> {
+    let first = batches.first().ok_or_else(|| Error::Schema("cannot concatenate without a schema".into()))?;
+    // A single input is already a valid batch. Avoid allocating fresh
+    // column vectors and revalidating every scalar during reconstruction.
+    if batches.len() == 1 {
+        return Ok(first.clone());
+    }
+    let (schema, total) = validated_concatenation_shape(batches)?;
     let mut columns = allocate_concatenated_columns(schema.len(), total)?;
     for batch in batches {
         for (index, column) in columns.iter_mut().enumerate() {
@@ -160,15 +174,7 @@ pub fn concatenate_owned(batches: Vec<Batch>) -> Result<Batch> {
     if batches.len() == 1 {
         return Ok(batches.into_iter().next().expect("one owned batch"));
     }
-    let schema = first.schema().clone();
-    let mut total = 0usize;
-    for batch in &batches {
-        if batch.schema() != &schema {
-            return Err(Error::Schema("batch schemas must match exactly".into()));
-        }
-        total = total.checked_add(batch.num_rows())
-            .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
-    }
+    let (schema, total) = validated_concatenation_shape(&batches)?;
     // Reuse the first batch's owned column vectors rather than allocating
     // a second full-width set and moving all its cells into it. Reserve once
     // after validating every input, so reallocations cannot grow per chunk.
@@ -559,5 +565,19 @@ mod fallible_concatenation_reservation_regressions {
         ];
         assert_eq!(concatenate(&parts).unwrap().num_rows(), 11);
         assert_eq!(concatenate_owned(parts).unwrap().num_rows(), 11);
+    }
+}
+
+#[cfg(test)]
+mod shared_chunk_invariants_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn count_matches_nondivisible_batches_and_zero_rows() {
+        assert_eq!(remaining_chunks(0, 3), 0);
+        assert_eq!(remaining_chunks(6, 3), 2);
+        assert_eq!(remaining_chunks(7, 3), 3);
+        assert!(validate_chunk_size(0).is_err());
+        assert!(validate_chunk_size(1).is_ok());
     }
 }

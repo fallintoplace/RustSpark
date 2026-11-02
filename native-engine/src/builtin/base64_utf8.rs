@@ -117,35 +117,52 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Type("UNBASE64_UTF8 decoded bytes are not UTF-8".into()))?;
     Ok(Value::Text(decoded))
 }
+// Encode one full five-byte RFC4648 block without shifting each input byte
+// through a variable-length bit accumulator.
+#[inline]
+fn base32_block(bytes: &[u8; 5]) -> [u8; 8] {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let [a, b, c, d, e] = *bytes;
+    [
+        ALPHABET[(a >> 3) as usize],
+        ALPHABET[(((a & 7) << 2) | (b >> 6)) as usize],
+        ALPHABET[((b >> 1) & 31) as usize],
+        ALPHABET[(((b & 1) << 4) | (c >> 4)) as usize],
+        ALPHABET[(((c & 15) << 1) | (d >> 7)) as usize],
+        ALPHABET[((d >> 2) & 31) as usize],
+        ALPHABET[(((d & 3) << 3) | (e >> 5)) as usize],
+        ALPHABET[(e & 31) as usize],
+    ]
+}
+
 fn to_base32(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let bytes = text.as_bytes();
     if bytes.len() > MAX_BYTES {
         return Err(Error::Execution("TO_BASE32 input exceeds byte budget".into()));
     }
-    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let output_len = bytes.len().div_ceil(5).checked_mul(8)
         .ok_or_else(|| Error::Execution("TO_BASE32 output length overflow".into()))?;
-    let mut encoded = String::new();
+    let mut encoded = Vec::new();
     encoded.try_reserve_exact(output_len)
         .map_err(|_| Error::Execution("TO_BASE32 allocation failed".into()))?;
-    let mut bits: u32 = 0;
-    let mut available = 0u8;
-    for &byte in bytes {
-        bits = (bits << 8) | u32::from(byte);
-        available += 8;
-        while available >= 5 {
-            available -= 5;
-            let index = ((bits >> available) & 31) as usize;
-            encoded.push(char::from(ALPHABET[index]));
-        }
+    let mut blocks = bytes.chunks_exact(5);
+    for chunk in &mut blocks {
+        let five: &[u8; 5] = chunk.try_into()
+            .expect("complete base32 input block");
+        encoded.extend_from_slice(&base32_block(five));
     }
-    if available != 0 {
-        let index = ((bits << (5 - available)) & 31) as usize;
-        encoded.push(char::from(ALPHABET[index]));
+    let tail = blocks.remainder();
+    if !tail.is_empty() {
+        let mut five = [0_u8; 5];
+        five[..tail.len()].copy_from_slice(tail);
+        let block = base32_block(&five);
+        let digits = (tail.len() * 8).div_ceil(5);
+        encoded.extend_from_slice(&block[..digits]);
+        encoded.extend_from_slice(&[b'='; 8][..8 - digits]);
     }
-    while encoded.len() < output_len { encoded.push('='); }
-    Ok(Value::Text(encoded))
+    Ok(Value::Text(String::from_utf8(encoded)
+        .expect("base32 alphabet is ASCII")))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -311,5 +328,48 @@ mod fallible_base64_reservation_tests {
             assert_eq!(unbase64_utf8(&[encoded]).unwrap(), input);
         }
         assert_eq!(base64(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod base32_block_encoding_tests {
+    use super::*;
+
+    fn reference(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut text = String::new();
+        let mut bits = 0_u32;
+        let mut available = 0_u32;
+        for &byte in bytes {
+            bits = (bits << 8) | u32::from(byte);
+            available += 8;
+            while available >= 5 {
+                available -= 5;
+                text.push(char::from(ALPHABET[((bits >> available) & 31) as usize]));
+            }
+        }
+        if available != 0 {
+            text.push(char::from(ALPHABET[((bits << (5 - available)) & 31) as usize]));
+        }
+        while text.len() % 8 != 0 { text.push('='); }
+        text
+    }
+
+    #[test]
+    fn block_encoder_matches_reference_across_tail_lengths_and_unicode() {
+        for length in 0..=128 {
+            let input = "é🙂x".repeat(length);
+            assert_eq!(to_base32(&[Value::Text(input.clone())]).unwrap(),
+                Value::Text(reference(input.as_bytes())), "length={length}");
+        }
+        for (plain, encoded) in [
+            ("", ""), ("f", "MY======"), ("fo", "MZXQ===="),
+            ("foo", "MZXW6==="), ("foob", "MZXW6YQ="),
+            ("fooba", "MZXW6YTB"), ("foobar", "MZXW6YTBOI======"),
+        ] {
+            assert_eq!(to_base32(&[Value::Text(plain.into())]).unwrap(),
+                Value::Text(encoded.into()));
+        }
+        assert_eq!(to_base32(&[Value::Null]).unwrap(), Value::Null);
     }
 }

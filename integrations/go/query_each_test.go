@@ -129,3 +129,33 @@ func TestScanNDJSONRowsRejectsNonJSONWhitespace(t *testing.T) {
         t.Fatalf("rejected valid JSON whitespace: visits=%d err=%v", visits, err)
     }
 }
+
+
+func TestDecodeNDJSONRow(t *testing.T) {
+    row, err := decodeNDJSONRow([]byte("  {\"x\":42}  "), 7)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if row["x"] != json.Number("42") {
+        t.Fatalf("unexpected value: %#v", row["x"])
+    }
+    cases := []struct {
+        input string
+        message string
+    }{
+        {" ", "blank"},
+        {"[1]", "must be an object"},
+        {"{\"x\":1,\"x\":2}", "duplicate"},
+        {"{\"x\":1} true", "trailing"},
+    }
+    for _, tc := range cases {
+        _, err := decodeNDJSONRow([]byte(tc.input), 7)
+        if err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.message) {
+            t.Errorf("input %q: expected %q error, got %v", tc.input, tc.message, err)
+        }
+    }
+    _, err = decodeNDJSONRow([]byte{0xff}, 7)
+    if err == nil || !strings.Contains(err.Error(), "UTF-8") {
+        t.Errorf("expected UTF-8 failure: %v", err)
+    }
+}
