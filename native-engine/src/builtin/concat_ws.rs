@@ -3,6 +3,27 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
+fn joined_length(values: &[Value], separator: &str) -> Result<usize> {
+    let mut total = 0usize;
+    let mut pieces = 0usize;
+    for arg in values {
+        if let Some(text) = super::string(arg)? {
+            total = total.checked_add(text.len())
+                .ok_or_else(|| Error::Execution("CONCAT_WS length overflow".into()))?;
+            pieces += 1;
+        }
+    }
+    let separators = separator.len().checked_mul(pieces.saturating_sub(1))
+        .ok_or_else(|| Error::Execution("CONCAT_WS separator overflow".into()))?;
+    let length = total.checked_add(separators)
+        .ok_or_else(|| Error::Execution("CONCAT_WS length overflow".into()))?;
+    if length > 16 * 1024 * 1024 {
+        return Err(Error::Execution("CONCAT_WS output exceeds 16 MiB".into()));
+    }
+
+    Ok(length)
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(separator) = super::string(&args[0])? else { return Ok(Value::Null); };
     if args.len() == 2 {
@@ -18,22 +39,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             None => Ok(Value::Text(String::new())),
         };
     }
-    let mut total = 0usize;
-    let mut pieces = 0usize;
-    for arg in &args[1..] {
-        if let Some(text) = super::string(arg)? {
-            total = total.checked_add(text.len())
-                .ok_or_else(|| Error::Execution("CONCAT_WS length overflow".into()))?;
-            pieces += 1;
-        }
-    }
-    let separators = separator.len().checked_mul(pieces.saturating_sub(1))
-        .ok_or_else(|| Error::Execution("CONCAT_WS separator overflow".into()))?;
-    let length = total.checked_add(separators)
-        .ok_or_else(|| Error::Execution("CONCAT_WS length overflow".into()))?;
-    if length > 16 * 1024 * 1024 {
-        return Err(Error::Execution("CONCAT_WS output exceeds 16 MiB".into()));
-    }
+    let length = joined_length(&args[1..], separator)?;
 
     // The first pass validates the bound; the second writes once into the result.
     let mut output = String::new();
@@ -144,5 +150,23 @@ mod fallible_concat_ws_reservation_tests {
         ]).unwrap(), Value::Text("é:🙂".into()));
         assert_eq!(evaluate(&[Value::Text(":".into()), Value::Null]).unwrap(),
             Value::Text(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod concat_ws_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn counts_only_nonnull_values_and_utf8_separator_bytes() {
+        let values = [
+            Value::Text("é".into()), Value::Null, Value::Text("a".into()),
+        ];
+        assert_eq!(joined_length(&values, "🙂").unwrap(), 7);
+        assert_eq!(joined_length(&[Value::Null], "🙂").unwrap(), 0);
+        assert!(matches!(joined_length(&[
+            Value::Text("x".repeat(16 * 1024 * 1024)),
+            Value::Text("z".into()),
+        ], ""), Err(Error::Execution(_))));
     }
 }
