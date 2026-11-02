@@ -104,6 +104,18 @@ pub struct Function {
     pub call: fn(&[Value]) -> Result<Value>,
 }
 
+// Both ROUND and BROUND decode nullable decimal scales before evaluating input.
+fn bounded_rounding_scale(args: &[Value], range_error: &'static str) -> Result<Option<i64>> {
+    let scale = if args.len() == 2 {
+        let Some(value) = integer(&args[1])? else { return Ok(None); };
+        value
+    } else { 0 };
+    if !(-15..=15).contains(&scale) {
+        return Err(Error::Execution(range_error.into()));
+    }
+    Ok(Some(scale))
+}
+
 fn coalesce_type(types: &[DataType]) -> Result<DataType> {
     same_type(types)
 }
