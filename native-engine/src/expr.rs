@@ -507,7 +507,7 @@ fn bool_to_value(value: Option<bool>) -> Value {
     value.map_or(Value::Null, Value::Boolean)
 }
 
-fn evaluate_binary(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
+pub(crate) fn evaluate_binary(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
     use BinaryOp::*;
     match op {
         And => {
