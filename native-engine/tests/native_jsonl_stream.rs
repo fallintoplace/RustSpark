@@ -60,3 +60,27 @@ fn streaming_limits_rows_columns_and_nonnullable_fields() {
     assert_eq!(JsonlScan::new(Cursor::new(b"".as_slice()), schema(), 8, 0)
         .unwrap().count(), 0);
 }
+
+
+#[test]
+fn batch_byte_quota_preserves_pending_rows_without_unbounded_growth() {
+    let json = "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n";
+    let mut scan = JsonlScan::with_batch_byte_budget(
+        Cursor::new(json.as_bytes()), schema(), 8, 4096, 120
+    ).unwrap();
+    for id in 1..=3 {
+        let batch = scan.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.value(0, 0).unwrap(), &Value::Integer(id));
+    }
+    assert!(scan.next().is_none());
+    assert_eq!(scan.bytes_read(), json.len());
+    let mut too_small = JsonlScan::with_batch_byte_budget(
+        Cursor::new(json.as_bytes()), schema(), 8, 4096, 1
+    ).unwrap();
+    assert!(too_small.next().unwrap().is_err());
+    assert!(too_small.next().is_none());
+    assert!(JsonlScan::with_batch_byte_budget(
+        Cursor::new(json.as_bytes()), schema(), 8, 4096, 0
+    ).is_err());
+}
