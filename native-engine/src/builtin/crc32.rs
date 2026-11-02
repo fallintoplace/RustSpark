@@ -31,13 +31,22 @@ const TABLES: [[u32; 256]; 8] = {
     tables
 };
 
-fn evaluate(args: &[Value]) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
-    // Match the bounded native digest functions. A valid SQL row must not
-    // trigger an unbounded checksum scan on worker threads.
-    if text.len() > 16 * 1024 * 1024 {
-        return Err(crate::Error::Execution("CRC32 input exceeds native 16 MiB budget".into()));
+const CHECKSUM_INPUT_LIMIT: usize = 16 * 1024 * 1024;
+
+fn checked_checksum_input<'a>(
+    args: &'a [Value], overflow_message: &'static str,
+) -> Result<Option<&'a str>> {
+    let text = super::string(&args[0])?;
+    if text.is_some_and(|text| text.len() > CHECKSUM_INPUT_LIMIT) {
+        return Err(crate::Error::Execution(overflow_message.into()));
     }
+    Ok(text)
+}
+
+fn evaluate(args: &[Value]) -> Result<Value> {
+    let Some(text) = checked_checksum_input(
+        args, "CRC32 input exceeds native 16 MiB budget",
+    )? else { return Ok(Value::Null); };
     let mut crc = !0_u32;
     let mut blocks = text.as_bytes().chunks_exact(8);
     for block in &mut blocks {
@@ -78,10 +87,9 @@ const CRC32C_TABLE: [u32; 256] = {
 };
 
 fn crc32c(args: &[Value]) -> Result<Value> {
-    let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
-    if input.len() > 16 * 1024 * 1024 {
-        return Err(crate::Error::Execution("CRC32C input exceeds 16 MiB budget".into()));
-    }
+    let Some(input) = checked_checksum_input(
+        args, "CRC32C input exceeds 16 MiB budget",
+    )? else { return Ok(Value::Null); };
     let mut checksum = u32::MAX;
     for &byte in input.as_bytes() {
         let index = usize::from((checksum as u8) ^ byte);
