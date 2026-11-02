@@ -102,6 +102,122 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
     }
 }
 
+/// Aggregate calls embedded in expressions such as SUM(x)/SUM(y)
+/// must be extracted into aggregate slots before projection.
+fn is_embedded_aggregate(name: &str) -> bool {
+    ["SUM", "COUNT", "AVG", "MEAN", "MIN", "MAX", "__SPARK_COUNT_STAR"]
+        .iter().any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+fn expression_contains_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { name, args } => is_embedded_aggregate(name)
+            || args.iter().any(expression_contains_aggregate),
+        Expr::Binary { left, right, .. } | Expr::IsDistinctFrom { left, right, .. } =>
+            expression_contains_aggregate(left) || expression_contains_aggregate(right),
+        Expr::Not(inner) | Expr::IsNull(inner)
+        | Expr::Cast { expression: inner, .. }
+        | Expr::TryCast { expression: inner, .. } => expression_contains_aggregate(inner),
+        Expr::Like { value, pattern, escape } =>
+            expression_contains_aggregate(value) || expression_contains_aggregate(pattern)
+                || escape.as_ref().is_some_and(|item| expression_contains_aggregate(item)),
+        Expr::Case { branches, else_expr } =>
+            branches.iter().any(|(cond, value)|
+                expression_contains_aggregate(cond) || expression_contains_aggregate(value))
+                || else_expr.as_ref().is_some_and(|expr| expression_contains_aggregate(expr)),
+        Expr::InList { needle, choices, .. } =>
+            expression_contains_aggregate(needle)
+                || choices.iter().any(expression_contains_aggregate),
+        Expr::Column(_) | Expr::Literal(_) => false,
+    }
+}
+
+fn rewrite_grouped_selection(
+    expr: Expr, group_by: &[(Expr, String)],
+    aggregates: &mut Vec<AggregateItem>,
+) -> Result<Expr> {
+    if let Some((_, alias)) = group_by.iter().find(|(source, _)| *source == expr) {
+        return Ok(Expr::Column(alias.clone()));
+    }
+    match expr {
+        Expr::Literal(_) => Ok(expr),
+        Expr::Column(column) => Err(Error::Parse(format!(
+            "selected column {column} must appear in GROUP BY",
+        ))),
+        Expr::Call { name, args } if is_embedded_aggregate(&name) => {
+            let op = match (name.to_ascii_uppercase().as_str(), args.as_slice()) {
+                ("__SPARK_COUNT_STAR", []) => AggregateOp::CountAll,
+                ("COUNT", [value]) => AggregateOp::Count(value.clone()),
+                ("SUM", [value]) => AggregateOp::Sum(value.clone()),
+                ("AVG" | "MEAN", [value]) => AggregateOp::Avg(value.clone()),
+                ("MIN", [value]) => AggregateOp::Min(value.clone()),
+                ("MAX", [value]) => AggregateOp::Max(value.clone()),
+                _ => return Err(Error::Parse(format!("invalid embedded {name} aggregate"))),
+            };
+            if let Some(item) = aggregates.iter().find(|item| item.op == op) {
+                return Ok(Expr::Column(item.alias.clone()));
+            }
+            let mut alias = format!("__rustspark_select_agg_{}", aggregates.len());
+            while aggregates.iter().any(|item| item.alias.eq_ignore_ascii_case(&alias))
+                || group_by.iter().any(|(_, key)| key.eq_ignore_ascii_case(&alias)) {
+                alias.push('_');
+            }
+            aggregates.push(AggregateItem::new(op, &alias));
+            Ok(Expr::Column(alias))
+        }
+        Expr::Binary { left, op, right } => Ok(Expr::binary(
+            rewrite_grouped_selection(*left, group_by, aggregates)?,
+            op,
+            rewrite_grouped_selection(*right, group_by, aggregates)?,
+        )),
+        Expr::Call { name, args } => Ok(Expr::Call {
+            name, args: args.into_iter()
+                .map(|item| rewrite_grouped_selection(item, group_by, aggregates))
+                .collect::<Result<_>>()?,
+        }),
+        Expr::Not(inner) => Ok(Expr::Not(Box::new(
+            rewrite_grouped_selection(*inner, group_by, aggregates)?,
+        ))),
+        Expr::IsNull(inner) => Ok(Expr::IsNull(Box::new(
+            rewrite_grouped_selection(*inner, group_by, aggregates)?,
+        ))),
+        Expr::Cast { expression, target } => Ok(Expr::Cast {
+            expression: Box::new(rewrite_grouped_selection(
+                *expression, group_by, aggregates)?), target,
+        }),
+        Expr::TryCast { expression, target } => Ok(Expr::TryCast {
+            expression: Box::new(rewrite_grouped_selection(
+                *expression, group_by, aggregates)?), target,
+        }),
+        Expr::IsDistinctFrom { left, right, negated } => Ok(Expr::IsDistinctFrom {
+            left: Box::new(rewrite_grouped_selection(*left, group_by, aggregates)?),
+            right: Box::new(rewrite_grouped_selection(*right, group_by, aggregates)?),
+            negated,
+        }),
+        Expr::Like { value, pattern, escape } => Ok(Expr::Like {
+            value: Box::new(rewrite_grouped_selection(*value, group_by, aggregates)?),
+            pattern: Box::new(rewrite_grouped_selection(*pattern, group_by, aggregates)?),
+            escape: escape.map(|item| rewrite_grouped_selection(
+                *item, group_by, aggregates).map(Box::new)).transpose()?,
+        }),
+        Expr::InList { needle, choices, negated } => Ok(Expr::InList {
+            needle: Box::new(rewrite_grouped_selection(*needle, group_by, aggregates)?),
+            choices: choices.into_iter()
+                .map(|item| rewrite_grouped_selection(item, group_by, aggregates))
+                .collect::<Result<_>>()?, negated,
+        }),
+        Expr::Case { branches, else_expr } => Ok(Expr::Case {
+            branches: branches.into_iter().map(|(cond, value)| Ok((
+                rewrite_grouped_selection(cond, group_by, aggregates)?,
+                rewrite_grouped_selection(value, group_by, aggregates)?,
+            ))).collect::<Result<_>>()?,
+            else_expr: else_expr.map(|expr|
+                rewrite_grouped_selection(*expr, group_by, aggregates).map(Box::new)
+            ).transpose()?,
+        }),
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -874,7 +990,11 @@ impl Parser {
                 }
             }
         }
-        let has_aggregates = select.iter().any(|entry| matches!(entry, SelectItem::Aggregate(_)));
+        let has_aggregates = select.iter().any(|entry| match entry {
+            SelectItem::Aggregate(_) => true,
+            SelectItem::Scalar(item) => expression_contains_aggregate(&item.expression),
+            SelectItem::Star => false,
+        });
         let grouped = has_aggregates || has_group_by;
         let having = if self.take_word("HAVING") {
             if !grouped {
@@ -909,15 +1029,9 @@ impl Parser {
                         aggregates.push(item);
                     }
                     SelectItem::Scalar(item) => {
-                        let expression = if matches!(item.expression, Expr::Literal(_)) {
-                            item.expression
-                        } else {
-                            let (_, name) = group_by.iter().find(|(expr, _)| *expr == item.expression)
-                                .ok_or_else(|| Error::Parse(format!(
-                                    "selected expression {:?} must appear in GROUP BY", item.expression
-                                )))?;
-                            Expr::Column(name.clone())
-                        };
+                        let expression = rewrite_grouped_selection(
+                            item.expression, &group_by, &mut aggregates,
+                        )?;
                         selections.push(Selection::new(expression, item.alias));
                     }
                     SelectItem::Star => unreachable!(),
@@ -2455,5 +2569,48 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_aggregate_ratios_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn computes_q14_style_promotional_revenue_ratio() {
+        let mut catalog = Catalog::new();
+        catalog.register("sales", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("p_type", DataType::Text, false),
+                Field::new("extendedprice", DataType::Float, false),
+            ]).unwrap(), vec![
+                vec![Value::Text("PROMO BRASS".into()), Value::Float(20.0)],
+                vec![Value::Text("STANDARD".into()), Value::Float(80.0)],
+            ],
+        ).unwrap()).unwrap();
+        let query = "SELECT 100.0 * SUM(CASE WHEN p_type LIKE 'PROMO%' THEN extendedprice ELSE 0 END) / SUM(extendedprice) AS promo_revenue FROM sales";
+        let rows = execute(&parse_sql(query).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Float(20.0)]]);
+    }
+
+    #[test]
+    fn mixed_group_keys_and_embedded_aggregates_are_projected() {
+        let mut catalog = Catalog::new();
+        catalog.register("t", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("category", DataType::Text, false),
+                Field::new("price", DataType::Integer, false),
+            ]).unwrap(), vec![
+                vec![Value::Text("A".into()), Value::Integer(10)],
+                vec![Value::Text("A".into()), Value::Integer(30)],
+                vec![Value::Text("B".into()), Value::Integer(20)],
+            ],
+        ).unwrap()).unwrap();
+        let query = "SELECT category, SUM(price) / COUNT(*) AS avg_price FROM t GROUP BY category ORDER BY category";
+        let rows = execute(&parse_sql(query).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], Value::Text("A".into()));
+        assert_eq!(rows[1][0], Value::Text("B".into()));
     }
 }
