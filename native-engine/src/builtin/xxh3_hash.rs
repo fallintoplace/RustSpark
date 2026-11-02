@@ -108,7 +108,8 @@ mod direct_xxh3_hex_tests {
             0x0123_4567_89ab_cdef_fedc_ba98_7654_3210] {
             assert_eq!(hex_128(digest), format!("{digest:032x}"));
         }
-        for text in ["", "Spark", "é🙂", "x".repeat(4096).as_str()] {
+        let long = "x".repeat(4096);
+        for text in ["", "Spark", "é🙂", long.as_str()] {
             let digest = xxhash_rust::xxh3::xxh3_128(text.as_bytes());
             assert_eq!(xxh3_128(&[Value::Text(text.into())]).unwrap(),
                 Value::Text(format!("{digest:032x}")));
