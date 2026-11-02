@@ -34,7 +34,7 @@ impl<'de> Deserialize<'de> for RootArrayLength {
 // behavior for duplicate keys, without retaining nested JSON value trees.
 // Most JSON object keys have no escapes. Borrow them from the input
 // document rather than allocating one String per member.
-struct BorrowedObjectKey<'de>(std::borrow::Cow<'de, str>);
+pub(super) struct BorrowedObjectKey<'de>(pub(super) std::borrow::Cow<'de, str>);
 
 impl<'de> Deserialize<'de> for BorrowedObjectKey<'de> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D)
