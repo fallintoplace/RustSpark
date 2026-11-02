@@ -1,6 +1,17 @@
 //! Non-throwing conversions for SQL TRY_CAST. Invalid values produce NULL.
 use crate::{scalar::Value, schema::DataType};
 
+fn parse_boolean_text(raw: &str) -> Option<bool> {
+    let text = raw.trim();
+    if text.eq_ignore_ascii_case("true") || text == "1" {
+        Some(true)
+    } else if text.eq_ignore_ascii_case("false") || text == "0" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 pub fn convert(value: Value, target: DataType) -> Value {
     if value.is_null() { return Value::Null; }
     match target {
@@ -42,16 +53,8 @@ pub fn convert(value: Value, target: DataType) -> Value {
             Value::Boolean(n) => Value::Boolean(n),
             Value::Integer(n) => Value::Boolean(n != 0),
             Value::Float(n) if n.is_finite() => Value::Boolean(n != 0.0),
-            Value::Text(n) => {
-                let text = n.trim();
-                if text.eq_ignore_ascii_case("true") || text == "1" {
-                    Value::Boolean(true)
-                } else if text.eq_ignore_ascii_case("false") || text == "0" {
-                    Value::Boolean(false)
-                } else {
-                    Value::Null
-                }
-            },
+            Value::Text(n) => parse_boolean_text(&n)
+                .map(Value::Boolean).unwrap_or(Value::Null),
             _ => Value::Null,
         },
     }
@@ -66,6 +69,9 @@ mod tests {
         assert_eq!(convert(Value::Float(1e100), DataType::Integer), Value::Null);
         assert_eq!(convert(Value::Text("42".into()), DataType::Integer), Value::Integer(42));
         assert_eq!(convert(Value::Text("FALSE".into()), DataType::Boolean), Value::Boolean(false));
+        assert_eq!(parse_boolean_text("  TrUe  "), Some(true));
+        assert_eq!(parse_boolean_text(" 0 "), Some(false));
+        assert_eq!(parse_boolean_text("yes"), None);
     }
 }
 
