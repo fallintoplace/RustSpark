@@ -11,6 +11,32 @@ fn normalized_uppercase(name: &str) -> Cow<'_, str> {
 }
 
 
+/// TPC-H currently uses ISO date text in native row batches. Validate
+/// dates before accepting explicit DATE casts or TO_DATE calls.
+fn validated_iso_date(value: &str) -> Result<&str> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || bytes.iter().enumerate().any(|(i, byte)|
+            i != 4 && i != 7 && !byte.is_ascii_digit()) {
+        return Err(Error::Type("TO_DATE requires YYYY-MM-DD".into()));
+    }
+    let year: u32 = value[0..4].parse().expect("validated ISO date");
+    let month: u32 = value[5..7].parse().expect("validated ISO date");
+    let day: u32 = value[8..10].parse().expect("validated ISO date");
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || day == 0 || day > last {
+        return Err(Error::Type("invalid TO_DATE calendar date".into()));
+    }
+    Ok(value)
+}
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
@@ -64,6 +90,15 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
             if args.len() < 2 { return Err(Error::Parse("CONCAT requires at least two arguments".into())); }
             for arg in args {
                 if arg.output_type(schema)? != DataType::Text { return Err(Error::Type("CONCAT requires text".into())); }
+            }
+            Ok(DataType::Text)
+        },
+        "TO_DATE" => {
+            if args.len() != 1 {
+                return Err(Error::Parse("TO_DATE expects one argument".into()));
+            }
+            if args[0].output_type(schema)? != DataType::Text {
+                return Err(Error::Type("TO_DATE requires ISO date text".into()));
             }
             Ok(DataType::Text)
         },
@@ -331,6 +366,11 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 }
             }
             Ok(Value::Text(text))
+        },
+        "TO_DATE" => match args {
+            [Value::Text(value)] => Ok(Value::Text(validated_iso_date(value)?.into())),
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("TO_DATE requires ISO date text".into())),
         },
         "SUBSTRING" | "SUBSTR" => match args {
             [Value::Text(text), Value::Integer(start)] => {
@@ -680,5 +720,20 @@ mod spark_format_string_tests {
         assert!(evaluate("printf", &[Value::Text("a".repeat(4097))]).is_err());
         assert!(evaluate("printf", &[Value::Text("%s".into()),
             Value::Text("x".repeat(1024 * 1024 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_to_date_tests {
+    use super::*;
+
+    #[test]
+    fn validates_calendar_days_and_propagates_null() {
+        assert_eq!(evaluate("to_date", &[Value::Text("1996-02-29".into())]).unwrap(),
+            Value::Text("1996-02-29".into()));
+        assert_eq!(evaluate("to_date", &[Value::Null]).unwrap(), Value::Null);
+        for invalid in ["1995-02-29", "1995-13-01", "1995-04-31", "1995-1-1"] {
+            assert!(evaluate("to_date", &[Value::Text(invalid.into())]).is_err());
+        }
     }
 }
