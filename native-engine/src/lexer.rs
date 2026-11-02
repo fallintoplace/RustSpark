@@ -245,6 +245,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             } else {
                 Token::Word(value)
             }
+        } else if character == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            Token::Operator("::".into())
         } else if character == '|' {
             if chars.peek() == Some(&'|') {
                 chars.next();
