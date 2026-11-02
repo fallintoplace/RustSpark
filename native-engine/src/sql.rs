@@ -920,8 +920,9 @@ impl Parser {
                     ));
                 }
                 let hidden = "__rustspark_having_scalar_rhs";
+                let inner_alias = selections[0].alias.clone();
                 let renamed = subquery.project(vec![Selection::new(
-                    Expr::Column(selections[0].alias.clone()), hidden,
+                    Expr::Column(inner_alias), hidden,
                 )]);
                 having_scalar = Some((comparator.expect("checked comparator"), renamed));
                 Some(lhs)
