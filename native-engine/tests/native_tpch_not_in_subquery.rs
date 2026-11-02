@@ -34,7 +34,7 @@ fn tpch_q16_not_in_subquery_obeys_sql_null_semantics() {
     assert_eq!(rows(&catalog(vec![Some(2), Some(3)]), ""), vec![
         vec![Value::Integer(1)],
     ]);
-    assert_eq!(rows(&catalog(vec![Some(2), None]), ""), vec![]);
+    assert_eq!(rows(&catalog(vec![Some(2), None]), ""), Vec::<Vec<Value>>::new());
     assert_eq!(rows(&catalog(vec![]), ""), vec![
         vec![Value::Integer(1)],
         vec![Value::Integer(2)],
