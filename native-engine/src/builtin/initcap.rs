@@ -15,6 +15,18 @@ fn push_checked(output: &mut String, character: char, limit: usize) -> Result<()
     Ok(())
 }
 
+fn push_cased(output: &mut String, ch: char, capitalize: bool, limit: usize) -> Result<()> {
+    if ch.is_ascii() {
+        push_checked(output, if capitalize { ch.to_ascii_uppercase() }
+            else { ch.to_ascii_lowercase() }, limit)?;
+    } else if capitalize {
+        for mapped in ch.to_uppercase() { push_checked(output, mapped, limit)?; }
+    } else {
+        for mapped in ch.to_lowercase() { push_checked(output, mapped, limit)?; }
+    }
+    Ok(())
+}
+
 fn initcap_bounded(text: &str, limit: usize) -> Result<String> {
     if text.len() > limit {
         return Err(Error::Execution("INITCAP input exceeds byte limit".into()));
@@ -46,21 +58,10 @@ fn initcap_bounded(text: &str, limit: usize) -> Result<String> {
             push_checked(&mut result, ch, limit)?;
             start_of_word = true;
         } else {
-            if ch.is_ascii() {
-                push_checked(&mut result,
-                    if start_of_word { ch.to_ascii_uppercase() }
-                    else { ch.to_ascii_lowercase() }, limit)?;
-            } else if start_of_word {
-                for mapped in ch.to_uppercase() { push_checked(&mut result, mapped, limit)?; }
-            } else {
-                for mapped in ch.to_lowercase() { push_checked(&mut result, mapped, limit)?; }
-            }
+            push_cased(&mut result, ch, start_of_word, limit)?;
             start_of_word = false;
         }
-        if result.len() > limit {
-            return Err(Error::Execution("INITCAP output exceeds byte limit".into()));
-        }
-    }
+     }
     Ok(result)
 }
 fn evaluate(args: &[Value]) -> Result<Value> {
@@ -128,5 +129,18 @@ mod fallible_initcap_reservation_tests {
         assert!(initcap_bounded("ΐ", 3).is_err());
         assert_eq!(initcap_bounded("a B", 3).unwrap(), "A B");
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod shared_initcap_unicode_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn expands_unicode_without_changing_word_boundaries() {
+        assert_eq!(initcap_bounded("straße ßET", 32).unwrap(), "Straße SSet");
+        assert_eq!(initcap_bounded("éCOLE\tABC", 32).unwrap(), "École\tAbc");
+        assert!(matches!(initcap_bounded("ΐ", 3), Err(Error::Execution(_))));
+        assert_eq!(initcap_bounded("A\nB", 3).unwrap(), "A\nB");
     }
 }
