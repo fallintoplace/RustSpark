@@ -221,11 +221,9 @@ mod small_float_direct_format_tests {
             let actual = evaluate(&[Value::Float(value), Value::Integer(precision)]).unwrap();
             let expected = format!("{value:.prec$}", prec = precision as usize);
             // The grouping boundary must be decided after decimal rounding.
-            let (unsigned, _) = expected.strip_prefix('-')
-                .unwrap_or(expected.as_str()).split_once('.')
-                .map_or((expected.strip_prefix('-').unwrap_or(expected.as_str()), None),
-                    |(whole, fraction)| (whole, Some(fraction)));
-            if unsigned.len() <= 3 {
+            let unsigned = expected.strip_prefix('-').unwrap_or(expected.as_str());
+            let whole = unsigned.split('.').next().unwrap_or(unsigned);
+            if whole.len() <= 3 {
                 assert_eq!(actual, Value::Text(expected));
             }
         }
