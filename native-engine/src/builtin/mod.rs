@@ -124,8 +124,13 @@ fn coalesce(values: &[Value]) -> Result<Value> {
     Ok(values.iter().find(|v| !v.is_null()).cloned().unwrap_or(Value::Null))
 }
 
+fn pi(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::PI)) }
+fn e(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::E)) }
+
 const CORE: &[Function] = &[
     Function { name: "coalesce", min_args: 1, max_args: 128, result_type: coalesce_type, call: coalesce },
+    Function { name: "pi", min_args: 0, max_args: 0, result_type: float_result, call: pi },
+    Function { name: "e", min_args: 0, max_args: 0, result_type: float_result, call: e },
 ];
 
 const MODULES: &[&[Function]] = &[
