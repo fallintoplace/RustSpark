@@ -35,9 +35,10 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     // Each ASCII pad scalar is one output byte, regardless of the pattern
     // length. The old estimate over-reserved for multi-byte ASCII patterns.
     let bytes_per_char = if pad.is_ascii() { 1 } else { pad.len().min(4) };
-    let mut result = String::with_capacity(
+    let mut result = String::new();
+    result.try_reserve_exact(
         text.len().saturating_add((target - size).saturating_mul(bytes_per_char)),
-    );
+    ).map_err(|_| Error::Execution("LPAD/RPAD output allocation failed".into()))?;
     if !left { result.push_str(text); }
     if let Some(character) = one_char {
         for _ in 0..(target - size) { result.push(character); }
@@ -46,7 +47,7 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         // push_str rather than decoding and appending each scalar.
         let padding = target - size;
         let full_runs = padding / pad.len();
-        append_repeated_pattern(&mut result, pad, full_runs);
+        append_repeated_pattern(&mut result, pad, full_runs)?;
         result.push_str(&pad[..padding % pad.len()]);
     } else {
         // Repeat whole UTF-8 patterns instead of pushing every Unicode
@@ -54,7 +55,7 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
         let pattern_chars = pad.chars().count();
         let padding = target - size;
         let complete = padding / pattern_chars;
-        append_repeated_pattern(&mut result, pad, complete);
+        append_repeated_pattern(&mut result, pad, complete)?;
         let remainder = padding % pattern_chars;
         if remainder != 0 {
             let end = pad.char_indices().nth(remainder)
@@ -67,16 +68,21 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
 }
 // Append a whole pad pattern in logarithmically many chunks rather than
 // making one push_str call per run. The caller has bounded output length.
-fn append_repeated_pattern(output: &mut String, pattern: &str, mut count: usize) {
-    if count == 0 { return; }
-    let mut block = pattern.to_owned();
-    loop {
-        if count & 1 != 0 { output.push_str(&block); }
-        count >>= 1;
-        if count == 0 { break; }
-        let duplicated = block.clone();
-        block.push_str(&duplicated);
+fn append_repeated_pattern(output: &mut String, pattern: &str, count: usize) -> Result<()> {
+    if count == 0 { return Ok(()); }
+    let length = pattern.len().checked_mul(count)
+        .ok_or_else(|| Error::Execution("LPAD/RPAD pattern length overflow".into()))?;
+    let mut repeated = Vec::new();
+    repeated.try_reserve_exact(length)
+        .map_err(|_| Error::Execution("LPAD/RPAD pattern allocation failed".into()))?;
+    repeated.extend_from_slice(pattern.as_bytes());
+    while repeated.len() < length {
+        let chunk = repeated.len().min(length - repeated.len());
+        repeated.extend_from_within(..chunk);
     }
+    output.push_str(std::str::from_utf8(&repeated)
+        .expect("repeated UTF-8 pattern remains valid"));
+    Ok(())
 }
 
 fn lpad(args: &[Value]) -> Result<Value> { pad(args, true) }
@@ -273,5 +279,26 @@ mod exponential_padding_regressions {
         assert_eq!(rpad(&[
             Value::Text("é".into()), Value::Integer(1), Value::Text("xyz".into()),
         ]).unwrap(), Value::Text("é".into()));
+    }
+}
+
+#[cfg(test)]
+mod fallible_padding_reservation_tests {
+    use super::*;
+    #[test]
+    fn repeated_patterns_keep_unicode_width_and_order() {
+        let text = Value::Text("🙂".into());
+        let pattern = Value::Text("éa".into());
+        assert_eq!(lpad(&[text.clone(), Value::Integer(5), pattern.clone()]).unwrap(),
+            Value::Text("éaéa🙂".into()));
+        assert_eq!(rpad(&[text, Value::Integer(5), pattern]).unwrap(),
+            Value::Text("🙂éaéa".into()));
+        let value = rpad(&[
+            Value::Text("x".into()), Value::Integer(1000),
+            Value::Text("🙂é".into()),
+        ]).unwrap();
+        let Value::Text(result) = value else { panic!("RPAD must return text"); };
+        assert_eq!(result.chars().count(), 1000);
+        assert!(result.starts_with("x🙂é"));
     }
 }
