@@ -48,8 +48,8 @@ fn parse_schema(text: &str) -> Result<Schema> {
             None => (kind, true),
         };
         let kind = match kind.to_ascii_lowercase().as_str() {
-            "int" | "integer" => DataType::Integer,
-            "float" | "double" => DataType::Float,
+            "int" | "int64" | "integer" => DataType::Integer,
+            "float" | "float64" | "double" => DataType::Float,
             "bool" | "boolean" => DataType::Boolean,
             "text" | "string" => DataType::Text,
             _ => return Err(Error::Parse(format!("unsupported type: {kind}"))),
@@ -558,5 +558,22 @@ mod sort_tuning_flags_tests {
         for value in ["0", "1", "65", "oops"] {
             assert!(parse(&["--merge-fan-in", value]).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_csv_numeric_type_alias_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_explicit_width_names_from_the_default_cli() {
+        let schema = parse_schema("region:text!,amount:int64!,ratio:float64").unwrap();
+        assert_eq!(schema.fields(), &[
+            Field::new("region", DataType::Text, false),
+            Field::new("amount", DataType::Integer, false),
+            Field::new("ratio", DataType::Float, true),
+        ]);
+        assert!(parse_schema("amount:int128").is_err());
+        assert!(parse_schema("amount:int64!!").is_err());
     }
 }
