@@ -442,16 +442,11 @@ pub fn aggregate_global_stream(
     input_schema: &Schema, items: &[AggregateItem],
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<Batch> {
-    if items.iter().any(|item| matches!(&item.op,
-        AggregateOp::CountDistinct(_) | AggregateOp::SumDistinct(_) |
-        AggregateOp::AvgDistinct(_))) {
-        return Err(Error::Unsupported("stream global DISTINCT aggregates require a spill path".into()));
-    }
     let schema = global_output_schema(input_schema, items)?;
     let mut states = items.iter().map(|item| State::new(&item.op))
         .collect::<Vec<_>>();
-    // The streaming path rejects DISTINCT during preflight above, so it
-    // never charges this counter. Keep the state transition shared.
+    // All global distinct states share a bounded retained-key budget,
+    // even when batches are streamed from different source files.
     let mut distinct_bytes = 0usize;
     for next in source {
         check()?;
@@ -1189,3 +1184,4 @@ mod grouped_direct_column_output_regressions {
         ]);
     }
 }
+
