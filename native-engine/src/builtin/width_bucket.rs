@@ -8,6 +8,26 @@ fn output(types: &[DataType]) -> Result<DataType> {
     }
     Ok(DataType::Integer)
 }
+// Preserve exact 64-bit integer comparisons and bucket edges via i128.
+fn integer_bucket(x: i64, lower: i64, upper: i64, buckets: i64) -> Result<i64> {
+    if lower == upper {
+        return Err(Error::Execution("WIDTH_BUCKET bounds must differ".into()));
+    }
+    let (x, lower, upper) = (i128::from(x), i128::from(lower), i128::from(upper));
+    let count = i128::from(buckets);
+    let slot = if lower < upper {
+        if x < lower { 0 } else if x >= upper { count + 1 }
+        else { (x - lower) * count / (upper - lower) + 1 }
+    } else if x > lower {
+        0
+    } else if x <= upper {
+        count + 1
+    } else {
+        (lower - x) * count / (lower - upper) + 1
+    };
+    Ok(slot as i64)
+}
+
 fn width_bucket(args: &[Value]) -> Result<Value> {
     if args.iter().any(Value::is_null) { return Ok(Value::Null); }
     let buckets = super::integer(&args[3])?.expect("non-NULL");
@@ -17,22 +37,7 @@ fn width_bucket(args: &[Value]) -> Result<Value> {
     if let (Value::Integer(x), Value::Integer(lower), Value::Integer(upper)) =
         (&args[0], &args[1], &args[2])
     {
-        if lower == upper {
-            return Err(Error::Execution("WIDTH_BUCKET bounds must differ".into()));
-        }
-        let (x, lower, upper) = (i128::from(*x), i128::from(*lower), i128::from(*upper));
-        let count = i128::from(buckets);
-        let slot = if lower < upper {
-            if x < lower { 0 } else if x >= upper { count + 1 }
-            else { (x - lower) * count / (upper - lower) + 1 }
-        } else if x > lower {
-            0
-        } else if x <= upper {
-            count + 1
-        } else {
-            (lower - x) * count / (lower - upper) + 1
-        };
-        return Ok(Value::Integer(slot as i64));
+        return Ok(Value::Integer(integer_bucket(*x, *lower, *upper, buckets)?));
     }
     let x = super::number(&args[0])?.expect("non-NULL");
     let lower = super::number(&args[1])?.expect("non-NULL");
@@ -162,5 +167,17 @@ mod integer_width_bucket_dispatch_tests {
         assert_eq!(width_bucket(&[
             Value::Null, Value::Integer(0), Value::Integer(10), Value::Integer(2),
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod integer_bucket_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn matches_exact_bigint_boundaries_in_both_directions() {
+        assert_eq!(integer_bucket(i64::MAX - 1, i64::MAX - 2, i64::MAX, 2).unwrap(), 2);
+        assert_eq!(integer_bucket(i64::MIN + 1, i64::MIN + 2, i64::MIN, 2).unwrap(), 1);
+        assert!(integer_bucket(1, 5, 5, 2).is_err());
     }
 }
