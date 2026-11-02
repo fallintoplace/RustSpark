@@ -233,10 +233,6 @@ class ExportDiagnosticsBudgetTests(unittest.TestCase):
                               diagnostics, 2, Path("never.arrow"), 1024,
                               max_stderr_bytes=0)
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SharedPathValidationTests(unittest.TestCase):
     def test_pathlike_objects_preserve_text_only_cli_arguments(self):
         class BinaryPath(os.PathLike):
@@ -251,3 +247,6 @@ class SharedPathValidationTests(unittest.TestCase):
                              database_dir=Path("/tmp/catalog"))
         self.assertIn("/tmp/input table.parquet", args)
         self.assertIn("/tmp/catalog", args)
+
+if __name__ == "__main__":
+    unittest.main()
