@@ -18,14 +18,12 @@ fn checked_log(value: &Value, base: Option<f64>) -> Result<Value> {
     super::finite(result)
 }
 fn ln(args: &[Value]) -> Result<Value> { checked_log(&args[0], None) }
-fn log2(args: &[Value]) -> Result<Value> {
-    let Some(x) = positive_argument(&args[0])? else { return Ok(Value::Null) };
-    super::finite(x.log2())
+fn fixed_base_log(args: &[Value], operation: fn(f64) -> f64) -> Result<Value> {
+    let Some(value) = positive_argument(&args[0])? else { return Ok(Value::Null) };
+    super::finite(operation(value))
 }
-fn log10(args: &[Value]) -> Result<Value> {
-    let Some(x) = positive_argument(&args[0])? else { return Ok(Value::Null) };
-    super::finite(x.log10())
-}
+fn log2(args: &[Value]) -> Result<Value> { fixed_base_log(args, f64::log2) }
+fn log10(args: &[Value]) -> Result<Value> { fixed_base_log(args, f64::log10) }
 fn log(args: &[Value]) -> Result<Value> {
     if args.len() == 1 { return ln(args); }
     let Some(base) = super::number(&args[0])? else { return Ok(Value::Null) };
