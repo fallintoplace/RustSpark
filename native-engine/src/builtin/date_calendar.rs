@@ -78,6 +78,11 @@ fn dayofweek(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer((days_since_epoch(date) + 4).rem_euclid(7) + 1))
 }
 
+fn weekday(args: &[Value]) -> Result<Value> {
+    let Some(date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    Ok(Value::Integer((days_since_epoch(date) + 3).rem_euclid(7)))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
@@ -85,6 +90,8 @@ pub(super) const FUNCTIONS: &[Function] = &[
         result_type: date_integer_type, call: dayofyear },
     Function { name: "dayofweek", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: dayofweek },
+    Function { name: "weekday", min_args: 1, max_args: 1,
+        result_type: date_integer_type, call: weekday },
 ];
 
 #[cfg(test)]
@@ -148,5 +155,18 @@ mod dayofweek_tests {
         assert_eq!(dayofweek(&[Value::Text("2023-01-01".into())]).unwrap(), Value::Integer(1));
         assert_eq!(dayofweek(&[Value::Text("2024-01-01".into())]).unwrap(), Value::Integer(2));
         assert_eq!(dayofweek(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+
+#[cfg(test)]
+mod weekday_tests {
+    use super::*;
+    #[test]
+    fn monday_is_zero_and_sunday_is_six() {
+        assert_eq!(weekday(&[Value::Text("2024-01-01".into())]).unwrap(), Value::Integer(0));
+        assert_eq!(weekday(&[Value::Text("2023-01-01".into())]).unwrap(), Value::Integer(6));
+        assert_eq!(weekday(&[Value::Text("1970-01-01".into())]).unwrap(), Value::Integer(3));
+        assert_eq!(weekday(&[Value::Null]).unwrap(), Value::Null);
     }
 }
