@@ -942,7 +942,18 @@ impl Parser {
             let source = self.identifier()?;
             self.scan_or_cte(source)?
         };
-        if self.take_word("AS") {
+        let explicit_alias = self.take_word("AS");
+        // Spark accepts FROM source alias and FROM (query) alias(columns)
+        // without AS. Never consume a clause or join keyword as an alias.
+        const CLAUSE_KEYWORDS: &[&str] = &[
+            "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH",
+            "UNION", "INTERSECT", "EXCEPT", "MINUS", "JOIN", "INNER", "LEFT",
+            "RIGHT", "FULL", "CROSS", "OUTER", "SEMI", "ANTI", "ON", "USING",
+            "WINDOW", "QUALIFY", "LATERAL", "TABLESAMPLE",
+        ];
+        let implicit_alias = matches!(self.peek(), Some(Token::Word(word))
+            if !CLAUSE_KEYWORDS.iter().any(|reserved| word.eq_ignore_ascii_case(reserved)));
+        if explicit_alias || implicit_alias {
             self.identifier()?;
             if self.take_symbol('(') {
                 let mut names = Vec::new();
