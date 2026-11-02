@@ -723,6 +723,20 @@ fn lower(
                 source, predicate.clone(), *offset, *count, control.clone(),
             )))
         }
+        Plan::Limit { input, offset, count: Some(count) }
+            if matches!(input.as_ref(), Plan::Sort { .. }) &&
+                offset.checked_add(*count)
+                    .is_some_and(|k| k <= super::topk_stream::MAX_TOPK_ROWS) => {
+            let Plan::Sort { input: source, keys } = input.as_ref() else {
+                unreachable!("checked sort below LIMIT")
+            };
+            let schema = infer(source, catalog, depth + 2, options.max_plan_depth, cache)?;
+            let chunks = super::topk_stream::top_k_stream(
+                lower(source, catalog, options, control, depth + 2, cache)?,
+                schema, keys, *offset, *count, options.batch_rows, control,
+            )?;
+            Ok(Box::new(chunks))
+        }
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
