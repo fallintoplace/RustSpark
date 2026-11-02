@@ -822,8 +822,13 @@ impl Parser {
                 } else {
                     matched
                 };
-                // Only a complete top-level EXISTS predicate is supported.
-                // Trailing AND/OR produces an explicit unsupported SQL error.
+                // EXISTS and NOT EXISTS are constant for the outer relation.
+                // An AND suffix can be filtered after the semi/anti witness:
+                // (EXISTS subquery) AND outer_predicate. Parse at AND precedence
+                // so a trailing OR is rejected rather than silently regrouped.
+                if self.take_word("AND") {
+                    plan = plan.filter(self.expression(2)?);
+                }
             } else {
                 if negate { self.index -= 1; }
                 plan = plan.filter(self.expression(0)?);
@@ -2403,5 +2408,52 @@ mod quantified_like_sql_tests {
         assert_eq!(evaluate_one(
             "SELECT 'hello' LIKE ALL ('wrong', RAISE_ERROR('late'))"
         ), Value::Boolean(false));
+    }
+}
+
+#[cfg(test)]
+mod uncorrelated_exists_conjunction_tests {
+    use super::*;
+    use crate::{
+        batch::Batch, catalog::Catalog, executor,
+        schema::{DataType, Field, Schema},
+    };
+
+    fn values() -> Catalog {
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema, (0..4)
+            .map(|value| vec![Value::Integer(value)]).collect()).unwrap();
+        catalog.register("data", batch).unwrap();
+        catalog
+    }
+
+    #[test]
+    fn exists_and_not_exists_can_be_combined_with_outer_filters() {
+        let catalog = values();
+        let cases = [
+            ("SELECT n FROM data WHERE EXISTS (SELECT 1 WHERE TRUE) AND n > 1 ORDER BY n",
+             vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]),
+            ("SELECT n FROM data WHERE NOT EXISTS (SELECT 1 WHERE FALSE) AND n > 1 ORDER BY n",
+             vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]),
+            ("SELECT n FROM data WHERE EXISTS (SELECT 1 WHERE FALSE) AND n > 1",
+             vec![]),
+            ("SELECT n FROM data WHERE NOT EXISTS (SELECT 1 WHERE TRUE) AND n > 1",
+             vec![]),
+            ("SELECT n FROM data WHERE EXISTS (SELECT 1 WHERE TRUE) AND n > 0 AND n < 3 ORDER BY n",
+             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]),
+        ];
+        for (sql, expected) in cases {
+            let rows = executor::execute(&parse_sql(sql).unwrap(), &catalog)
+                .unwrap().rows().unwrap();
+            assert_eq!(rows, expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn or_after_exists_is_not_reinterpreted_as_conjunction() {
+        assert!(parse_sql(
+            "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
+        ).is_err());
     }
 }
