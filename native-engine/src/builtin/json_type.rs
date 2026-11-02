@@ -188,11 +188,11 @@ impl<'de> Deserialize<'de> for StreamingJsonDepth {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A)
                 -> std::result::Result<Self::Value, A::Error>
             {
-                let mut members = HashMap::<String, usize>::new();
+                let mut members = HashMap::<std::borrow::Cow<'de, str>, usize>::new();
                 while let Some((name, child)) =
-                    map.next_entry::<String, StreamingJsonDepth>()?
+                    map.next_entry::<BorrowedObjectKey<'de>, StreamingJsonDepth>()?
                 {
-                    members.insert(name, child.0);
+                    members.insert(name.0, child.0);
                 }
                 Ok(StreamingJsonDepth(
                     members.into_values().max().unwrap_or(0) + 1
@@ -434,5 +434,21 @@ mod streaming_json_depth_differential_tests {
             Value::Text(" ".repeat(16 * 1024 * 1024 + 1)),
         ]), Err(Error::Execution(_))));
         assert_eq!(json_depth(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod borrowed_json_object_keys_tests {
+    use super::*;
+
+    #[test]
+    fn direct_members_and_depth_preserve_escaped_and_duplicate_key_semantics() {
+        let doc = r#"{"target":1,"t\\u0061rget":[true],"other":{"nested":42}}"#;
+        assert_eq!(evaluate(&[Value::Text(doc.into()),
+            Value::Text("$.target".into())]).unwrap(), Value::Text("ARRAY".into()));
+        assert_eq!(json_depth(&[Value::Text(doc.into())]).unwrap(), Value::Integer(3));
+        let duplicates = r#"{"x":[1,2],"x":null,"y":{}}"#;
+        assert_eq!(json_depth(&[Value::Text(duplicates.into())]).unwrap(),
+            Value::Integer(2));
     }
 }
