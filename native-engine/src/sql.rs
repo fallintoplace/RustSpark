@@ -616,6 +616,20 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
             }
+            // TPC-H Q7-Q9 use EXTRACT(YEAR FROM date).
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("EXTRACT")
+                && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                self.expect_symbol('(')?;
+                let field = self.identifier()?;
+                if !field.eq_ignore_ascii_case("YEAR") {
+                    return Err(Error::Unsupported(format!("EXTRACT field: {field}")));
+                }
+                self.expect_word("FROM")?;
+                let date = self.expression(0)?;
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: "year".into(), args: vec![date] })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("POSITION")
                 && self.peek() == Some(&Token::Symbol('(')) =>
             {
