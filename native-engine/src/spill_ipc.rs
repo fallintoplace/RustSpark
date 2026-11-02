@@ -32,6 +32,23 @@ impl SpillFile {
             .map_err(|e| Error::Execution(format!("open Arrow spill: {e}")))?;
         Ok(SpillReader { inner, failed: false, _owner: Arc::clone(&self.owner) })
     }
+
+
+    /// Read an IPC spill under a caller-provided schema and result budget.
+    /// Check the on-disk schema before decoding any record batches.
+    pub fn read_verified(
+        &self, expected_schema: &Schema, max_batches: usize, max_rows: usize,
+    ) -> Result<VerifiedSpillReader> {
+        let reader = self.read()?;
+        let actual = arrow_bridge::schema_from_arrow(reader.inner.schema().as_ref())?;
+        if &actual != expected_schema {
+            return Err(Error::Schema("Arrow spill schema changed".into()));
+        }
+        Ok(VerifiedSpillReader {
+            reader, expected_schema: expected_schema.clone(),
+            max_batches, max_rows, batches_seen: 0, rows_seen: 0, finished: false,
+        })
+    }
 }
 
 pub struct SpillReader {
@@ -55,6 +72,59 @@ impl Iterator for SpillReader {
             self.failed = true;
         }
         result
+    }
+}
+
+/// Fail-closed iterator for typed spill data. It never yields a batch that
+/// would overrun the caller's row or batch budget. After an error it stops.
+pub struct VerifiedSpillReader {
+    reader: SpillReader,
+    expected_schema: Schema,
+    max_batches: usize,
+    max_rows: usize,
+    batches_seen: usize,
+    rows_seen: usize,
+    finished: bool,
+}
+
+impl VerifiedSpillReader {
+    pub fn batches_seen(&self) -> usize { self.batches_seen }
+    pub fn rows_seen(&self) -> usize { self.rows_seen }
+}
+
+impl Iterator for VerifiedSpillReader {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished { return None; }
+        let next = self.reader.next();
+        let Some(next) = next else {
+            self.finished = true;
+            return None;
+        };
+        let batch = match next {
+            Ok(batch) => batch,
+            Err(error) => {
+                self.finished = true;
+                return Some(Err(error));
+            }
+        };
+        if self.batches_seen >= self.max_batches {
+            self.finished = true;
+            return Some(Err(Error::Execution("Arrow spill batch budget exceeded".into())));
+        }
+        if batch.schema() != &self.expected_schema {
+            self.finished = true;
+            return Some(Err(Error::Schema("Arrow spill batch schema mismatch".into())));
+        }
+        let Some(total) = self.rows_seen.checked_add(batch.num_rows())
+            .filter(|&total| total <= self.max_rows) else {
+            self.finished = true;
+            return Some(Err(Error::Execution("Arrow spill row budget exceeded".into())));
+        };
+        self.batches_seen += 1;
+        self.rows_seen = total;
+        Some(Ok(batch))
     }
 }
 

@@ -29,6 +29,19 @@ def _add_named_tables(command: list[str], flag: str,
         command.extend([flag, f"{name}={file_path}"])
 
 
+def _add_named_parameters(command: list[str],
+                          parameters: Mapping[str, str] | None) -> None:
+    params = parameters or {}
+    if len(params) > 64 or any(not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None
+                               for name in params):
+        raise ValueError("Invalid SQL parameter name or parameter count")
+    for name in sorted(params):
+        value = params[name]
+        if not isinstance(value, str) or ":" not in value or len(value.encode("utf-8")) > 8192:
+            raise ValueError("SQL parameters must be bounded typed values")
+        command.extend(["--named-param", f"{name}={value}"])
+
+
 def build_command(sql: str, output: Path, *, binary: str = "rustspark",
                   csv: str | Path | None = None,
                   parquet: str | Path | None = None,
@@ -73,15 +86,7 @@ def build_command(sql: str, output: Path, *, binary: str = "rustspark",
     if query_timeout is not None:
         command.extend(["--query-timeout", str(query_timeout)])
 
-    params = named_params or {}
-    if len(params) > 64 or any(not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None
-                               for name in params):
-        raise ValueError("Invalid SQL parameter name or parameter count")
-    for name in sorted(params):
-        value = params[name]
-        if not isinstance(value, str) or ":" not in value or len(value.encode("utf-8")) > 8192:
-            raise ValueError("SQL parameters must be bounded typed values")
-        command.extend(["--named-param", f"{name}={value}"])
+    _add_named_parameters(command, named_params)
     return command
 
 

@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap};
 
-use crate::{batch::Batch, Error, Result};
+use crate::{batch::Batch, schema::normalized_name, Error, Result};
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
@@ -57,14 +57,14 @@ impl Catalog {
         let from = normalize(source)?;
         let to = normalize(destination)?;
         if !self.tables.contains_key(from.as_ref()) {
-            return Err(Error::Schema(format!("unknown table: {source}")));
+            return Err(unknown_table(source));
         }
         if from == to { return Ok(()); }
         if self.tables.contains_key(to.as_ref()) {
             return Err(Error::Schema(format!("table already exists: {destination}")));
         }
         let batch = self.tables.remove(from.as_ref())
-            .ok_or_else(|| Error::Schema(format!("unknown table: {source}")))?;
+            .ok_or_else(|| unknown_table(source))?;
         let _ = self.tables.insert(to.into_owned(), batch);
         Ok(())
     }
@@ -73,7 +73,7 @@ impl Catalog {
         let normalized = normalize(name)?;
         self.tables
             .get(normalized.as_ref())
-            .ok_or_else(|| Error::Schema(format!("unknown table: {name}")))
+            .ok_or_else(|| unknown_table(name))
     }
 
     pub fn list(&self) -> Vec<&str> {
@@ -87,11 +87,11 @@ fn normalize(name: &str) -> Result<Cow<'_, str>> {
     if name.trim().is_empty() || name.chars().any(char::is_whitespace) {
         return Err(Error::Schema("expected a simple nonempty table name".into()));
     }
-    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        Ok(Cow::Owned(name.to_ascii_lowercase()))
-    } else {
-        Ok(Cow::Borrowed(name))
-    }
+    Ok(normalized_name(name))
+}
+
+fn unknown_table(name: &str) -> Error {
+    Error::Schema(format!("unknown table: {name}"))
 }
 
 #[cfg(test)]
@@ -115,7 +115,7 @@ impl Catalog {
     pub fn unregister(&mut self, name: &str) -> Result<Batch> {
         let normalized = normalize(name)?;
         self.tables.remove(normalized.as_ref())
-            .ok_or_else(|| Error::Schema(format!("unknown table: {name}")))
+            .ok_or_else(|| unknown_table(name))
     }
 }
 

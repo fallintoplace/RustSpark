@@ -121,6 +121,16 @@ pub(crate) fn scan_checked_open_file_pruned(
         return Err(Error::Schema(
             "registered Parquet table schema changed since registration".into()));
     }
+    // The common INT64 column/literal predicate can inspect the physical
+    // statistics directly. Avoid allocating a per-row-group column map.
+    if let Some(selected) =
+        int64_candidate_groups(builder.metadata(), builder.schema(), predicate)? {
+        builder = builder.with_row_groups(selected);
+        let rows = bounded_native_batch_rows(batch_size, builder.schema().fields().len());
+        let inner = builder.with_batch_size(rows)
+            .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+        return Ok(ParquetScan { inner, finished: false });
+    }
     let mut selected = Vec::new();
     selected.try_reserve_exact(builder.metadata().num_row_groups())
         .map_err(|_| Error::Execution("row group pruning allocation failed".into()))?;
@@ -222,9 +232,16 @@ fn projection_indices(
     let mut selected = Vec::new();
     selected.try_reserve_exact(columns.len())
         .map_err(|_| Error::Execution("Parquet projection allocation failed".into()))?;
-    let mut seen = std::collections::HashSet::new();
-    seen.try_reserve(columns.len())
-        .map_err(|_| Error::Execution("Parquet projection index allocation failed".into()))?;
+    // Small projections already have a bounded list of selected indices.
+    // Avoid allocating and hashing a set for the common narrow case.
+    let mut seen = if columns.len() > 16 {
+        let mut indices = std::collections::HashSet::new();
+        indices.try_reserve(columns.len())
+            .map_err(|_| Error::Execution("Parquet projection index allocation failed".into()))?;
+        Some(indices)
+    } else {
+        None
+    };
     for &name in columns {
         let position = if let Some(indices) = &indexed {
             match indices.get(&name.to_ascii_lowercase()) {
@@ -243,7 +260,11 @@ fn projection_indices(
             }
             first
         }.ok_or_else(|| Error::Schema(format!("unknown Parquet column: {name}")))?;
-        if !seen.insert(position) {
+        let duplicate = match &mut seen {
+            Some(indices) => !indices.insert(position),
+            None => selected.contains(&position),
+        };
+        if duplicate {
             return Err(Error::Schema(format!("duplicate Parquet projection column: {name}")));
         }
         selected.push(position);
@@ -1178,19 +1199,28 @@ pub fn scan_filtered(
 ) -> Result<FilteredParquetScan> {
     use crate::schema::DataType;
     predicate.validate_budget()?;
-    let path = path.as_ref();
-    let expected = file_schema(path)?;
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    // One reader builder can validate the schema, inspect row-group statistics
+    // and decode the selected groups. Do not reopen and reparse the footer.
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let expected = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
     if predicate.output_type(&expected)? != DataType::Boolean {
         return Err(Error::Type("Parquet filter predicate must be boolean".into()));
     }
-    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)
-        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
-    let candidates = int64_candidate_groups(builder.metadata(), builder.schema(), &predicate)?;
-    let scan = scan_with_options(path, batch_size, ParquetScanOptions {
-        row_groups: candidates.as_deref(),
-        ..ParquetScanOptions::default()
-    })?;
-    Ok(FilteredParquetScan { scan, predicate, finished: false })
+    if let Some(selected) = int64_candidate_groups(builder.metadata(), builder.schema(), &predicate)? {
+        builder = builder.with_row_groups(selected);
+    }
+    let rows = bounded_native_batch_rows(batch_size, builder.schema().fields().len());
+    let inner = builder.with_batch_size(rows)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(FilteredParquetScan {
+        scan: ParquetScan { inner, finished: false },
+        predicate,
+        finished: false,
+    })
 }
 
 #[cfg(test)]
@@ -1303,6 +1333,63 @@ mod boolean_float_parquet_pruning_tests {
         assert_eq!(rows, vec![
             vec![Value::Boolean(true), Value::Float(11.0)],
             vec![Value::Boolean(true), Value::Float(12.0)],
+        ]);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod direct_int64_pruning_perf_tests {
+    use super::*;
+    use crate::{
+        batch::Batch, expr::{BinaryOp, Expr}, scalar::Value,
+        schema::{DataType, Field, Schema},
+    };
+    use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+
+    #[test]
+    fn integer_fast_path_keeps_exact_rows_with_nullable_groups() {
+        let path = std::env::temp_dir().join(format!(
+            "native-pruned-int64-{}-{}.parquet",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let schema = Schema::new(vec![
+            Field::new("metric", DataType::Integer, true),
+        ]).unwrap();
+        let input = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Null],
+            vec![Value::Integer(2)], vec![Value::Integer(8)],
+            vec![Value::Integer(9)], vec![Value::Null],
+        ]).unwrap();
+        let data = crate::arrow_bridge::to_arrow(&input).unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2)).build();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(), data.schema(), Some(props),
+        ).unwrap();
+        writer.write(&data).unwrap();
+        writer.close().unwrap();
+        let predicate = Expr::binary(
+            Expr::Column("metric".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(5)),
+        );
+        let selected = int64_candidate_groups(
+            ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap())
+                .unwrap().metadata(),
+            data.schema().as_ref(),
+            &predicate,
+        ).unwrap().unwrap();
+        assert_eq!(selected, vec![1, 2]);
+        let scanned = scan_checked_open_file_pruned(
+            File::open(&path).unwrap(), 2, &schema, &predicate,
+        ).unwrap();
+        let rows = scanned.collect::<Result<Vec<_>>>().unwrap().into_iter()
+            .flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(2)], vec![Value::Integer(8)],
+            vec![Value::Integer(9)], vec![Value::Null],
         ]);
         std::fs::remove_file(path).unwrap();
     }

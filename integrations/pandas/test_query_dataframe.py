@@ -208,5 +208,17 @@ class ExportDiagnosticsBudgetTests(unittest.TestCase):
                               diagnostics, 2, Path("never.arrow"), 1024,
                               max_stderr_bytes=0)
 
+class NamedParameterCommandTests(unittest.TestCase):
+    def test_named_parameters_stay_sorted_and_type_checked(self):
+        args = build_command("SELECT 1", Path("out.arrow"),
+                             named_params={"z": "int64:7", "a": "utf8:é"})
+        params = [args[i + 1] for i, flag in enumerate(args[:-1])
+                  if flag == "--named-param"]
+        self.assertEqual(params, ["a=utf8:é", "z=int64:7"])
+        for bad in ({1: "int64:1"}, {"okay": None}, {"okay": "7"},
+                    {"okay": "utf8:" + "界" * 2730}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                build_command("SELECT 1", Path("out.arrow"), named_params=bad)
+
 if __name__ == "__main__":
     unittest.main()

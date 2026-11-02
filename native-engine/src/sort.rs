@@ -43,6 +43,11 @@ pub(crate) fn compare_values(left: &Value, right: &Value, descending: bool, null
                     a.is_nan().cmp(&b.is_nan()),
                 (Value::Float(a), _) if a.is_nan() => Ordering::Greater,
                 (_, Value::Float(b)) if b.is_nan() => Ordering::Less,
+                // Most ORDER BY comparisons are between values of one native
+                // scalar type. Avoid the fallible general SQL comparison.
+                (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+                (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+                (Value::Text(a), Value::Text(b)) => a.cmp(b),
                 _ => left.sql_compare(right).ok().flatten().unwrap_or(Ordering::Equal),
             };
             if descending { ordering.reverse() } else { ordering }
@@ -654,5 +659,59 @@ mod incremental_computed_sort_reservations_tests {
         let range = sort_range(&batch, &computed, 100, 1500).unwrap();
         let direct_range = sort_range(&batch, &direct, 100, 1500).unwrap();
         assert_eq!(range, direct_range);
+    }
+}
+
+#[cfg(test)]
+mod direct_sort_scalar_compare_tests {
+    use super::*;
+
+    #[test]
+    fn fast_scalar_types_preserve_sql_nulls_ties_nan_and_descending() {
+        let values = [
+            Value::Null,
+            Value::Integer(i64::MIN), Value::Integer(0), Value::Integer(i64::MAX),
+            Value::Boolean(false), Value::Boolean(true),
+            Value::Text("".into()), Value::Text("é🙂".into()),
+            Value::Float(-0.0), Value::Float(0.0), Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+        ];
+        for left in &values {
+            for right in &values {
+                // Invalid mixed SQL types are intentionally covered by the
+                // generic error-fallback path, not by this scalar oracle.
+                if !matches!((left, right),
+                    (Value::Null, _) | (_, Value::Null)
+                    | (Value::Integer(_), Value::Integer(_))
+                    | (Value::Float(_), Value::Float(_))
+                    | (Value::Integer(_), Value::Float(_))
+                    | (Value::Float(_), Value::Integer(_))
+                    | (Value::Boolean(_), Value::Boolean(_))
+                    | (Value::Text(_), Value::Text(_))
+                ) { continue; }
+                for descending in [false, true] {
+                    for nulls_first in [false, true] {
+                        let expected = match (left.is_null(), right.is_null()) {
+                            (true, true) => Ordering::Equal,
+                            (true, false) => if nulls_first {
+                                Ordering::Less
+                            } else { Ordering::Greater },
+                            (false, true) => if nulls_first {
+                                Ordering::Greater
+                            } else { Ordering::Less },
+                            (false, false) => {
+                                let order = left.sql_compare(right).ok().flatten()
+                                    .unwrap_or(Ordering::Equal);
+                                if descending { order.reverse() } else { order }
+                            },
+                        };
+                        assert_eq!(
+                            compare_values(left, right, descending, nulls_first), expected,
+                            "left={left:?} right={right:?} descending={descending} nulls_first={nulls_first}",
+                        );
+                    }
+                }
+            }
+        }
     }
 }

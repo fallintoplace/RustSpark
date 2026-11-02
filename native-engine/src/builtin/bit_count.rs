@@ -5,9 +5,13 @@ fn output(types: &[DataType]) -> Result<DataType> {
     if types[0] == DataType::Integer { Ok(DataType::Integer) }
     else { Err(Error::Type("BIT_COUNT requires an integer".into())) }
 }
+fn map_nullable_integer(args: &[Value], operation: impl FnOnce(i64) -> i64) -> Result<Value> {
+    let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null); };
+    Ok(Value::Integer(operation(value)))
+}
+
 fn bit_count(args: &[Value]) -> Result<Value> {
-    let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null) };
-    Ok(Value::Integer(value.count_ones() as i64))
+    map_nullable_integer(args, |value| value.count_ones() as i64)
 }
 
 fn bit_reverse_type(types: &[DataType]) -> Result<DataType> {
@@ -15,8 +19,7 @@ fn bit_reverse_type(types: &[DataType]) -> Result<DataType> {
     else { Err(Error::Type("BIT_REVERSE requires integer input".into())) }
 }
 fn bit_reverse(args: &[Value]) -> Result<Value> {
-    let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null); };
-    Ok(Value::Integer(value.reverse_bits()))
+    map_nullable_integer(args, i64::reverse_bits)
 }
 
 fn getbit_type(types: &[DataType]) -> Result<DataType> {
@@ -37,9 +40,7 @@ fn getbit(args: &[Value]) -> Result<Value> {
 }
 
 fn bitmap_bit_position(args: &[Value]) -> Result<Value> {
-    let Some(value) = super::integer(&args[0])? else { return Ok(Value::Null); };
-    let offset = (i128::from(value) - 1).rem_euclid(32_768);
-    Ok(Value::Integer(offset as i64))
+    map_nullable_integer(args, |value| (i128::from(value) - 1).rem_euclid(32_768) as i64)
 }
 
 fn bitmap_bit_position_type(types: &[DataType]) -> Result<DataType> {
@@ -53,6 +54,23 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "bitmap_bit_position", min_args: 1, max_args: 1,
         result_type: bitmap_bit_position_type, call: bitmap_bit_position },
 ];
+#[cfg(test)]
+mod nullable_integer_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn does_not_evaluate_null_arguments() {
+        assert_eq!(
+            map_nullable_integer(&[Value::Null], |_| panic!("NULL must short-circuit")).unwrap(),
+            Value::Null,
+        );
+        assert_eq!(
+            map_nullable_integer(&[Value::Integer(-7)], i64::abs).unwrap(),
+            Value::Integer(7),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

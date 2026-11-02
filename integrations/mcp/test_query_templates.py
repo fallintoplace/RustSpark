@@ -202,6 +202,16 @@ class BackendInterruptCleanupTests(unittest.TestCase):
         self.assertEqual(len(started), 1)
         self.assertIsNotNone(started[0].poll(), "interrupted process must be reaped")
 
+class JsonDecoderHooksTests(unittest.TestCase):
+    def test_rejects_duplicate_escaped_keys_and_nonfinite_values(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate SQL result key"):
+            parse_query_rows('[{"a":1,"\\u0061":2}]')
+        for text in ('[{"v":1e999}]', '[{"v":-1e999}]', '[{"v":NaN}]',
+                     '[{"v":Infinity}]', '[{"v":-Infinity}]'):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "Nonfinite"):
+                parse_query_rows(text)
+        self.assertEqual(parse_query_rows('[{"v":1.25,"outer":{"x":2}}]'),
+                         [{"v": 1.25, "outer": {"x": 2}}])
 
 if __name__ == "__main__":
     unittest.main()

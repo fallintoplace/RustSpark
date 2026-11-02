@@ -48,3 +48,61 @@ fn invalid_window_keys_and_duplicate_output_names_are_rejected() {
     assert!(rank_batch(example(), &[], &[key], Ranking::Rank, "r").is_err());
     assert!(rank_batch(example(), &[], &[], Ranking::Rank, "score").is_err());
 }
+
+
+#[test]
+fn distributions_preserve_partition_ties_nulls_and_row_order() {
+    use rustspark_native::window::{distribution_batch, Distribution};
+    let keys = [SortKey {
+        expression: Expr::Column("score".into()),
+        descending: false, nulls_first: false,
+    }];
+    let percent = distribution_batch(
+        example(), &["group"], &keys, Distribution::PercentRank, "pct"
+    ).unwrap();
+    assert_eq!(percent.column(2).unwrap(), &[
+        Value::Float(0.5), Value::Float(0.0), Value::Float(0.0),
+        Value::Float(0.5), Value::Float(1.0),
+    ]);
+    let cumulative = distribution_batch(
+        example(), &["group"], &keys, Distribution::CumeDist, "cume"
+    ).unwrap();
+    assert_eq!(cumulative.column(2).unwrap(), &[
+        Value::Float(1.0), Value::Float(0.5), Value::Float(1.0 / 3.0),
+        Value::Float(1.0), Value::Float(1.0),
+    ]);
+}
+
+#[test]
+fn distributions_handle_singletons_empty_batches_and_peer_only_partitions() {
+    use rustspark_native::window::{distribution_batch, Distribution};
+    let schema = Schema::new(vec![Field::new("key", DataType::Integer, false)]).unwrap();
+    for distribution in [Distribution::PercentRank, Distribution::CumeDist] {
+        let single = Batch::from_rows(schema.clone(),
+            vec![vec![Value::Integer(7)]]).unwrap();
+        let output = distribution_batch(single, &[], &[], distribution, "stat").unwrap();
+        assert_eq!(output.value(0, 1).unwrap(),
+            &Value::Float(if distribution == Distribution::PercentRank { 0.0 } else { 1.0 }));
+
+        let empty = Batch::empty(schema.clone());
+        let output = distribution_batch(empty, &[], &[], distribution, "stat").unwrap();
+        assert_eq!(output.num_rows(), 0);
+        assert_eq!(output.schema().len(), 2);
+    }
+    let tied = Batch::from_rows(schema, vec![
+        vec![Value::Integer(2)], vec![Value::Integer(3)],
+    ]).unwrap();
+    let output = distribution_batch(tied, &[], &[],
+        Distribution::CumeDist, "stat").unwrap();
+    assert_eq!(output.column(1).unwrap(), &[Value::Float(1.0), Value::Float(1.0)]);
+}
+
+#[test]
+fn distributions_reject_invalid_keys_and_duplicate_names() {
+    use rustspark_native::window::{distribution_batch, Distribution};
+    assert!(distribution_batch(example(), &[], &[
+        SortKey::ascending(Expr::Column("missing".into()))
+    ], Distribution::PercentRank, "pct").is_err());
+    assert!(distribution_batch(example(), &[], &[],
+        Distribution::CumeDist, "score").is_err());
+}

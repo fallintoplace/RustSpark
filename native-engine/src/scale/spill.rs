@@ -106,6 +106,20 @@ fn type_code(data_type: DataType) -> u8 {
     }
 }
 
+// The wire stores one tag per cell and an eight-byte payload per number.
+// Required scalar schemas have the same encoded width for every row.
+fn fixed_wire_row_bytes(schema: &Schema) -> Option<usize> {
+    schema.fields().iter().try_fold(0usize, |bytes, field| {
+        if field.nullable { return None; }
+        let width = match field.data_type {
+            DataType::Boolean => 1,
+            DataType::Integer | DataType::Float => 9,
+            DataType::Text => return None,
+        };
+        bytes.checked_add(width)
+    })
+}
+
 pub struct SpillWriter<W: Write> {
     output: W,
     schema: Schema,
@@ -158,6 +172,7 @@ impl<W: Write> SpillWriter<W> {
             return Err(Error::Execution("invalid spill batch window limits".into()));
         }
         let rows_per_window = max_rows.min(MAX_CELLS / self.schema.len().max(1));
+        let fixed_row_bytes = fixed_wire_row_bytes(&self.schema);
         let columns = (0..self.schema.len())
             .map(|index| batch.column(index)).collect::<Result<Vec<_>>>()?;
         let mut start = 0;
@@ -166,24 +181,29 @@ impl<W: Write> SpillWriter<W> {
             let mut end = start;
             let mut bytes = 4usize;
             while end < batch.num_rows() && end - start < rows_per_window {
-                let mut row_bytes = self.schema.len();
-                for column in &columns {
-                    let additional = match &column[end] {
-                        Value::Integer(_) | Value::Float(_) => 8,
-                        Value::Text(text) => {
-                            if text.len() > MAX_TEXT_BYTES {
-                                // Earlier wire windows may already be on disk.
-                                // Never allow finish() to commit their valid prefix.
-                                if emitted { self.poisoned = true; }
-                                return Err(Error::Execution("spill text value too long".into()));
+                let row_bytes = if let Some(bytes) = fixed_row_bytes {
+                    bytes
+                } else {
+                    let mut row_bytes = self.schema.len();
+                    for column in &columns {
+                        let additional = match &column[end] {
+                            Value::Integer(_) | Value::Float(_) => 8,
+                            Value::Text(text) => {
+                                if text.len() > MAX_TEXT_BYTES {
+                                    // Earlier wire windows may already be on disk.
+                                    // Never allow finish() to commit their valid prefix.
+                                    if emitted { self.poisoned = true; }
+                                    return Err(Error::Execution("spill text value too long".into()));
+                                }
+                                text.len() + 4
                             }
-                            text.len() + 4
-                        }
-                        Value::Null | Value::Boolean(_) => 0,
-                    };
-                    row_bytes = row_bytes.checked_add(additional)
-                        .ok_or_else(|| Error::Execution("spill batch byte overflow".into()))?;
-                }
+                            Value::Null | Value::Boolean(_) => 0,
+                        };
+                        row_bytes = row_bytes.checked_add(additional)
+                            .ok_or_else(|| Error::Execution("spill batch byte overflow".into()))?;
+                    }
+                    row_bytes
+                };
                 if row_bytes > max_bytes - 4 {
                     if emitted { self.poisoned = true; }
                     return Err(Error::Execution("spill row exceeds byte limit".into()));
@@ -1474,5 +1494,51 @@ mod fallible_spill_value_growth_regressions {
             assert_eq!(reader.next_batch().unwrap(), Some(expected));
             assert_eq!(reader.next_batch().unwrap(), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod fixed_width_spill_windows_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn numeric_windows_preserve_all_rows_and_byte_boundaries() {
+        let schema = Schema::new(vec![
+            Field::new("flag", DataType::Boolean, false),
+            Field::new("id", DataType::Integer, false),
+            Field::new("score", DataType::Float, false),
+        ]).unwrap();
+        assert_eq!(fixed_wire_row_bytes(&schema), Some(19));
+        let rows = (0..5_i64).map(|n| vec![
+            Value::Boolean(n % 2 == 0),
+            Value::Integer(n),
+            Value::Float(n as f64 + 0.25),
+        ]).collect::<Vec<_>>();
+        let batch = Batch::from_rows(schema.clone(), rows.clone()).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        writer.write_batch_bounded_with_budget(&batch, 10, 42).unwrap();
+        let mut reader = SpillReader::new(Cursor::new(writer.finish().unwrap()), 10).unwrap();
+        let mut decoded = Vec::new();
+        let mut widths = Vec::new();
+        while let Some(batch) = reader.next_batch().unwrap() {
+            widths.push(batch.num_rows());
+            decoded.extend(batch.rows().unwrap());
+        }
+        assert_eq!(widths, vec![2, 2, 1]);
+        assert_eq!(decoded, rows);
+    }
+
+    #[test]
+    fn nullable_and_text_columns_keep_variable_length_accounting() {
+        let nullable = Schema::new(vec![
+            Field::new("n", DataType::Integer, true),
+        ]).unwrap();
+        assert_eq!(fixed_wire_row_bytes(&nullable), None);
+        let text = Schema::new(vec![
+            Field::new("x", DataType::Text, false),
+        ]).unwrap();
+        assert_eq!(fixed_wire_row_bytes(&text), None);
+        assert_eq!(fixed_wire_row_bytes(&Schema::new(vec![]).unwrap()), Some(0));
     }
 }

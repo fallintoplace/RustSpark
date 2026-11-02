@@ -9,7 +9,7 @@ fn masked_shift(count: i64) -> u32 {
     // JVM long shifts use the low six bits, including for negative counts.
     (count as u32) & 63
 }
-fn parts(args: &[Value]) -> Result<Option<(i64, u32)>> {
+pub(super) fn parts(args: &[Value]) -> Result<Option<(i64, u32)>> {
     let Some(value) = super::integer(&args[0])? else { return Ok(None) };
     let Some(shift) = super::integer(&args[1])? else { return Ok(None) };
     let shift = masked_shift(shift);

@@ -1,18 +1,8 @@
 use super::{float_type, float_result, Function};
 use crate::{scalar::Value, Result};
 
-fn radians(args: &[Value]) -> Result<Value> {
-    match super::number(&args[0])? {
-        Some(n) => super::finite(n.to_radians()),
-        None => Ok(Value::Null),
-    }
-}
-fn degrees(args: &[Value]) -> Result<Value> {
-    match super::number(&args[0])? {
-        Some(n) => super::finite(n.to_degrees()),
-        None => Ok(Value::Null),
-    }
-}
+fn radians(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::to_radians) }
+fn degrees(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::to_degrees) }
 fn pi(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::PI)) }
 fn e(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::E)) }
 fn tau(_: &[Value]) -> Result<Value> { Ok(Value::Float(std::f64::consts::TAU)) }

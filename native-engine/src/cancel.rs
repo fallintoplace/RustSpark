@@ -5,6 +5,11 @@ use std::{
 
 use crate::{Error, Result};
 
+fn checked_deadline(timeout: Duration) -> Result<Instant> {
+    Instant::now().checked_add(timeout)
+        .ok_or_else(|| Error::Execution("query timeout overflow".into()))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Cancellation {
     cancelled: Arc<AtomicBool>,
@@ -40,16 +45,14 @@ impl QueryGuard {
     }
 
     pub fn with_timeout(cancellation: Cancellation, timeout: Duration) -> Result<Self> {
-        let deadline = Instant::now().checked_add(timeout)
-            .ok_or_else(|| Error::Execution("query timeout overflow".into()))?;
+        let deadline = checked_deadline(timeout)?;
         Ok(Self { cancellation, deadline: Some(deadline) })
     }
 
     /// Create a child execution guard that shares cancellation and inherits
     /// the earlier of the parent deadline and a new local timeout.
     pub fn child_with_timeout(&self, timeout: Duration) -> Result<Self> {
-        let local = Instant::now().checked_add(timeout)
-            .ok_or_else(|| Error::Execution("query timeout overflow".into()))?;
+        let local = checked_deadline(timeout)?;
         let deadline = self.deadline.map_or(local, |parent| parent.min(local));
         Ok(Self { cancellation: self.cancellation.clone(), deadline: Some(deadline) })
     }

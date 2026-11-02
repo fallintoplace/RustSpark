@@ -31,9 +31,13 @@ pub mod project;
 
 pub mod limit;
 
+pub mod window_frames;
+
 pub mod sort;
 
 pub mod window;
+
+pub mod window_buckets;
 
 pub mod aggregate;
 
@@ -55,6 +59,8 @@ pub mod sql;
 pub mod csv;
 
 pub mod jsonl;
+
+pub mod jsonl_stream;
 
 pub mod memory;
 
@@ -80,6 +86,8 @@ pub mod local_workers;
 
 pub mod transport;
 
+pub mod exchange_writer;
+
 pub mod exchange_commit;
 
 pub mod task_scheduler;
@@ -103,6 +111,8 @@ pub mod bloom;
 pub mod stages;
 
 pub mod cancellation;
+
+pub mod window_offsets;
 
 pub mod batch_chunks;
 

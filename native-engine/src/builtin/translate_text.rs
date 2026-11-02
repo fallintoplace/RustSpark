@@ -24,6 +24,20 @@ fn append_output(output: &mut String, character: char) -> Result<()> {
     Ok(())
 }
 
+const UNMAPPED: i16 = -1;
+const REMOVE: i16 = -2;
+
+fn ascii_mapping(from: &str, to: &str) -> [i16; 128] {
+    let mut mapping = [UNMAPPED; 128];
+    for (index, &byte) in from.as_bytes().iter().enumerate() {
+        if mapping[usize::from(byte)] == UNMAPPED {
+            mapping[usize::from(byte)] = to.as_bytes().get(index)
+                .map_or(REMOVE, |replacement| i16::from(*replacement));
+        }
+    }
+    mapping
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(from) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -47,15 +61,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text({ let mut copy = reserve_output(text)?; copy.push_str(text); copy }));
     }
     if text.is_ascii() && from.is_ascii() && to.is_ascii() {
-        const UNMAPPED: i16 = -1;
-        const REMOVE: i16 = -2;
-        let mut mapping = [UNMAPPED; 128];
-        for (index, &byte) in from.as_bytes().iter().enumerate() {
-            if mapping[usize::from(byte)] == UNMAPPED {
-                mapping[usize::from(byte)] = to.as_bytes().get(index)
-                    .map_or(REMOVE, |replacement| i16::from(*replacement));
-            }
-        }
+        let mapping = ascii_mapping(from, to);
         let mut output = Vec::new();
         output.try_reserve_exact(text.len())
             .map_err(|_| Error::Execution("TRANSLATE output allocation failed".into()))?;
@@ -73,15 +79,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     // per-row HashMap when all source and target scalars fit a fixed table.
     // Non-ASCII input scalars cannot match this mapping and pass through.
     if from.is_ascii() && to.is_ascii() {
-        const UNMAPPED: i16 = -1;
-        const REMOVE: i16 = -2;
-        let mut mapping = [UNMAPPED; 128];
-        for (index, &byte) in from.as_bytes().iter().enumerate() {
-            if mapping[usize::from(byte)] == UNMAPPED {
-                mapping[usize::from(byte)] = to.as_bytes().get(index)
-                    .map_or(REMOVE, |replacement| i16::from(*replacement));
-            }
-        }
+        let mapping = ascii_mapping(from, to);
         let mut output = reserve_output(text)?;
         for character in text.chars() {
             if character.is_ascii() {
@@ -155,6 +153,24 @@ pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "translate", min_args: 3, max_args: 3,
     result_type: output, call: evaluate,
 }];
+
+#[cfg(test)]
+mod ascii_mapping_helper_tests {
+    use super::*;
+
+    #[test]
+    fn first_mapping_wins_and_missing_replacements_delete() {
+        let mapping = ascii_mapping("aab", "12");
+        assert_eq!(mapping[usize::from(b'a')], i16::from(b'1'));
+        assert_eq!(mapping[usize::from(b'b')], REMOVE);
+        assert_eq!(mapping[usize::from(b'c')], UNMAPPED);
+        assert_eq!(evaluate(&[
+            Value::Text("aéba".into()),
+            Value::Text("ab".into()),
+            Value::Text("Q".into()),
+        ]).unwrap(), Value::Text("QéQ".into()));
+    }
+}
 
 #[cfg(test)]
 mod tests {

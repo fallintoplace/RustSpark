@@ -43,22 +43,16 @@ fn scale_round(args: &[Value], round_up: bool) -> Result<Value> {
     super::finite(result)
 }
 
-fn floor(args: &[Value]) -> Result<Value> {
-    if args.len() == 2 { return scale_round(args, false); }
+fn round_value(args: &[Value], round_up: bool) -> Result<Value> {
+    if args.len() == 2 { return scale_round(args, round_up); }
     if let Value::Integer(value) = args[0] { return Ok(Value::Integer(value)); }
     match super::number(&args[0])? {
-        Some(v) => checked_integer(v.floor()),
+        Some(value) => checked_integer(if round_up { value.ceil() } else { value.floor() }),
         None => Ok(Value::Null),
     }
 }
-fn ceil(args: &[Value]) -> Result<Value> {
-    if args.len() == 2 { return scale_round(args, true); }
-    if let Value::Integer(value) = args[0] { return Ok(Value::Integer(value)); }
-    match super::number(&args[0])? {
-        Some(v) => checked_integer(v.ceil()),
-        None => Ok(Value::Null),
-    }
-}
+fn floor(args: &[Value]) -> Result<Value> { round_value(args, false) }
+fn ceil(args: &[Value]) -> Result<Value> { round_value(args, true) }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "floor", min_args: 1, max_args: 2, result_type: output, call: floor },
     Function { name: "ceil", min_args: 1, max_args: 2, result_type: output, call: ceil },

@@ -42,26 +42,8 @@ fn pad(args: &[Value], left: bool) -> Result<Value> {
     if !left { result.push_str(text); }
     if let Some(character) = one_char {
         for _ in 0..(target - size) { result.push(character); }
-    } else if pad.is_ascii() {
-        // For multi-character ASCII patterns, copy whole runs using
-        // push_str rather than decoding and appending each scalar.
-        let padding = target - size;
-        let full_runs = padding / pad.len();
-        append_repeated_pattern(&mut result, pad, full_runs)?;
-        result.push_str(&pad[..padding % pad.len()]);
     } else {
-        // Repeat whole UTF-8 patterns instead of pushing every Unicode
-        // scalar individually. The final partial run ends on a char boundary.
-        let pattern_chars = pad.chars().count();
-        let padding = target - size;
-        let complete = padding / pattern_chars;
-        append_repeated_pattern(&mut result, pad, complete)?;
-        let remainder = padding % pattern_chars;
-        if remainder != 0 {
-            let end = pad.char_indices().nth(remainder)
-                .expect("partial pattern has an interior UTF-8 boundary").0;
-            result.push_str(&pad[..end]);
-        }
+        append_pattern_padding(&mut result, pad, target - size, pad.is_ascii())?;
     }
     if left { result.push_str(text); }
     Ok(Value::Text(result))
@@ -82,6 +64,24 @@ fn append_repeated_pattern(output: &mut String, pattern: &str, count: usize) -> 
     }
     output.push_str(std::str::from_utf8(&repeated)
         .expect("repeated UTF-8 pattern remains valid"));
+    Ok(())
+}
+
+fn append_pattern_padding(
+    output: &mut String, pattern: &str, count: usize, ascii: bool,
+) -> Result<()> {
+    let width = if ascii { pattern.len() } else { pattern.chars().count() };
+    append_repeated_pattern(output, pattern, count / width)?;
+    let remainder = count % width;
+    if remainder != 0 {
+        let end = if ascii {
+            remainder
+        } else {
+            pattern.char_indices().nth(remainder)
+                .expect("partial pattern ends at a UTF-8 boundary").0
+        };
+        output.push_str(&pattern[..end]);
+    }
     Ok(())
 }
 
@@ -300,5 +300,22 @@ mod fallible_padding_reservation_tests {
         let Value::Text(result) = value else { panic!("RPAD must return text"); };
         assert_eq!(result.chars().count(), 1000);
         assert!(result.starts_with("x🙂é"));
+    }
+}
+
+#[cfg(test)]
+mod shared_pattern_padding_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_and_unicode_remainders_match_scalar_cycles() {
+        for pattern in ["ab", "🙂é", "éa", "xyz"] {
+            for count in [0usize, 1, 2, 3, 4, 5, 8, 17] {
+                let mut actual = String::new();
+                append_pattern_padding(&mut actual, pattern, count, pattern.is_ascii()).unwrap();
+                let expected = pattern.chars().cycle().take(count).collect::<String>();
+                assert_eq!(actual, expected, "pattern={pattern:?} count={count}");
+            }
+        }
     }
 }

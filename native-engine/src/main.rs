@@ -369,14 +369,19 @@ fn parse_stream_schema(spec: &str) -> Result<Schema> {
     let fields = spec.split(',').map(|part| {
         let (name, kind) = part.split_once(':')
             .ok_or_else(|| Error::Parse("CSV schema fields must use NAME:TYPE".into()))?;
-        let kind = match kind.trim().to_ascii_lowercase().as_str() {
-            "text" => DataType::Text,
+        let kind = kind.trim().to_ascii_lowercase();
+        let (kind, nullable) = match kind.strip_suffix('!') {
+            Some(required) => (required, false),
+            None => (kind.as_str(), true),
+        };
+        let data_type = match kind {
+            "text" | "string" => DataType::Text,
             "bool" | "boolean" => DataType::Boolean,
-            "int64" | "integer" => DataType::Integer,
-            "float64" | "float" => DataType::Float,
+            "int" | "int64" | "integer" => DataType::Integer,
+            "float" | "float64" | "double" => DataType::Float,
             _ => return Err(Error::Parse(format!("unsupported CSV schema type: {kind}"))),
         };
-        Ok(Field::new(name.trim(), kind, true))
+        Ok(Field::new(name.trim(), data_type, nullable))
     }).collect::<Result<Vec<_>>>()?;
     Schema::new(fields)
 }
@@ -404,9 +409,60 @@ fn stream_plan(plan: &Plan) -> Result<StreamPlan> {
     }
 }
 
+// The full spill executor handles blocking SQL operators without retaining
+// the entire input table. Keep the simple pipeline for its existing fast path.
+fn run_extended_stream(args: &Args, plan: &Plan) -> Result<()> {
+    use rustspark_native::scale::{
+        cancel::QueryControl, file_catalog::FileCatalog,
+        stream_execute::{self, StreamOptions},
+    };
+    let mut catalog = FileCatalog::new();
+    if let Some(path) = &args.csv {
+        let schema = if let Some(spec) = &args.csv_schema {
+            parse_stream_schema(spec)?
+        } else {
+            // Match the legacy --stream default of treating CSV cells as TEXT.
+            let reader = BufReader::new(fs::File::open(path)?);
+            CsvStream::new(reader, 4_096, 1024 * 1024)?.schema().clone()
+        };
+        catalog.register_csv(&args.table, path, schema, 1024 * 1024)?;
+    } else if let Some(path) = &args.parquet {
+        catalog.register_parquet(&args.table, path)?;
+    } else {
+        return Err(Error::Unsupported("full streaming requires CSV or Parquet input".into()));
+    }
+    let options = StreamOptions::default();
+    let schema = stream_execute::output_schema(plan, &catalog, &options)?;
+    let input = stream_execute::execute(plan, &catalog, &options, QueryControl::default())?;
+    let mut pipeline = Pipeline::new(input);
+    if let Some(rows) = args.max_rows {
+        pipeline = pipeline.with_limit(0, Some(rows));
+    }
+    let stdout = io::stdout();
+    let mut output = io::BufWriter::new(stdout.lock());
+    if args.json_array {
+        let mut printer = JsonArrayPrinter::new(&mut output)?;
+        for batch in pipeline { printer.print_batch(&batch?)?; }
+        printer.finish()?;
+    } else {
+        if !args.jsonl { print_header(&schema, &mut output)?; }
+        for batch in pipeline {
+            let batch = batch?;
+            if args.jsonl { print_jsonl_rows(&batch, &mut output)?; }
+            else { print_csv_rows(&batch, &mut output)?; }
+        }
+    }
+    output.flush()?;
+    Ok(())
+}
+
 fn run_stream(args: &Args) -> Result<()> {
     let plan = sql::parse_sql(&args.sql)?;
-    let (table, predicate, projection, limit) = stream_plan(&plan)?;
+    let (table, predicate, projection, limit) = match stream_plan(&plan) {
+        Ok(simple) => simple,
+        Err(Error::Unsupported(_)) => return run_extended_stream(args, &plan),
+        Err(error) => return Err(error),
+    };
     if !table.eq_ignore_ascii_case(&args.table) {
         return Err(Error::Schema(format!("unknown table: {table}")));
     }
@@ -955,5 +1011,33 @@ mod cli_deadline_contract_tests {
             &plan, &Catalog::new(), executor::ExecutionOptions::default(), &guard,
         ).unwrap_err();
         assert!(err.to_string().contains("deadline"));
+    }
+}
+
+#[cfg(test)]
+mod streaming_csv_schema_contract_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_required_columns_and_both_streaming_type_dialects() {
+        let schema = parse_stream_schema(
+            "id:int64!,category:string,amount:double!,active:bool!",
+        ).unwrap();
+        assert_eq!(schema.fields(), &[
+            Field::new("id", DataType::Integer, false),
+            Field::new("category", DataType::Text, true),
+            Field::new("amount", DataType::Float, false),
+            Field::new("active", DataType::Boolean, false),
+        ]);
+        let compact = parse_stream_schema("n:int,m:float,flag:boolean").unwrap();
+        assert_eq!(compact.fields()[0].data_type, DataType::Integer);
+        assert!(compact.fields().iter().all(|field| field.nullable));
+    }
+
+    #[test]
+    fn rejects_invalid_required_types_and_duplicate_names() {
+        assert!(parse_stream_schema("id:unknown!").is_err());
+        assert!(parse_stream_schema("id:int!!").is_err());
+        assert!(parse_stream_schema("id:int,ID:text").is_err());
     }
 }

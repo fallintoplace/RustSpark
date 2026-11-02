@@ -29,6 +29,14 @@ fn remainder(args: &[Value], positive: bool) -> Result<Value> {
 fn modulo(args: &[Value]) -> Result<Value> { remainder(args, false) }
 fn pmod(args: &[Value]) -> Result<Value> { remainder(args, true) }
 
+// Reused by GCD and LCM without narrowing i64::MIN's unsigned magnitude.
+pub(super) fn gcd_unsigned(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 fn gcd_type(types: &[DataType]) -> Result<DataType> {
     if types.iter().all(|kind| *kind == DataType::Integer) { Ok(DataType::Integer) }
     else { Err(Error::Type("GCD requires integer inputs".into())) }
@@ -36,12 +44,8 @@ fn gcd_type(types: &[DataType]) -> Result<DataType> {
 fn gcd(args: &[Value]) -> Result<Value> {
     let Some(a) = super::integer(&args[0])? else { return Ok(Value::Null); };
     let Some(b) = super::integer(&args[1])? else { return Ok(Value::Null); };
-    let mut a = a.unsigned_abs();
-    let mut b = b.unsigned_abs();
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    i64::try_from(a).map(Value::Integer)
+    let magnitude = gcd_unsigned(a.unsigned_abs(), b.unsigned_abs());
+    i64::try_from(magnitude).map(Value::Integer)
         .map_err(|_| Error::Execution("GCD result exceeds BIGINT range".into()))
 }
 
@@ -78,5 +82,18 @@ mod gcd_extension_tests {
         assert_eq!(gcd(&[Value::Integer(i64::MIN), Value::Integer(2)]).unwrap(), Value::Integer(2));
         assert!(gcd_type(&[DataType::Text, DataType::Integer]).is_err());
         assert_eq!(gcd(&[Value::Null, Value::Integer(5)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod unsigned_gcd_tests {
+    use super::*;
+
+    #[test]
+    fn handles_zero_and_full_unsigned_bigint_magnitudes() {
+        assert_eq!(gcd_unsigned(0, 0), 0);
+        assert_eq!(gcd_unsigned(18, 24), 6);
+        assert_eq!(gcd_unsigned(i64::MIN.unsigned_abs(), 0), 1_u64 << 63);
+        assert_eq!(gcd_unsigned(i64::MIN.unsigned_abs(), 2), 2);
     }
 }

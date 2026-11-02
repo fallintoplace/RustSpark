@@ -2,6 +2,11 @@
 use std::time::{Duration, Instant};
 use crate::{cancel::Cancellation, Error, Result};
 
+fn timeout_deadline(timeout: Duration) -> Result<Instant> {
+    Instant::now().checked_add(timeout)
+        .ok_or_else(|| Error::Execution("query deadline out of range".into()))
+}
+
 #[derive(Clone, Debug)]
 pub struct QueryControl {
     cancelled: Cancellation,
@@ -14,16 +19,13 @@ impl QueryControl {
     }
 
     pub fn with_timeout(timeout: Duration) -> Result<Self> {
-        let deadline = Instant::now().checked_add(timeout)
-            .ok_or_else(|| Error::Execution("query deadline out of range".into()))?;
-        Ok(Self::new(Some(deadline)))
+        Ok(Self::new(Some(timeout_deadline(timeout)?)))
     }
 
     /// Fork a child stage with the same cancellation token and an optional
     /// tighter timeout. A child must never extend the parent query deadline.
     pub fn child_with_timeout(&self, timeout: Duration) -> Result<Self> {
-        let local = Instant::now().checked_add(timeout)
-            .ok_or_else(|| Error::Execution("query deadline out of range".into()))?;
+        let local = timeout_deadline(timeout)?;
         let deadline = self.deadline.map_or(local, |parent| parent.min(local));
         Ok(Self { cancelled: self.cancelled.clone(), deadline: Some(deadline) })
     }
@@ -123,5 +125,19 @@ mod inherited_stage_deadline_tests {
         assert!(parent.is_cancelled());
         assert!(child.check().is_err());
         assert!(QueryControl::default().child_with_timeout(Duration::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deadline_construction_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn child_timeout_cannot_extend_parent_deadline() {
+        let parent = QueryControl::with_timeout(Duration::from_secs(30)).unwrap();
+        let child = parent.child_with_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!(child.deadline, parent.deadline);
+        let tighter = parent.child_with_timeout(Duration::from_secs(1)).unwrap();
+        assert!(tighter.deadline < parent.deadline);
     }
 }

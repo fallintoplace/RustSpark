@@ -1,12 +1,8 @@
 use super::{float_type, Function};
 use crate::{scalar::Value, Error, Result};
-fn apply(args: &[Value], f: fn(f64) -> f64) -> Result<Value> {
-    let Some(x) = super::number(&args[0])? else { return Ok(Value::Null) };
-    super::finite(f(x))
-}
-fn asin(args: &[Value]) -> Result<Value> { apply(args, f64::asin) }
-fn acos(args: &[Value]) -> Result<Value> { apply(args, f64::acos) }
-fn atan(args: &[Value]) -> Result<Value> { apply(args, f64::atan) }
+fn asin(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::asin) }
+fn acos(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::acos) }
+fn atan(args: &[Value]) -> Result<Value> { super::unary_float(args, f64::atan) }
 fn atan2(args: &[Value]) -> Result<Value> {
     let Some(y) = super::number(&args[0])? else { return Ok(Value::Null) };
     let Some(x) = super::number(&args[1])? else { return Ok(Value::Null) };

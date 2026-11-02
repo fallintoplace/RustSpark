@@ -12,16 +12,22 @@ fn inputs(args: &[Value]) -> Result<Option<(&str, &str)>> {
     Ok(Some((text, pattern)))
 }
 
+fn apply(args: &[Value], predicate: impl FnOnce(&str, &str) -> bool) -> Result<Value> {
+    Ok(inputs(args)?.map_or(Value::Null, |(text, pattern)| {
+        Value::Boolean(predicate(text, pattern))
+    }))
+}
+
 fn startswith(args: &[Value]) -> Result<Value> {
-    Ok(inputs(args)?.map_or(Value::Null, |(text, prefix)| Value::Boolean(text.starts_with(prefix))))
+    apply(args, |text, prefix| text.starts_with(prefix))
 }
 
 fn endswith(args: &[Value]) -> Result<Value> {
-    Ok(inputs(args)?.map_or(Value::Null, |(text, suffix)| Value::Boolean(text.ends_with(suffix))))
+    apply(args, |text, suffix| text.ends_with(suffix))
 }
 
 fn contains(args: &[Value]) -> Result<Value> {
-    Ok(inputs(args)?.map_or(Value::Null, |(text, needle)| Value::Boolean(text.contains(needle))))
+    apply(args, |text, needle| text.contains(needle))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -29,6 +35,25 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "endswith", min_args: 2, max_args: 2, result_type: output, call: endswith },
     Function { name: "contains", min_args: 2, max_args: 2, result_type: output, call: contains },
 ];
+
+#[cfg(test)]
+mod nullable_predicate_helper_tests {
+    use super::*;
+
+    #[test]
+    fn skips_predicate_when_an_argument_is_null() {
+        let args = [Value::Null, Value::Text("x".into())];
+        assert_eq!(
+            apply(&args, |_, _| panic!("NULL must short-circuit")).unwrap(),
+            Value::Null,
+        );
+        assert_eq!(
+            apply(&[Value::Text("é🙂".into()), Value::Text("🙂".into())],
+                |text, suffix| text.ends_with(suffix)).unwrap(),
+            Value::Boolean(true),
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -33,6 +33,7 @@ where
         return batch_chunks::chunks_owned(Batch::empty(schema), batch_rows);
     }
     let mut best: Option<Batch> = None;
+    let mut best_sorted = false;
     for incoming in input {
         control.check()?;
         let incoming = incoming?;
@@ -40,19 +41,37 @@ where
             return Err(Error::Schema("stream Top-K input schema changed".into()));
         }
         if incoming.num_rows() == 0 { continue; }
-        let candidate = topk::top_k_owned(incoming, keys, k)?;
-        best = Some(match best.take() {
-            None => candidate,
+        // A batch that fits K needs no local sort. Retain its input order
+        // until the candidate buffer first grows beyond the requested K.
+        let candidate_sorted = incoming.num_rows() > k;
+        let candidate = if candidate_sorted {
+            topk::top_k_owned(incoming, keys, k)?
+        } else {
+            incoming
+        };
+        let (next, sorted) = match best.take() {
+            None => (candidate, candidate_sorted),
             Some(previous) => {
                 let merged = batch_utils::concat(
                     &schema, [previous, candidate], k.saturating_mul(2),
                 )?;
-                topk::top_k_owned(merged, keys, k)?
+                if merged.num_rows() > k {
+                    (topk::top_k_owned(merged, keys, k)?, true)
+                } else {
+                    (merged, false)
+                }
             }
-        });
+        };
+        best = Some(next);
+        best_sorted = sorted;
     }
     control.check()?;
-    let sorted = best.unwrap_or_else(|| Batch::empty(schema));
+    let result = best.unwrap_or_else(|| Batch::empty(schema));
+    let sorted = if best_sorted || result.num_rows() == 0 {
+        result
+    } else {
+        topk::top_k_owned(result, keys, k)?
+    };
     let window = limit::limit_owned(sorted, offset, Some(count))?;
     batch_chunks::chunks_owned(window, batch_rows)
 }
@@ -104,5 +123,42 @@ mod tests {
             0, 0, 2, &QueryControl::default()).is_err());
         assert!(top_k_stream(Vec::<Result<Batch>>::new(), schema, &[],
             usize::MAX, 1, 2, &QueryControl::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deferred_small_batch_sort_tests {
+    use super::*;
+    use crate::{expr::Expr, scalar::Value, schema::{DataType, Field}};
+
+    #[test]
+    fn tiny_batches_and_equal_sort_keys_match_one_shot_topk() {
+        let schema = Schema::new(vec![
+            Field::new("score", DataType::Integer, false),
+            Field::new("label", DataType::Text, false),
+        ]).unwrap();
+        let rows = (0..23)
+            .map(|n| vec![
+                Value::Integer((n * 7 % 9) as i64),
+                Value::Text(format!("row-{n}")),
+            ])
+            .collect::<Vec<_>>();
+        let full = Batch::from_rows(schema.clone(), rows).unwrap();
+        let keys = [SortKey::ascending(Expr::Column("score".into()))];
+        for (offset, count) in [(0, 23), (2, 9), (1, 3), (0, 1)] {
+            let k = offset + count;
+            let expected = limit::limit(&topk::top_k(&full, &keys, k).unwrap(),
+                offset, Some(count)).unwrap().rows().unwrap();
+            let parts = (0..full.num_rows())
+                .step_by(2)
+                .map(|start| Ok(full.slice_rows(start, (start + 2).min(full.num_rows())).unwrap()))
+                .collect::<Vec<_>>();
+            let actual = top_k_stream(parts, schema.clone(), &keys,
+                offset, count, 5, &QueryControl::default()).unwrap()
+                .collect::<Result<Vec<_>>>().unwrap()
+                .into_iter().flat_map(|batch| batch.rows().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "offset={offset}, count={count}");
+        }
     }
 }

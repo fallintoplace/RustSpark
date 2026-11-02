@@ -9,13 +9,9 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(if types[0] == DataType::Integer { DataType::Integer } else { DataType::Float })
 }
 fn round(args: &[Value]) -> Result<Value> {
-    let digits = if args.len() == 2 {
-        let Some(digits) = super::integer(&args[1])? else { return Ok(Value::Null) };
-        digits
-    } else { 0 };
-    if !(-15..=15).contains(&digits) {
-        return Err(Error::Execution("ROUND precision outside supported [-15,15] range".into()));
-    }
+    let Some(digits) = super::bounded_rounding_scale(
+        args, "ROUND precision outside supported [-15,15] range",
+    )? else { return Ok(Value::Null); };
     if let Value::Integer(value) = args[0] {
         if digits >= 0 { return Ok(Value::Integer(value)); }
         let unit = 10_i128.pow((-digits) as u32);
@@ -131,5 +127,17 @@ mod inexact_large_negative_scale_regressions {
             Value::Float(160.0));
         assert_eq!(round(&[Value::Float(-155.0), Value::Integer(-1)]).unwrap(),
             Value::Float(-160.0));
+    }
+}
+
+#[cfg(test)]
+mod shared_precision_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_null_precision_and_range_errors() {
+        assert_eq!(round(&[Value::Integer(5), Value::Null]).unwrap(), Value::Null);
+        assert!(round(&[Value::Integer(5), Value::Integer(16)]).is_err());
+        assert_eq!(round(&[Value::Integer(5), Value::Integer(15)]).unwrap(), Value::Integer(5));
     }
 }

@@ -8,12 +8,15 @@ fn validate_window(offset: usize, count: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
+fn window_bounds(rows: usize, offset: usize, count: Option<usize>) -> Result<(usize, usize)> {
     validate_window(offset, count)?;
-    let start = offset.min(batch.num_rows());
-    let end = count.map_or(batch.num_rows(), |count| {
-        start.saturating_add(count).min(batch.num_rows())
-    });
+    let start = offset.min(rows);
+    let end = count.map_or(rows, |count| start.saturating_add(count).min(rows));
+    Ok((start, end))
+}
+
+pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
+    let (start, end) = window_bounds(batch.num_rows(), offset, count)?;
     if start == 0 && end == batch.num_rows() {
         return Ok(batch.clone());
     }
@@ -23,14 +26,10 @@ pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch
 /// Apply LIMIT to an owned native batch, avoiding a deep copy when
 /// the requested window covers all its rows.
 pub fn limit_owned(batch: Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
-    validate_window(offset, count)?;
-    if offset == 0 && count.is_none_or(|count| count >= batch.num_rows()) {
+    let (start, end) = window_bounds(batch.num_rows(), offset, count)?;
+    if start == 0 && end == batch.num_rows() {
         return Ok(batch);
     }
-    let start = offset.min(batch.num_rows());
-    let end = count.map_or(batch.num_rows(), |count| {
-        start.saturating_add(count).min(batch.num_rows())
-    });
     batch.slice_rows_owned(start, end)
 }
 
@@ -128,5 +127,19 @@ mod move_owned_limit_payload_tests {
             Value::Text(text) => text.as_ptr(),
             _ => unreachable!(),
         }, ptr);
+    }
+}
+
+#[cfg(test)]
+mod checked_window_bounds_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn shares_full_partial_empty_and_overflow_rules() {
+        assert_eq!(window_bounds(3, 0, None).unwrap(), (0, 3));
+        assert_eq!(window_bounds(3, 1, Some(1)).unwrap(), (1, 2));
+        assert_eq!(window_bounds(3, 5, None).unwrap(), (3, 3));
+        assert_eq!(window_bounds(3, 1, Some(0)).unwrap(), (1, 1));
+        assert!(window_bounds(3, usize::MAX, Some(1)).is_err());
     }
 }
