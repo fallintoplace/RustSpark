@@ -13,6 +13,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if text.len() > MAX_OUTPUT_BYTES {
         return Err(Error::Execution("URL_ENCODE input exceeds native 16 MiB budget".into()));
     }
+    if text.bytes().all(is_url_safe) {
+        return Ok(Value::Text(text.to_owned()));
+    }
     // Copy contiguous safe ASCII runs, encode exceptions, and check size
     // before appending. Avoid the two pre-scans and per-byte char pushes.
     let bytes = text.as_bytes();
@@ -112,5 +115,24 @@ mod single_pass_url_encoding_tests {
         assert_eq!(evaluate(&[Value::Text(String::new())]).unwrap(),
             Value::Text(String::new()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod url_encode_safe_ascii_bypass_tests {
+    use super::*;
+    #[test]
+    fn preserves_safe_bytes_without_changing_escape_behavior() {
+        for input in ["", "ABCxyz0123456789", "-._*", "safe-Key_01.txt"] {
+            assert_eq!(evaluate(&[Value::Text(input.into())]).unwrap(),
+                Value::Text(input.into()));
+        }
+        assert_eq!(evaluate(&[Value::Text("A B".into())]).unwrap(),
+            Value::Text("A+B".into()));
+        assert_eq!(evaluate(&[Value::Text("é*".into())]).unwrap(),
+            Value::Text("%C3%A9*".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+        let safe = "a".repeat(100_000);
+        assert_eq!(evaluate(&[Value::Text(safe.clone())]).unwrap(), Value::Text(safe));
     }
 }
