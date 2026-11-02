@@ -120,6 +120,33 @@ class QueryRunnerTests(unittest.TestCase):
         self.assertNotIn("--memory-limit-mb", defaults)
         self.assertNotIn("--parquet-pushdown-filters", defaults)
 
+
+    def test_native_cli_command_omits_legacy_execution_flags(self):
+        command = runner.command_for(
+            "rs", ["--parquet-table", "lineitem=lineitem.parquet"],
+            "01.sql", 4, native=True,
+        )
+        self.assertEqual(command, [
+            "rs", "--parquet-table", "lineitem=lineitem.parquet",
+            "--sql-file", "01.sql", "--stdout-format", "json",
+        ])
+        self.assertNotIn("--target-partitions", command)
+
+    def test_native_cli_rejects_retired_tuning_options(self):
+        for settings in (
+            {"batch_size": 8192}, {"memory_limit_mb": 1024},
+            {"pushdown_filters": True},
+        ):
+            with self.subTest(settings=settings):
+                with self.assertRaisesRegex(ValueError, "native RustSpark"):
+                    runner.command_for(
+                        "rs", [], "01.sql", 2, native=True, **settings,
+                    )
+                with self.assertRaisesRegex(ValueError, "native RustSpark"):
+                    runner.benchmark(
+                        "rs", [], Path("."), native=True, **settings,
+                    )
+
     def test_tpch_rejects_invalid_execution_settings(self):
         for settings in ({"batch_size": 0}, {"memory_limit_mb": -1},
                          {"batch_size": True}):
