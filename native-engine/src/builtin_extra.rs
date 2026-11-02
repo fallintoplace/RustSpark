@@ -11,6 +11,56 @@ fn normalized_uppercase(name: &str) -> Cow<'_, str> {
 }
 
 
+/// Convert an ISO calendar date to signed days since 1970-01-01.
+fn tpch_iso_days(text: &str) -> Result<i64> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || !bytes.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    {
+        return Err(Error::Type("date_add expects ISO YYYY-MM-DD text".into()));
+    }
+    let mut year: i64 = text[..4].parse().map_err(|_| Error::Type("invalid year".into()))?;
+    let month: i64 = text[5..7].parse().map_err(|_| Error::Type("invalid month".into()))?;
+    let day: i64 = text[8..10].parse().map_err(|_| Error::Type("invalid day".into()))?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || day == 0 || day > max_day {
+        return Err(Error::Type("invalid calendar date".into()));
+    }
+    if month <= 2 { year -= 1; }
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_index = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4
+        - year_of_era / 100 + day_of_year;
+    Ok(era * 146_097 + day_of_era - 719_468)
+}
+
+fn tpch_iso_from_days(days: i64) -> Result<String> {
+    let z = days.checked_add(719_468)
+        .ok_or_else(|| Error::Execution("date offset overflow".into()))?;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    if !(1..=9_999).contains(&year) {
+        return Err(Error::Execution("date is outside supported 0001-9999 range".into()));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
@@ -33,6 +83,17 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
                 return Err(Error::Type("NULLIF arguments must have the same type".into()));
             }
             Ok(first)
+        },
+        "DATE_ADD" | "DATE_SUB" => {
+            if args.len() != 2 {
+                return Err(Error::Parse(format!("{name} requires date and day offset")));
+            }
+            if args[0].output_type(schema)? != DataType::Text
+                || args[1].output_type(schema)? != DataType::Integer
+            {
+                return Err(Error::Type("date arithmetic expects ISO text and integer days".into()));
+            }
+            Ok(DataType::Text)
         },
         "ABS" => {
             if args.len() != 1 { return Err(Error::Parse("ABS requires one argument".into())); }
@@ -285,6 +346,19 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "DATE_ADD" | "DATE_SUB" => match args {
+            [Value::Text(text), Value::Integer(amount)] => {
+                let offset = if name.eq_ignore_ascii_case("DATE_SUB") {
+                    amount.checked_neg()
+                        .ok_or_else(|| Error::Execution("date offset overflow".into()))?
+                } else { *amount };
+                let days = tpch_iso_days(text)?.checked_add(offset)
+                    .ok_or_else(|| Error::Execution("date offset overflow".into()))?;
+                Ok(Value::Text(tpch_iso_from_days(days)?))
+            }
+            [date, days] if date.is_null() || days.is_null() => Ok(Value::Null),
+            _ => Err(Error::Type("date arithmetic expects ISO text and integer days".into())),
         },
         "ABS" => match args {
             [Value::Integer(value)] => value.checked_abs().map(Value::Integer).ok_or_else(|| Error::Execution("ABS integer overflow".into())),
