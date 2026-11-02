@@ -31,6 +31,15 @@ fn push_masked(output: &mut String, selected: char) -> Result<()> {
     Ok(())
 }
 
+fn ascii_replacement(byte: u8, replacements: &[Option<char>; 4]) -> Option<char> {
+    match byte {
+        b'A'..=b'Z' => replacements[0],
+        b'a'..=b'z' => replacements[1],
+        b'0'..=b'9' => replacements[2],
+        _ => replacements[3],
+    }
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     if input.len() > MAX_OUTPUT {
@@ -40,22 +49,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let lowercase = replacement(args, 2, Some('x'))?;
     let digits = replacement(args, 3, Some('n'))?;
     let others = replacement(args, 4, None)?;
+    let replacements = [uppercase, lowercase, digits, others];
     // Default MASK replacements are ASCII. Transform a byte copy in place
     // instead of encoding each output scalar through String::push.
     if input.is_ascii() &&
-        [uppercase, lowercase, digits, others].into_iter().flatten()
-            .all(|character| character.is_ascii()) {
+        replacements.iter().flatten().all(|character| character.is_ascii()) {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(input.len())
             .map_err(|_| Error::Execution("MASK output allocation failed".into()))?;
         bytes.extend_from_slice(input.as_bytes());
         for byte in &mut bytes {
-            let selected = match *byte {
-                b'A'..=b'Z' => uppercase,
-                b'a'..=b'z' => lowercase,
-                b'0'..=b'9' => digits,
-                _ => others,
-            };
+            let selected = ascii_replacement(*byte, &replacements);
             if let Some(character) = selected { *byte = character as u8; }
         }
         return Ok(Value::Text(String::from_utf8(bytes)
@@ -67,12 +71,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if input.is_ascii() {
         for &byte in input.as_bytes() {
             let original = char::from(byte);
-            let selected = match byte {
-                b'A'..=b'Z' => uppercase.unwrap_or(original),
-                b'a'..=b'z' => lowercase.unwrap_or(original),
-                b'0'..=b'9' => digits.unwrap_or(original),
-                _ => others.unwrap_or(original),
-            };
+            let selected = ascii_replacement(byte, &replacements).unwrap_or(original);
             push_masked(&mut result, selected)?;
         }
         return Ok(Value::Text(result));
@@ -204,5 +203,23 @@ mod fallible_mask_growth_tests {
         assert_eq!(evaluate(&[Value::Text("Éé３!".into())]).unwrap(),
             Value::Text("Xxn!".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod shared_ascii_mask_classifier_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_classes_match_with_ascii_and_unicode_replacements() {
+        let replacements = [Some('界'), None, Some('é'), Some('!')];
+        assert_eq!(ascii_replacement(b'A', &replacements), Some('界'));
+        assert_eq!(ascii_replacement(b'z', &replacements), None);
+        assert_eq!(ascii_replacement(b'8', &replacements), Some('é'));
+        assert_eq!(ascii_replacement(b'-', &replacements), Some('!'));
+        assert_eq!(evaluate(&[
+            Value::Text("Az8-".into()), Value::Text("界".into()),
+            Value::Null, Value::Text("é".into()), Value::Text("!".into()),
+        ]).unwrap(), Value::Text("界zé!".into()));
     }
 }
