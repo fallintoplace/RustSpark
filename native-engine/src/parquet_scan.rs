@@ -212,6 +212,7 @@ fn validate_row_groups(indices: &[usize], available: usize) -> Result<()> {
 pub fn scan_with_options(
     path: impl AsRef<Path>, batch_size: usize, options: ParquetScanOptions<'_>,
 ) -> Result<ParquetScan> {
+    // Reject invalid requests before opening or touching the filesystem.
     if batch_size == 0 || batch_size > 1_000_000 {
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
     }
@@ -219,9 +220,40 @@ pub fn scan_with_options(
         options.offset.checked_add(limit)
             .ok_or_else(|| Error::Execution("Parquet OFFSET + LIMIT overflow".into()))?;
     }
-    let file = File::open(path)?;
+    scan_with_options_open_file(File::open(path)?, batch_size, options, None)
+}
+
+/// Apply scan pushdown on the same registered descriptor that is checked
+/// against the catalog schema. This prevents a replacement file from
+/// silently changing source columns during a projected query.
+pub(crate) fn scan_checked_options_open_file(
+    file: File, batch_size: usize, expected: &crate::schema::Schema,
+    options: ParquetScanOptions<'_>,
+) -> Result<ParquetScan> {
+    scan_with_options_open_file(file, batch_size, options, Some(expected))
+}
+
+fn scan_with_options_open_file(
+    file: File, batch_size: usize, options: ParquetScanOptions<'_>,
+    expected: Option<&crate::schema::Schema>,
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    if let Some(limit) = options.limit {
+        options.offset.checked_add(limit)
+            .ok_or_else(|| Error::Execution("Parquet OFFSET + LIMIT overflow".into()))?;
+    }
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    if let Some(expected) = expected {
+        let actual = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
+        if &actual != expected {
+            return Err(Error::Schema(
+                "registered Parquet table schema changed since registration".into()
+            ));
+        }
+    }
     if let Some(columns) = options.columns {
         let selected = projection_indices(builder.schema().fields(), columns)?;
         let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
