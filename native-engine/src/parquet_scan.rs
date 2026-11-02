@@ -101,6 +101,31 @@ fn scan_with_expected_file(
     Ok(ParquetScan { inner: reader, finished: false })
 }
 
+/// Project registered Parquet tables through their verified open file
+/// descriptor, so schema replacement cannot bypass registration checks.
+pub(crate) fn scan_checked_open_file_columns(
+    file: File, batch_size: usize, expected: &crate::schema::Schema,
+    columns: &[&str],
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let actual = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
+    if &actual != expected {
+        return Err(Error::Schema(
+            "registered Parquet table schema changed since registration".into()));
+    }
+    let selected = projection_indices(builder.schema().fields(), columns)?;
+    let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
+    builder = builder.with_projection(mask);
+    let rows = bounded_native_batch_rows(batch_size, columns.len());
+    let inner = builder.with_batch_size(rows)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner, finished: false })
+}
+
 /// Compose Parquet decoder pushdowns without decoding discarded columns,
 /// row groups, or row windows in separate intermediate stages.
 #[derive(Clone, Copy, Debug, Default)]
