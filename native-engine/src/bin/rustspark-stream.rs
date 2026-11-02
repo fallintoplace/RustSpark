@@ -34,6 +34,7 @@ struct Args {
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
     explain: bool,
     query_timeout: Option<u64>,
+    max_rows: Option<usize>,
 }
 
 fn parse_schema(text: &str) -> Result<Schema> {
@@ -72,6 +73,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut scratch = env::temp_dir();
     let mut explain = false;
     let mut query_timeout = None;
+    let mut max_rows = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" { return Ok(None); }
@@ -115,6 +117,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "--max-record-bytes" => record_bytes = value.parse()
                 .map_err(|_| Error::Parse("invalid --max-record-bytes".into()))?,
             "--scratch-dir" => scratch = PathBuf::from(value),
+            "--max-rows" => {
+                let rows = value.parse::<usize>()
+                    .map_err(|_| Error::Parse("--max-rows requires nonnegative integer".into()))?;
+                if max_rows.replace(rows).is_some() {
+                    return Err(Error::Parse("duplicate --max-rows".into()));
+                }
+            },
             "--query-timeout" => {
                 let seconds = value.parse::<u64>()
                     .map_err(|_| Error::Parse("--query-timeout requires positive seconds".into()))?;
@@ -150,7 +159,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     Ok(Some(Args {
         csv, parquet, catalog_manifest, parquet_tables,
         table, schema, sql, batch_rows, record_bytes, scratch,
-        explain, query_timeout,
+        explain, query_timeout, max_rows,
     }))
 }
 
@@ -215,9 +224,39 @@ fn write_csv(
     Ok(())
 }
 
+/// Limit the output iterator without requesting batches after the row budget.
+/// The final batch is sliced by moving owned columns rather than cloning TEXT.
+struct RowCapped<I> {
+    input: I,
+    remaining: usize,
+}
+
+impl<I: Iterator<Item = Result<Batch>>> Iterator for RowCapped<I> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 { return None; }
+        match self.input.next()? {
+            Ok(batch) => {
+                let emit = batch.num_rows().min(self.remaining);
+                self.remaining -= emit;
+                if emit == batch.num_rows() {
+                    Some(Ok(batch))
+                } else {
+                    Some(batch.slice_rows_owned(0, emit))
+                }
+            }
+            Err(error) => {
+                self.remaining = 0;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
 fn run() -> Result<()> {
     let Some(args) = parse_args(env::args().skip(1))? else {
-        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE | --parquet-table NAME=FILE [--parquet-table NAME=FILE ...] | --catalog-manifest FILE) --sql QUERY [--query-timeout SECONDS]");
+        println!("Usage: rustspark-stream (--csv FILE --schema 'id:int!,city:text' | --parquet FILE | --parquet-table NAME=FILE [--parquet-table NAME=FILE ...] | --catalog-manifest FILE) --sql QUERY [--query-timeout SECONDS] [--max-rows ROWS]");
         return Ok(());
     };
     let control = if let Some(seconds) = args.query_timeout {
@@ -254,7 +293,9 @@ fn run() -> Result<()> {
     let input = stream_execute::execute(&plan, &catalog, &options, control.clone())?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    write_csv(&schema, input, &mut output)?;
+    write_csv(&schema, RowCapped {
+        input, remaining: args.max_rows.unwrap_or(usize::MAX),
+    }, &mut output)?;
     control.check()
 }
 
@@ -430,5 +471,46 @@ mod streamed_deadline_contract_tests {
     fn stream_control_rejects_an_expired_deadline() {
         let control = QueryControl::with_timeout(std::time::Duration::ZERO).unwrap();
         assert!(control.check().unwrap_err().to_string().contains("deadline"));
+    }
+}
+
+#[cfg(test)]
+mod output_row_limit_tests {
+    use super::*;
+    #[test]
+    fn stops_before_polling_a_later_failing_batch() {
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, false)]).unwrap();
+        let batch = Batch::from_rows(schema.clone(), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(2)],
+        ]).unwrap();
+        let batches = vec![
+            Ok(batch), Err(Error::Execution("unexpected next batch".into())),
+        ];
+        let mut output = Vec::new();
+        write_csv(&schema, RowCapped {
+            input: batches.into_iter(), remaining: 1,
+        }, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "n\n1\n");
+
+        let mut output = Vec::new();
+        write_csv(&schema, RowCapped {
+            input: std::iter::once(Err(Error::Execution("source was polled".into()))),
+            remaining: 0,
+        }, &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "n\n");
+    }
+
+    #[test]
+    fn parses_a_zero_cap_and_rejects_invalid_limits() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(|value| (*value).to_owned()));
+        let valid = parse(&["--parquet", "t.parquet", "--sql", "SELECT 1",
+            "--max-rows", "0"]).unwrap().unwrap();
+        assert_eq!(valid.max_rows, Some(0));
+        for cap in ["-1", "none", "1.5"] {
+            assert!(parse(&["--parquet", "t.parquet", "--sql", "SELECT 1",
+                "--max-rows", cap]).is_err());
+        }
+        assert!(parse(&["--parquet", "t.parquet", "--sql", "SELECT 1",
+            "--max-rows", "1", "--max-rows", "2"]).is_err());
     }
 }
