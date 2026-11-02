@@ -6,6 +6,16 @@ fn ascii_type(types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Integer)
     } else { Err(Error::Type("ASCII requires text or numeric input".into())) }
 }
+fn unicode_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Integer)
+}
+fn unicode(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
+    Ok(text.chars().next()
+        .map(|character| Value::Integer(i64::from(character as u32)))
+        .unwrap_or(Value::Null))
+}
 fn chr_type(types: &[DataType]) -> Result<DataType> {
     if types[0] == DataType::Integer { Ok(DataType::Text) }
     else { Err(Error::Type("CHR requires integer code point".into())) }
@@ -35,6 +45,7 @@ fn chr(args: &[Value]) -> Result<Value> {
 }
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "ascii", min_args: 1, max_args: 1, result_type: ascii_type, call: ascii },
+    Function { name: "unicode", min_args: 1, max_args: 1, result_type: unicode_type, call: unicode },
     Function { name: "chr", min_args: 1, max_args: 1, result_type: chr_type, call: chr },
     Function { name: "char", min_args: 1, max_args: 1, result_type: chr_type, call: chr },
 ];
@@ -82,5 +93,24 @@ mod char_alias_sql_tests {
             Value::Text("A".into()), Value::Text("A".into()), Value::Text("A".into()),
         ]]);
         assert!(crate::builtin::supports("char"));
+    }
+}
+
+#[cfg(test)]
+mod unicode_scalar_function_tests {
+    use crate::{catalog::Catalog, executor, scalar::Value, sql};
+
+    #[test]
+    fn unicode_returns_first_scalar_codepoint_or_null() {
+        let plan = sql::parse_sql(
+            "SELECT UNICODE('A'), UNICODE('é'), UNICODE('🙂'), UNICODE(''), UNICODE(NULL)"
+        ).unwrap();
+        let rows = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Integer(65), Value::Integer(233), Value::Integer(128578),
+            Value::Null, Value::Null,
+        ]]);
+        let invalid = sql::parse_sql("SELECT UNICODE(123)").unwrap();
+        assert!(executor::execute(&invalid, &Catalog::new()).is_err());
     }
 }
