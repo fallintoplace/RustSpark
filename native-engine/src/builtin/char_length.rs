@@ -3,7 +3,7 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 #[inline]
 pub(super) fn is_ascii_sql_whitespace(byte: u8) -> bool {
-    is_ascii_sql_whitespace(byte)
+    byte.is_ascii_whitespace() || byte == b'\x0b'
 }
 
 pub(super) fn character_count(text: &str) -> usize {
@@ -38,7 +38,7 @@ fn word_count(args: &[Value]) -> Result<Value> {
         let mut in_word = false;
         for byte in input.bytes() {
             // Unlike Unicode whitespace, Rust's ASCII predicate excludes vertical tab.
-            if byte.is_ascii_whitespace() || byte == b'\x0b' { in_word = false; }
+            if is_ascii_sql_whitespace(byte) { in_word = false; }
             else if !in_word { count += 1; in_word = true; }
         }
         return Ok(Value::Integer(count));
