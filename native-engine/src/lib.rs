@@ -76,6 +76,8 @@ pub mod stage_graph;
 
 pub mod transport;
 
+pub mod exchange_commit;
+
 pub mod task_scheduler;
 
 pub mod metrics;
