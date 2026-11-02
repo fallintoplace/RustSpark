@@ -1,6 +1,6 @@
 //! Cooperative cancellation for independent native query operators.
 use std::time::{Duration, Instant};
-use crate::{cancel::Cancellation, Error, Result};
+use crate::{cancel::{Cancellation, deadline_expired}, Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct QueryCancellation {
@@ -38,7 +38,7 @@ impl QueryCancellation {
         if self.is_cancelled() {
             return Err(Error::Execution("native query cancelled".into()));
         }
-        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if deadline_expired(self.deadline) {
             return Err(Error::Execution("native query deadline exceeded".into()));
         }
         Ok(())
