@@ -30,6 +30,19 @@ pub fn optimize(plan: Plan) -> Plan {
                 if inner == &predicate && repeatable_filter(&predicate)) {
                 // The inner predicate already admitted exactly these rows.
                 input
+            } else if let Plan::Distinct { input: grandchild } = input {
+                // A repeatable filter commutes with DISTINCT, while reducing
+                // the number of unique keys that the DISTINCT operator retains.
+                if repeatable_filter(&predicate) {
+                    Plan::Distinct {
+                        input: Box::new(Plan::Filter { input: grandchild, predicate }),
+                    }
+                } else {
+                    Plan::Filter {
+                        input: Box::new(Plan::Distinct { input: grandchild }),
+                        predicate,
+                    }
+                }
             } else if let Plan::Filter { input: grandchild, predicate: inner } = input {
                 if repeatable_filter(&inner) && repeatable_filter(&predicate) {
                     // Two filters skip the outer predicate when the inner
@@ -376,5 +389,41 @@ mod fused_filter_plan_tests {
         let uncertain = Expr::Call { name: "random".into(), args: vec![] };
         let plan = Plan::scan("t").filter(pure).filter(uncertain);
         assert_eq!(optimize(plan.clone()), plan);
+    }
+}
+
+#[cfg(test)]
+mod filter_before_distinct_regressions {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor, expr::BinaryOp,
+        schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn pushes_repeatable_filter_below_distinct() {
+        let predicate = Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(1)));
+        let original = Plan::Distinct { input: Box::new(Plan::scan("t")) }.filter(predicate.clone());
+        let optimized = optimize(original.clone());
+        assert_eq!(optimized, Plan::Distinct { input: Box::new(Plan::scan("t").filter(predicate)) });
+        let mut catalog = Catalog::new();
+        let schema = Schema::new(vec![Field::new("n", DataType::Integer, true)]).unwrap();
+        let rows = vec![
+            vec![Value::Null], vec![Value::Null],
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Integer(2)],
+            vec![Value::Integer(3)],
+        ];
+        catalog.register("t", Batch::from_rows(schema, rows).unwrap()).unwrap();
+        let output = executor::execute(&optimized, &catalog).unwrap();
+        assert_eq!(output.num_rows(), 2);
+    }
+
+    #[test]
+    fn leaves_complex_predicate_after_distinct() {
+        let predicate = Expr::Call {
+            name: "ISNULL".into(), args: vec![Expr::Column("n".into())],
+        };
+        let original = Plan::Distinct { input: Box::new(Plan::scan("t")) }.filter(predicate);
+        assert_eq!(optimize(original.clone()), original);
     }
 }
