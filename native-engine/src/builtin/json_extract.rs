@@ -46,7 +46,7 @@ fn direct_root_member(path: &str) -> Option<&str> {
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
-fn evaluate(args: &[Value]) -> Result<Value> {
+pub(super) fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let path = if args.len() == 2 {
         let Some(path) = super::string(&args[1])? else { return Ok(Value::Null); };
