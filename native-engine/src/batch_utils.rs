@@ -9,6 +9,13 @@ pub fn split(batch: &Batch, rows_per_batch: usize) -> Result<Vec<Batch>> {
     crate::batch_chunks::chunks(batch, rows_per_batch)?.collect()
 }
 
+fn ensure_schema(batch: &Batch, schema: &Schema) -> Result<()> {
+    if batch.schema() != schema {
+        return Err(Error::Schema("cannot concatenate different batch schemas".into()));
+    }
+    Ok(())
+}
+
 pub fn concat(
     schema: &Schema,
     batches: impl IntoIterator<Item = Batch>,
@@ -19,9 +26,7 @@ pub fn concat(
     // Inspect at most two owned batches before deciding whether concatenation
     // actually needs to duplicate any column buffers.
     let Some(first) = inputs.next() else { return Ok(Batch::empty(schema.clone())); };
-    if first.schema() != schema {
-        return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-    }
+    ensure_schema(&first, schema)?;
     if first.num_rows() > max_rows {
         return Err(Error::Execution("batch collection row limit exceeded".into()));
     }
@@ -29,9 +34,7 @@ pub fn concat(
     // A provably exhausted iterator with one empty batch can move its
     // nonempty batch directly instead of duplicating all column values.
     if inputs.size_hint().1 == Some(0) {
-        if second.schema() != schema {
-            return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-        }
+        ensure_schema(&second, schema)?;
         if second.num_rows() == 0 {
             if first.num_rows() > max_rows {
                 return Err(Error::Execution("batch collection row limit exceeded".into()));
@@ -51,9 +54,7 @@ pub fn concat(
     let mut total = first.num_rows();
     let mut columns = first.into_columns();
     for batch in std::iter::once(second).chain(inputs) {
-        if batch.schema() != schema {
-            return Err(Error::Schema("cannot concatenate different batch schemas".into()));
-        }
+        ensure_schema(&batch, schema)?;
         total = total.checked_add(batch.num_rows())
             .ok_or_else(|| Error::Execution("batch row count overflow".into()))?;
         if total > max_rows {
