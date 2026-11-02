@@ -250,6 +250,21 @@ impl Batch {
         self.gather_owned_last_positions(indices, |row| last[row])
     }
 
+    // Duplicated TEXT selections need a second copy. Make that copy
+    // fallible without touching the move-on-last-use fast path.
+    fn clone_gather_value(value: &Value) -> Result<Value> {
+        match value {
+            Value::Text(text) => {
+                let mut copy = String::new();
+                copy.try_reserve_exact(text.len())
+                    .map_err(|_| Error::Execution("owned gather TEXT allocation failed".into()))?;
+                copy.push_str(text);
+                Ok(Value::Text(copy))
+            }
+            _ => Ok(value.clone()),
+        }
+    }
+
     // A final reference takes the source cell in place. This avoids a second
     // O(input rows) Vec<Option<Value>> allocation for every source column.
     fn gather_owned_last_positions(
@@ -266,7 +281,7 @@ impl Batch {
                 output.push(if last_position(index) == position {
                     std::mem::replace(&mut source[index], Value::Null)
                 } else {
-                    source[index].clone()
+                    Self::clone_gather_value(&source[index])?
                 });
             }
             columns.push(output);
@@ -281,7 +296,9 @@ impl Batch {
         if indices.len() == self.rows {
             return self.permute_rows_owned(indices);
         }
-        let mut seen = std::collections::HashSet::with_capacity(indices.len());
+        let mut seen = std::collections::HashSet::new();
+        seen.try_reserve(indices.len())
+            .map_err(|_| Error::Execution("unique gather index allocation failed".into()))?;
         for &row in indices {
             if row >= self.rows || !seen.insert(row) {
                 return Err(Error::Execution(
@@ -289,9 +306,13 @@ impl Batch {
                 ));
             }
         }
-        let mut columns = Vec::with_capacity(self.columns.len());
+        let mut columns = Vec::new();
+        columns.try_reserve_exact(self.columns.len())
+            .map_err(|_| Error::Execution("unique gather columns allocation failed".into()))?;
         for mut source in self.columns.drain(..) {
-            let mut selected = Vec::with_capacity(indices.len());
+            let mut selected = Vec::new();
+            selected.try_reserve_exact(indices.len())
+                .map_err(|_| Error::Execution("unique gather output allocation failed".into()))?;
             for &row in indices {
                 selected.push(std::mem::replace(&mut source[row], Value::Null));
             }
@@ -324,9 +345,13 @@ impl Batch {
             indices.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(Error::Execution("owned batch gather indices must be increasing and in bounds".into()));
         }
-        let mut columns = Vec::with_capacity(self.columns.len());
+        let mut columns = Vec::new();
+        columns.try_reserve_exact(self.columns.len())
+            .map_err(|_| Error::Execution("sorted gather column allocation failed".into()))?;
         for source in self.columns {
-            let mut values = Vec::with_capacity(indices.len());
+            let mut values = Vec::new();
+            values.try_reserve_exact(indices.len())
+                .map_err(|_| Error::Execution("sorted gather output allocation failed".into()))?;
             let mut iter = source.into_iter();
             let mut consumed = 0usize;
             for &index in indices {
@@ -1113,6 +1138,19 @@ mod owned_gather_index_allocation_regressions {
             vec![if i % 7 == 0 { Value::Null }
                 else { Value::Text(format!("{i}-{}", "🙂".repeat(64))) }]
         ).collect()).unwrap()
+    }
+
+    #[test]
+    fn sorted_and_unique_owned_paths_return_the_same_rows() {
+        let source = input(128);
+        let sorted = [1, 3, 7, 19, 40, 100];
+        let unique = [100, 40, 19, 7, 3, 1];
+        assert_eq!(source.clone().take_sorted_owned(&sorted).unwrap(),
+            source.take(&sorted).unwrap());
+        assert_eq!(source.clone().take_unique_owned(&unique).unwrap(),
+            source.take(&unique).unwrap());
+        assert!(source.clone().take_unique_owned(&[1, 1]).is_err());
+        assert!(source.clone().take_sorted_owned(&[3, 1]).is_err());
     }
 
     #[test]
