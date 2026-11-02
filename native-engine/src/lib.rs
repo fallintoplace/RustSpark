@@ -106,6 +106,8 @@ pub mod stages;
 
 pub mod cancellation;
 
+pub mod window_offsets;
+
 pub mod batch_chunks;
 
 pub mod arrow_bridge;
