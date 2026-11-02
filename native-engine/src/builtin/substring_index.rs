@@ -16,6 +16,23 @@ fn bounded_substring_index_result(text: &str) -> Result<Value> {
     Ok(Value::Text(result))
 }
 
+fn negative_suffix_ring<'a>(
+    text: &'a str, delimiter: &str, recent: &mut [usize],
+) -> &'a str {
+    let from_end = recent.len();
+    debug_assert!(from_end > 0);
+    let mut seen = 0usize;
+    for (position, _) in text.match_indices(delimiter) {
+        recent[seen % from_end] = position;
+        seen += 1;
+    }
+    if seen < from_end {
+        text
+    } else {
+        &text[recent[seen % from_end] + delimiter.len()..]
+    }
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(delimiter) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -38,39 +55,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .map_or(text, |(position, _)| &text[position + delimiter.len()..]);
         return bounded_substring_index_result(tail);
     }
-    if (-16..=-2).contains(&count) {
-        // Track only the requested trailing delimiter positions. Forward
-        // match_indices preserves the nonoverlapping split contract even
-        // when the delimiter can overlap with itself.
+    if (-256..=-2).contains(&count) {
+        // Preserve forward nonoverlapping matching for overlapping patterns.
         let from_end = (-count) as usize;
-        let mut recent = [0_usize; 16];
-        let mut seen = 0usize;
-        for (position, _) in text.match_indices(delimiter) {
-            recent[seen % from_end] = position;
-            seen += 1;
-        }
-        let suffix = if seen < from_end {
-            text
+        let suffix = if from_end <= 16 {
+            let mut recent = [0_usize; 16];
+            negative_suffix_ring(text, delimiter, &mut recent[..from_end])
         } else {
-            &text[recent[seen % from_end] + delimiter.len()..]
-        };
-        return bounded_substring_index_result(suffix);
-    }
-    if (-256..=-17).contains(&count) {
-        // For moderately deep tail lookups, one pass and a bounded position
-        // ring beat counting every match then scanning them all again.
-        // Forward match_indices remains necessary for overlapping delimiters.
-        let from_end = (-count) as usize;
-        let mut recent = vec![0_usize; from_end];
-        let mut seen = 0usize;
-        for (position, _) in text.match_indices(delimiter) {
-            recent[seen % from_end] = position;
-            seen += 1;
-        }
-        let suffix = if seen < from_end {
-            text
-        } else {
-            &text[recent[seen % from_end] + delimiter.len()..]
+            let mut recent = vec![0_usize; from_end];
+            negative_suffix_ring(text, delimiter, &mut recent)
         };
         return bounded_substring_index_result(suffix);
     }
@@ -376,5 +369,30 @@ mod fallible_substring_index_output_tests {
         assert_eq!(check(&long, "|", 1), Value::Text(long));
         assert!(matches!(bounded_substring_index_result(&"x".repeat(16 * 1024 * 1024 + 1)),
             Err(Error::Execution(_))));
+    }
+}
+
+#[cfg(test)]
+mod shared_negative_ring_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn stack_and_heap_ring_boundaries_match_split_semantics() {
+        for (text, delimiter) in [
+            ("a,".repeat(300), ",".to_owned()),
+            ("é🙂".repeat(300), "🙂".to_owned()),
+            ("aaaaa".repeat(60), "aa".to_owned()),
+        ] {
+            let fields = text.split(&delimiter).collect::<Vec<_>>();
+            for count in [2usize, 16, 17, 256] {
+                let expected = fields.iter()
+                    .skip(fields.len().saturating_sub(count))
+                    .copied().collect::<Vec<_>>().join(&delimiter);
+                assert_eq!(evaluate(&[
+                    Value::Text(text.clone()), Value::Text(delimiter.clone()),
+                    Value::Integer(-(count as i64)),
+                ]).unwrap(), Value::Text(expected), "count={count}");
+            }
+        }
     }
 }
