@@ -31,6 +31,21 @@ fn push_masked(output: &mut String, selected: char) -> Result<()> {
     Ok(())
 }
 
+fn ascii_replacement(
+    byte: u8,
+    uppercase: Option<char>,
+    lowercase: Option<char>,
+    digits: Option<char>,
+    others: Option<char>,
+) -> Option<char> {
+    match byte {
+        b'A'..=b'Z' => uppercase,
+        b'a'..=b'z' => lowercase,
+        b'0'..=b'9' => digits,
+        _ => others,
+    }
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     if input.len() > MAX_OUTPUT {
@@ -50,12 +65,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             .map_err(|_| Error::Execution("MASK output allocation failed".into()))?;
         bytes.extend_from_slice(input.as_bytes());
         for byte in &mut bytes {
-            let selected = match *byte {
-                b'A'..=b'Z' => uppercase,
-                b'a'..=b'z' => lowercase,
-                b'0'..=b'9' => digits,
-                _ => others,
-            };
+            let selected = ascii_replacement(*byte, uppercase, lowercase, digits, others);
             if let Some(character) = selected { *byte = character as u8; }
         }
         return Ok(Value::Text(String::from_utf8(bytes)
@@ -67,12 +77,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if input.is_ascii() {
         for &byte in input.as_bytes() {
             let original = char::from(byte);
-            let selected = match byte {
-                b'A'..=b'Z' => uppercase.unwrap_or(original),
-                b'a'..=b'z' => lowercase.unwrap_or(original),
-                b'0'..=b'9' => digits.unwrap_or(original),
-                _ => others.unwrap_or(original),
-            };
+            let selected = ascii_replacement(byte, uppercase, lowercase, digits, others)
+                .unwrap_or(original);
             push_masked(&mut result, selected)?;
         }
         return Ok(Value::Text(result));
@@ -96,6 +102,23 @@ fn evaluate(args: &[Value]) -> Result<Value> {
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "mask", min_args: 1, max_args: 5, result_type: output, call: evaluate,
 }];
+
+#[cfg(test)]
+mod ascii_replacement_helper_tests {
+    use super::*;
+
+    #[test]
+    fn null_replacements_keep_original_ascii_even_with_unicode_substitution() {
+        let args = [
+            Value::Text("AZaz09-".into()),
+            Value::Null,
+            Value::Text("🙂".into()),
+            Value::Null,
+            Value::Text("#".into()),
+        ];
+        assert_eq!(evaluate(&args).unwrap(), Value::Text("AZ🙂🙂09#".into()));
+    }
+}
 
 #[cfg(test)]
 mod tests {
