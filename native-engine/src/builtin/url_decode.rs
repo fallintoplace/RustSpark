@@ -21,9 +21,15 @@ pub(super) fn decode(text: &str) -> Result<String> {
     // decoded, so avoid scanning them twice before returning the copy.
     let Some(first_escape) = bytes.iter()
         .position(|&byte| byte == b'%' || byte == b'+') else {
-        return Ok(text.to_owned());
+        let mut copy = String::new();
+        copy.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("URL_DECODE output allocation failed".into()))?;
+        copy.push_str(text);
+        return Ok(copy);
     };
-    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut decoded = Vec::new();
+    decoded.try_reserve_exact(bytes.len())
+        .map_err(|_| Error::Execution("URL_DECODE output allocation failed".into()))?;
     decoded.extend_from_slice(&bytes[..first_escape]);
     let mut index = first_escape;
     let mut start = first_escape;
@@ -131,5 +137,21 @@ mod first_special_byte_decode_regressions {
         for invalid in ["%", "%0", "%G1", "%FF", "a+%G1"] {
             assert!(decode(invalid).is_err(), "{invalid}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fallible_url_decode_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn preserved_and_decoded_buffers_keep_utf8_and_budget_errors() {
+        let original = "é🙂".repeat(1024);
+        assert_eq!(decode(&original).unwrap(), original);
+        assert_eq!(decode(&format!("{original}%20{original}")).unwrap(),
+            format!("{original} {original}"));
+        assert_eq!(decode("%2B+%25").unwrap(), "+ %");
+        assert!(matches!(decode(&"a".repeat(16 * 1024 * 1024 + 1)),
+            Err(Error::Execution(_))));
     }
 }
