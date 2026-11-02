@@ -27,6 +27,9 @@ pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "is_ascii", min_args: 1, max_args: 1, result_type: is_ascii_type, call: is_ascii },Function {
     name: "octet_length", min_args: 1, max_args: 1,
     result_type: output, call: evaluate,
+}, Function {
+    name: "byte_length", min_args: 1, max_args: 1,
+    result_type: output, call: evaluate,
 }];
 
 #[cfg(test)]
@@ -50,5 +53,22 @@ mod is_ascii_extension_tests {
         assert_eq!(is_ascii(&[Value::Text("café".into())]).unwrap(), Value::Boolean(false));
         assert_eq!(is_ascii(&[Value::Text("".into())]).unwrap(), Value::Boolean(true));
         assert_eq!(is_ascii(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod byte_length_sql_tests {
+    use crate::{catalog::Catalog, executor, scalar::Value, sql};
+    #[test]
+    fn byte_length_counts_utf8_bytes_not_unicode_scalars() {
+        let plan = sql::parse_sql(
+            "SELECT BYTE_LENGTH('é🙂'), BYTE_LENGTH('hello'), BYTE_LENGTH(''), BYTE_LENGTH(NULL)"
+        ).unwrap();
+        let rows = executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![
+            Value::Integer(6), Value::Integer(5), Value::Integer(0), Value::Null,
+        ]]);
+        let invalid = sql::parse_sql("SELECT BYTE_LENGTH(1)").unwrap();
+        assert!(executor::execute(&invalid, &Catalog::new()).is_err());
     }
 }
