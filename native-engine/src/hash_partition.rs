@@ -316,6 +316,33 @@ pub fn partition_batches_owned(
     }).collect()
 }
 
+#[cfg(test)]
+mod fallible_owned_shuffle_admission_regressions {
+    use super::*;
+    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
+
+    #[test]
+    fn shards_many_batches_with_null_and_unicode_keys_without_copying_payloads() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Text, true),
+            Field::new("payload", DataType::Text, false),
+        ]).unwrap();
+        let batches = (0..19).map(|batch| Batch::from_rows(schema.clone(),
+            (0..7).map(|row| vec![
+                if (batch + row) % 6 == 0 { Value::Null }
+                else { Value::Text(format!("key-{}", (batch + row) % 13)) },
+                Value::Text(format!("{batch}-{row}-{}", "🙂".repeat(2048))),
+            ]).collect()).unwrap()).collect::<Vec<_>>();
+        for shards in [1, 2, 7, 64, 4096] {
+            let expected = partition_batches(&batches, &["key"], shards).unwrap();
+            let actual = partition_batches_owned(batches.clone(), &["key"], shards).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.iter().map(Batch::num_rows).sum::<usize>(), 19 * 7);
+        }
+        assert!(partition_batches_owned(batches, &["missing"], 3).is_err());
+    }
+}
+
 /// Consume a single input batch without duplicating heap-backed payloads.
 pub fn partition_owned(
     batch: Batch, keys: &[&str], partitions: usize,
@@ -831,29 +858,3 @@ mod cross_batch_clustered_partition_regressions {
     }
 }
 
-#[cfg(test)]
-mod fallible_owned_shuffle_admission_regressions {
-    use super::*;
-    use crate::{scalar::Value, schema::{DataType, Field, Schema}};
-
-    #[test]
-    fn shards_many_batches_with_null_and_unicode_keys_without_copying_payloads() {
-        let schema = Schema::new(vec![
-            Field::new("key", DataType::Text, true),
-            Field::new("payload", DataType::Text, false),
-        ]).unwrap();
-        let batches = (0..19).map(|batch| Batch::from_rows(schema.clone(),
-            (0..7).map(|row| vec![
-                if (batch + row) % 6 == 0 { Value::Null }
-                else { Value::Text(format!("key-{}", (batch + row) % 13)) },
-                Value::Text(format!("{batch}-{row}-{}", "🙂".repeat(2048))),
-            ]).collect()).unwrap()).collect::<Vec<_>>();
-        for shards in [1, 2, 7, 64, 4096] {
-            let expected = partition_batches(&batches, &["key"], shards).unwrap();
-            let actual = partition_batches_owned(batches.clone(), &["key"], shards).unwrap();
-            assert_eq!(actual, expected);
-            assert_eq!(actual.iter().map(Batch::num_rows).sum::<usize>(), 19 * 7);
-        }
-        assert!(partition_batches_owned(batches, &["missing"], 3).is_err());
-    }
-}
