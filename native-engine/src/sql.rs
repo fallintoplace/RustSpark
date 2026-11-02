@@ -782,6 +782,28 @@ impl Parser {
                 return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
             }
             let right_key = self.identifier()?;
+            // Multiple equality clauses in an INNER JOIN are equivalent to
+            // joining on the first equality and filtering the joined rows.
+            // This fallback is correct but is not yet a composite hash join.
+            let mut remaining = Vec::new();
+            while self.take_word("AND") {
+                if kind != JoinKind::Inner {
+                    return Err(Error::Unsupported(
+                        "multi-key OUTER/SEMI/ANTI joins need join-time predicates".into()
+                    ));
+                }
+                let extra_left = self.identifier()?;
+                if self.next() != Some(Token::Operator("=".into())) {
+                    return Err(Error::Unsupported("native JOIN AND requires equality".into()));
+                }
+                let extra_right = self.identifier()?;
+                remaining.push(Expr::binary(
+                    Expr::Column(extra_left), BinaryOp::Equal, Expr::Column(extra_right),
+                ));
+                if remaining.len() > 32 {
+                    return Err(Error::Parse("JOIN ON exceeds 33 equality keys".into()));
+                }
+            }
             plan = Plan::Join {
                 left: Box::new(plan),
                 right: Box::new(right),
@@ -789,6 +811,9 @@ impl Parser {
                 right_key,
                 kind,
             };
+            for predicate in remaining {
+                plan = plan.filter(predicate);
+            }
         }
         if self.take_word("WHERE") {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
@@ -2455,5 +2480,44 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_inner_join_conjunct_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn additional_inner_join_equalities_filter_matching_pairs() {
+        let mut tables = Catalog::new();
+        tables.register("left_side", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("l_id", DataType::Integer, false),
+                Field::new("l_region", DataType::Integer, false),
+            ]).unwrap(),
+            vec![vec![Value::Integer(1), Value::Integer(2)],
+                 vec![Value::Integer(1), Value::Integer(3)]],
+        ).unwrap()).unwrap();
+        tables.register("right_side", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("r_id", DataType::Integer, false),
+                Field::new("r_region", DataType::Integer, false),
+            ]).unwrap(),
+            vec![vec![Value::Integer(1), Value::Integer(2)],
+                 vec![Value::Integer(1), Value::Integer(4)]],
+        ).unwrap()).unwrap();
+        let query = "SELECT l_region FROM left_side INNER JOIN right_side \
+            ON l_id = r_id AND l_region = r_region ORDER BY l_region";
+        assert_eq!(execute(&parse_sql(query).unwrap(), &tables).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn outer_join_conjuncts_must_not_be_post_join_filters() {
+        assert!(parse_sql("SELECT * FROM l LEFT JOIN r \
+            ON l_id = r_id AND l_region = r_region").is_err());
+        assert!(parse_sql("SELECT * FROM l INNER JOIN r \
+            ON l_id = r_id AND l_region > r_region").is_err());
     }
 }
