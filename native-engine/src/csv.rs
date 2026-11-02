@@ -291,11 +291,12 @@ pub fn from_csv_str(input: &str) -> Result<Batch> {
     // Vec<Value> for every row, then Batch::from_rows transposed them again.
     let mut columns = allocate_value_columns(schema.len(), row_count)?;
     for record in records.into_iter().skip(1) {
-        for (index, text) in record.into_iter().enumerate() {
+        for (index, (text, field)) in record.into_iter()
+            .zip(schema.fields()).enumerate() {
             let value = if text.is_empty() {
                 Value::Null
             } else {
-                match schema.field(index)?.data_type {
+                match field.data_type {
                     DataType::Boolean => Value::Boolean(text.eq_ignore_ascii_case("true")),
                     DataType::Integer => text.parse::<i64>().map(Value::Integer)
                         .map_err(|_| Error::Parse("invalid integer in CSV".into()))?,
@@ -403,11 +404,12 @@ pub fn from_csv_str_typed(input: &str, schema: Schema) -> Result<Batch> {
     }
     let mut columns = allocate_value_columns(schema.len(), row_count)?;
     for record in records.into_iter().skip(1) {
-        for (index, text) in record.into_iter().enumerate() {
+        for (index, (text, field)) in record.into_iter()
+            .zip(schema.fields()).enumerate() {
             let value = if text.is_empty() {
                 Value::Null
             } else {
-                match schema.field(index)?.data_type {
+                match field.data_type {
                     DataType::Text => Value::Text(text),
                     DataType::Integer => text.parse::<i64>().map(Value::Integer)
                         .map_err(|_| Error::Parse("invalid typed CSV integer".into()))?,
@@ -741,5 +743,29 @@ mod fallible_eager_csv_materialization_regressions {
         assert!(typed.rows().unwrap().iter().any(|row| row.iter().any(Value::is_null)));
         assert!(matches!(from_csv_str_typed(&format!("{header}\n1,2\n"),
             typed.schema().clone()), Err(Error::Parse(_))));
+    }
+}
+
+#[cfg(test)]
+mod zipped_schema_csv_decode_tests {
+    use super::*;
+
+    #[test]
+    fn inferred_and_declared_decoding_preserve_all_column_types() {
+        let input = "id,active,score,city\n1,true,1.5,Berlin\n2,false,2.25,東京\n3,,3.0,\n";
+        let inferred = from_csv_str(input).unwrap();
+        let declared = Schema::new(vec![
+            Field::new("id", DataType::Integer, true),
+            Field::new("active", DataType::Boolean, true),
+            Field::new("score", DataType::Float, true),
+            Field::new("city", DataType::Text, true),
+        ]).unwrap();
+        let typed = from_csv_str_typed(input, declared).unwrap();
+        assert_eq!(inferred.rows().unwrap(), typed.rows().unwrap());
+        assert_eq!(inferred.rows().unwrap()[1], vec![
+            Value::Integer(2), Value::Boolean(false),
+            Value::Float(2.25), Value::Text("東京".into()),
+        ]);
+        assert_eq!(typed.rows().unwrap()[2][1], Value::Null);
     }
 }
