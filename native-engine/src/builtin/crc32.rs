@@ -66,10 +66,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer(i64::from(!crc)))
 }
 // Castagnoli polynomial, distinct from the IEEE CRC32 lookup tables.
-const CRC32C_TABLE: [u32; 256] = {
-    let mut table = [0_u32; 256];
+const CRC32C_TABLES: [[u32; 256]; 8] = {
+    let mut tables = [[0_u32; 256]; 8];
     let mut index = 0;
-    while index < table.len() {
+    while index < 256 {
         let mut checksum = index as u32;
         let mut step = 0;
         while step < 8 {
@@ -80,20 +80,40 @@ const CRC32C_TABLE: [u32; 256] = {
             };
             step += 1;
         }
-        table[index] = checksum;
+        tables[0][index] = checksum;
         index += 1;
     }
-    table
+    let mut slice = 1;
+    while slice < 8 {
+        let mut index = 0;
+        while index < 256 {
+            let previous = tables[slice - 1][index];
+            tables[slice][index] = (previous >> 8) ^ tables[0][(previous & 255) as usize];
+            index += 1;
+        }
+        slice += 1;
+    }
+    tables
 };
-
 fn crc32c(args: &[Value]) -> Result<Value> {
     let Some(input) = checked_checksum_input(
         args, "CRC32C input exceeds 16 MiB budget",
     )? else { return Ok(Value::Null); };
     let mut checksum = u32::MAX;
-    for &byte in input.as_bytes() {
-        let index = usize::from((checksum as u8) ^ byte);
-        checksum = (checksum >> 8) ^ CRC32C_TABLE[index];
+    let mut blocks = input.as_bytes().chunks_exact(8);
+    for block in &mut blocks {
+        let head = checksum ^ u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+        checksum = CRC32C_TABLES[7][(head & 255) as usize]
+            ^ CRC32C_TABLES[6][((head >> 8) & 255) as usize]
+            ^ CRC32C_TABLES[5][((head >> 16) & 255) as usize]
+            ^ CRC32C_TABLES[4][((head >> 24) & 255) as usize]
+            ^ CRC32C_TABLES[3][block[4] as usize]
+            ^ CRC32C_TABLES[2][block[5] as usize]
+            ^ CRC32C_TABLES[1][block[6] as usize]
+            ^ CRC32C_TABLES[0][block[7] as usize];
+    }
+    for &byte in blocks.remainder() {
+        checksum = (checksum >> 8) ^ CRC32C_TABLES[0][usize::from((checksum as u8) ^ byte)];
     }
     Ok(Value::Integer(i64::from(!checksum)))
 }
@@ -192,5 +212,34 @@ mod crc32c_castagnoli_tests {
         let query = sql::parse_sql("SELECT CRC32C('123456789'), CRC32('123456789')").unwrap();
         assert_eq!(executor::execute(&query, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Integer(0xE306_9283), Value::Integer(0xCBF4_3926)]]);
+    }
+}
+
+#[cfg(test)]
+mod crc32c_slicing_by_eight_tests {
+    use super::*;
+
+    fn bitwise_reference(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F6_3B78 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn agrees_with_independent_reference_at_every_block_tail() {
+        for length in 0..=160 {
+            let input = "aé🙂1234".repeat(length);
+            assert_eq!(crc32c(&[Value::Text(input.clone())]).unwrap(),
+                Value::Integer(i64::from(bitwise_reference(input.as_bytes()))));
+        }
+        for input in ["", "123456789", "abcdefgh", "abcdefghi", "é🙂"] {
+            assert_eq!(crc32c(&[Value::Text(input.into())]).unwrap(),
+                Value::Integer(i64::from(bitwise_reference(input.as_bytes()))));
+        }
     }
 }
