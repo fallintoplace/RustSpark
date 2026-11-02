@@ -1954,6 +1954,52 @@ mod computed_group_by_stream_tests {
 }
 
 #[cfg(test)]
+mod computed_grouping_streaming_regressions {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp}, expr::BinaryOp};
+    use std::{fs, sync::atomic::{AtomicUsize, Ordering}};
+    static ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn groups_by_computed_key_across_batches_and_spill_shards() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-computed-group-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.csv");
+        fs::write(&file, "n,v\n1,2\n1,3\n2,7\n").unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", &file, Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("v", DataType::Integer, false),
+        ]).unwrap(), 1024).unwrap();
+        let group = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(10)),
+        );
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::scan("t")),
+            group_by: vec![(group, "g".into())],
+            aggregates: vec![AggregateItem::new(
+                AggregateOp::Sum(Expr::Column("v".into())), "total")],
+        };
+        let options = StreamOptions {
+            batch_rows: 1, sort_run_rows: 2, merge_fan_in: 2,
+            scratch_directory: dir.clone(), ..StreamOptions::default()
+        };
+        let result = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&vec![Value::Integer(11), Value::Integer(5)]));
+        assert!(rows.contains(&vec![Value::Integer(12), Value::Integer(7)]));
+        assert!(result.iter().all(|batch| batch.schema().len() == 2));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod computed_external_sort_sql_tests {
     use super::*;
     use crate::{catalog::Catalog, executor, sql};
