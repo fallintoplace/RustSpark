@@ -550,7 +550,12 @@ impl Parser {
                 self.expect_symbol('(')?;
                 let expression = self.expression(0)?;
                 self.expect_word("AS")?;
-                let target = match self.identifier()?.to_ascii_uppercase().as_str() {
+                let target_name = self.identifier()?;
+                if target_name.eq_ignore_ascii_case("DATE") {
+                    self.expect_symbol(')')?;
+                    return Ok(Expr::Call { name: "to_date".into(), args: vec![expression] });
+                }
+                let target = match target_name.to_ascii_uppercase().as_str() {
                     "BIGINT" | "INT" | "INTEGER" => DataType::Integer,
                     "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
                     "BOOLEAN" | "BOOL" => DataType::Boolean,
@@ -564,7 +569,12 @@ impl Parser {
                 self.expect_symbol('(')?;
                 let expression = self.expression(0)?;
                 self.expect_word("AS")?;
-                let target = match self.identifier()?.to_ascii_uppercase().as_str() {
+                let target_name = self.identifier()?;
+                if target_name.eq_ignore_ascii_case("DATE") {
+                    self.expect_symbol(')')?;
+                    return Ok(Expr::Call { name: "try_to_date".into(), args: vec![expression] });
+                }
+                let target = match target_name.to_ascii_uppercase().as_str() {
                     "INT" | "INTEGER" | "BIGINT" | "INT64" => crate::schema::DataType::Integer,
                     "FLOAT" | "FLOAT64" | "DOUBLE" => crate::schema::DataType::Float,
                     "BOOL" | "BOOLEAN" => crate::schema::DataType::Boolean,
