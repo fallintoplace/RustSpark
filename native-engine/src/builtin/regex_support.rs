@@ -1,23 +1,40 @@
 use crate::{Error, Result};
 use std::cell::RefCell;
 
-thread_local! {
-    static CACHE: RefCell<Vec<(String, regex::Regex)>> = const { RefCell::new(Vec::new()) };
-}
 const CACHE_ENTRIES: usize = 4;
 
-fn lookup_cached(pattern: &str) -> Option<regex::Regex> {
-    CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let index = cache.iter().position(|(key, _)| key == pattern)?;
-        if index + 1 == cache.len() {
-            return Some(cache[index].1.clone());
+#[derive(Default)]
+struct RegexCache {
+    entries: Vec<(String, regex::Regex)>,
+}
+
+impl RegexCache {
+    fn lookup(&mut self, pattern: &str) -> Option<regex::Regex> {
+        let index = self.entries.iter().position(|(key, _)| key == pattern)?;
+        if index + 1 == self.entries.len() {
+            return Some(self.entries[index].1.clone());
         }
-        let entry = cache.remove(index);
+        let entry = self.entries.remove(index);
         let compiled = entry.1.clone();
-        cache.push(entry);
+        self.entries.push(entry);
         Some(compiled)
-    })
+    }
+
+    fn insert(&mut self, pattern: &str, compiled: &regex::Regex) {
+        if self.entries.len() == CACHE_ENTRIES {
+            self.entries.remove(0);
+        }
+        self.entries.push((pattern.to_owned(), compiled.clone()));
+    }
+}
+
+thread_local! {
+    static CACHE: RefCell<RegexCache> =
+        const { RefCell::new(RegexCache { entries: Vec::new() }) };
+}
+
+fn lookup_cached(pattern: &str) -> Option<regex::Regex> {
+    CACHE.with(|cache| cache.borrow_mut().lookup(pattern))
 }
 
 /// Bound the cost of compiling user-supplied regex programs.
@@ -33,11 +50,7 @@ pub(super) fn compile(pattern: &str) -> Result<regex::Regex> {
         .dfa_size_limit(8 * 1024 * 1024)
         .build()
         .map_err(|error| Error::Execution(format!("invalid native regular expression: {error}")))?;
-    CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() == CACHE_ENTRIES { cache.remove(0); }
-        cache.push((pattern.to_owned(), compiled.clone()));
-    });
+    CACHE.with(|cache| cache.borrow_mut().insert(pattern, &compiled));
     Ok(compiled)
 }
 
@@ -60,7 +73,7 @@ mod tests {
         for pattern in ["a", "b", "c", "d", "e"] {
             assert!(compile(pattern).unwrap().is_match(pattern));
         }
-        CACHE.with(|cache| assert!(cache.borrow().len() <= CACHE_ENTRIES));
+        CACHE.with(|cache| assert!(cache.borrow().entries.len() <= CACHE_ENTRIES));
     }
 }
 
@@ -76,8 +89,8 @@ mod regex_cache_lru_tests {
         compile("rustspark-lru-e").unwrap();
         CACHE.with(|cache| {
             let entries = cache.borrow();
-            assert!(entries.iter().any(|(key, _)| key == "rustspark-lru-a"));
-            assert!(!entries.iter().any(|(key, _)| key == "rustspark-lru-b"));
+            assert!(entries.entries.iter().any(|(key, _)| key == "rustspark-lru-a"));
+            assert!(!entries.entries.iter().any(|(key, _)| key == "rustspark-lru-b"));
         });
     }
 }
