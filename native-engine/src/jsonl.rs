@@ -1,5 +1,7 @@
 //! Read bounded scalar JSON Lines into native typed SQL batches.
 use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value as Json};
 use crate::{batch::Batch, scalar::Value, schema::{DataType, Field, Schema}, Error, Result};
 
@@ -7,6 +9,37 @@ const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ROWS: usize = 100_000;
 const MAX_COLUMNS: usize = 4096;
 const MAX_CELLS: usize = 2_000_000;
+
+// serde_json::Value overwrites duplicate object keys. Reject them at decoding
+// time so a malformed input cannot silently change the values in a table.
+struct UniqueObject(Map<String, Json>);
+
+impl<'de> Deserialize<'de> for UniqueObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct UniqueObjectVisitor;
+        impl<'de> Visitor<'de> for UniqueObjectVisitor {
+            type Value = UniqueObject;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON object containing unique keys")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(
+                self, mut access: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut record = Map::new();
+                while let Some((name, value)) = access.next_entry::<String, Json>()? {
+                    if record.contains_key(&name) {
+                        return Err(de::Error::custom("duplicate JSONL key"));
+                    }
+                    record.insert(name, value);
+                }
+                Ok(UniqueObject(record))
+            }
+        }
+        deserializer.deserialize_map(UniqueObjectVisitor)
+    }
+}
 
 fn native_type(value: &Json) -> Result<Option<DataType>> {
     match value {
@@ -49,10 +82,8 @@ pub fn from_jsonl_str(input: &str) -> Result<Batch> {
         if records.len() >= MAX_ROWS {
             return Err(Error::Execution("JSONL row limit exceeded".into()));
         }
-        let Json::Object(record) = serde_json::from_str::<Json>(line)
-            .map_err(|e| Error::Parse(format!("invalid JSONL record: {e}")))? else {
-            return Err(Error::Type("JSONL records must be objects".into()));
-        };
+        let UniqueObject(record) = serde_json::from_str::<UniqueObject>(line)
+            .map_err(|e| Error::Parse(format!("invalid JSONL record: {e}")))?;
         for (name, value) in &record {
             if name.is_empty() { return Err(Error::Schema("empty JSONL column".into())); }
             native_type(value)?;
@@ -134,7 +165,8 @@ mod tests {
     fn rejects_nested_values_conflicting_types_and_oversized_integers() {
         for text in [
             "{\"id\":[]}", "{\"id\":{}}", "{\"id\":1}\n{\"id\":true}",
-            "[1,2]", "{\"id\":9223372036854775808}", "{\"\":1}"
+            "[1,2]", "{\"id\":9223372036854775808}", "{\"\":1}",
+            "{\"id\":1,\"id\":2}"
         ] {
             assert!(from_jsonl_str(text).is_err(), "{text}");
         }
