@@ -103,7 +103,8 @@ mod shared_concat_reservation_tests {
 
     #[test]
     fn same_size_inputs_agree_across_argument_counts() {
-        for text in ["", "a", "é🙂", "x".repeat(1024).as_str()] {
+        let long = "x".repeat(1024);
+        for text in ["", "a", "é🙂", long.as_str()] {
             let single = concat(&[Value::Text(text.into())]).unwrap();
             let split = concat(&[
                 Value::Text(String::new()), Value::Text(text.into()),
