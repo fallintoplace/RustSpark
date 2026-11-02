@@ -7,6 +7,15 @@ fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 fn is_url_safe(byte: u8) -> bool {
     matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*')
 }
+fn reserve_output(output: &mut Vec<u8>, additional: usize) -> Result<()> {
+    output.len().checked_add(additional)
+        .filter(|&len| len <= MAX_OUTPUT_BYTES)
+        .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
+    output.try_reserve(additional)
+        .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
+    Ok(())
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
@@ -30,11 +39,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let added = if byte == b' ' { 1 } else { 3 };
         let append = (index - start).checked_add(added)
             .ok_or_else(|| Error::Execution("URL_ENCODE output size overflow".into()))?;
-        output.len().checked_add(append)
-            .filter(|&len| len <= MAX_OUTPUT_BYTES)
-            .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
-        output.try_reserve(append)
-            .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
+        reserve_output(&mut output, append)?;
         output.extend_from_slice(&bytes[start..index]);
         if byte == b' ' {
             output.push(b'+');
@@ -47,11 +52,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         start = index + 1;
     }
     let remaining = bytes.len() - start;
-    output.len().checked_add(remaining)
-        .filter(|&len| len <= MAX_OUTPUT_BYTES)
-        .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
-    output.try_reserve(remaining)
-        .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
+    reserve_output(&mut output, remaining)?;
     output.extend_from_slice(&bytes[start..]);
     Ok(Value::Text(String::from_utf8(output)
         .expect("URL_ENCODE produces ASCII-only bytes")))
