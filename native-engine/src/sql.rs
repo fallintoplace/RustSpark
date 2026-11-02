@@ -683,7 +683,7 @@ impl Parser {
                     Ok(Expr::Call { name: "locate".into(), args })
                 }
             }
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("SUBSTRING")
+            Some(Token::Word(word)) if (word.eq_ignore_ascii_case("SUBSTRING") || word.eq_ignore_ascii_case("SUBSTR"))
                 && self.peek() == Some(&Token::Symbol('(')) =>
             {
                 self.expect_symbol('(')?;
