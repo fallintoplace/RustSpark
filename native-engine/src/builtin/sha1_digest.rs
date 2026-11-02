@@ -20,9 +20,78 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .expect("SHA1 hex digits are ASCII")))
 }
 
+const HASH_TEXT_BUDGET: usize = 16 * 1024 * 1024;
+
+// MurmurHash3 x86_32, including Spark's 32-bit seed and final mixing.
+fn murmur3_x86_32(input: &[u8], seed: u32) -> u32 {
+    const C1: u32 = 0xCC9E_2D51;
+    const C2: u32 = 0x1B87_3593;
+    let mut hash = seed;
+    let mut chunks = input.chunks_exact(4);
+    for chunk in &mut chunks {
+        let mut key = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        key = key.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        hash ^= key;
+        hash = hash.rotate_left(13).wrapping_mul(5).wrapping_add(0xE654_6B64);
+    }
+    let tail = chunks.remainder();
+    if !tail.is_empty() {
+        let mut key = 0_u32;
+        for (position, &byte) in tail.iter().enumerate() {
+            key |= u32::from(byte) << (position * 8);
+        }
+        key = key.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        hash ^= key;
+    }
+    hash ^= input.len() as u32;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85EB_CA6B);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(0xC2B2_AE35);
+    hash ^ (hash >> 16)
+}
+
+fn spark_hash_type(types: &[DataType]) -> Result<DataType> {
+    if types.iter().all(|kind| matches!(kind,
+        DataType::Boolean | DataType::Integer | DataType::Float | DataType::Text)) {
+        Ok(DataType::Integer)
+    } else {
+        Err(Error::Type("HASH requires scalar SQL values".into()))
+    }
+}
+
+fn spark_hash(args: &[Value]) -> Result<Value> {
+    let mut seed = 42_u32;
+    let mut text_bytes = 0_usize;
+    for value in args {
+        seed = match value {
+            Value::Null => seed,
+            Value::Boolean(value) =>
+                murmur3_x86_32(&i32::from(*value).to_le_bytes(), seed),
+            Value::Integer(value) =>
+                murmur3_x86_32(&value.to_le_bytes(), seed),
+            Value::Float(value) => {
+                let bits = if *value == 0.0 { 0.0_f64.to_bits() }
+                    else if value.is_nan() { f64::NAN.to_bits() }
+                    else { value.to_bits() };
+                murmur3_x86_32(&bits.to_le_bytes(), seed)
+            }
+            Value::Text(value) => {
+                text_bytes = text_bytes.checked_add(value.len())
+                    .filter(|&size| size <= HASH_TEXT_BUDGET)
+                    .ok_or_else(|| Error::Execution("HASH text exceeds 16 MiB budget".into()))?;
+                murmur3_x86_32(value.as_bytes(), seed)
+            }
+        };
+    }
+    Ok(Value::Integer(i64::from(seed as i32)))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "sha", min_args: 1, max_args: 1, result_type: output, call: evaluate },
     Function { name: "sha1", min_args: 1, max_args: 1, result_type: output, call: evaluate },
+    Function { name: "hash", min_args: 1, max_args: 64,
+        result_type: spark_hash_type, call: spark_hash },
 ];
 
 #[cfg(test)]
@@ -46,5 +115,40 @@ mod tests {
         let query = sql::parse_sql("SELECT SHA('abc'), SHA1('abc')").unwrap();
         assert_eq!(executor::execute(&query, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Text("a9993e364706816aba3e25717850c26c9cd0d89d".into()); 2]]);
+    }
+}
+
+#[cfg(test)]
+mod spark_murmur3_hash_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn spark_seed_and_reference_values() {
+        assert_eq!(spark_hash(&[Value::Null]).unwrap(), Value::Integer(42));
+        assert_eq!(spark_hash(&[Value::Text("Spark".into())]).unwrap(),
+            Value::Integer(-684_278_310));
+        assert_eq!(spark_hash(&[Value::Integer(0)]).unwrap(),
+            Value::Integer(-1_670_924_195));
+        assert_eq!(spark_hash(&[Value::Integer(1)]).unwrap(),
+            Value::Integer(-1_712_319_331));
+        assert_eq!(spark_hash(&[Value::Null, Value::Integer(1)]).unwrap(),
+            spark_hash(&[Value::Integer(1), Value::Null]).unwrap());
+    }
+    #[test]
+    fn floating_point_canonicalization_and_budget() {
+        assert_eq!(spark_hash(&[Value::Float(-0.0)]).unwrap(),
+            spark_hash(&[Value::Float(0.0)]).unwrap());
+        assert_eq!(spark_hash(&[Value::Float(f64::NAN)]).unwrap(),
+            spark_hash(&[Value::Float(f64::from_bits(0x7ff8_0000_0000_0001))]).unwrap());
+        assert!(spark_hash(&[Value::Text("x".repeat(HASH_TEXT_BUDGET + 1))]).is_err());
+        assert_eq!(spark_hash_type(&[DataType::Integer, DataType::Text]).unwrap(),
+            DataType::Integer);
+    }
+    #[test]
+    fn native_sql_uses_spark_murmur3() {
+        let plan = sql::parse_sql("SELECT HASH('Spark'), HASH(0)").unwrap();
+        assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(-684_278_310), Value::Integer(-1_670_924_195)]]);
     }
 }
