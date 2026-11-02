@@ -61,11 +61,30 @@ fn dayofyear(args: &[Value]) -> Result<Value> {
     Ok(Value::Integer(ordinal))
 }
 
+// Whole Gregorian days since 1970-01-01, using integer calendar arithmetic.
+fn days_since_epoch(date: CalendarDate) -> i64 {
+    let year = if date.month <= 2 { date.year - 1 } else { date.year };
+    let era = year.div_euclid(400);
+    let year_in_era = year - era * 400;
+    let month = date.month + if date.month > 2 { -3 } else { 9 };
+    let day_in_year = (153 * month + 2) / 5 + date.day - 1;
+    let day_in_era = year_in_era * 365 + year_in_era / 4
+        - year_in_era / 100 + day_in_year;
+    era * 146_097 + day_in_era - 719_468
+}
+
+fn dayofweek(args: &[Value]) -> Result<Value> {
+    let Some(date) = parse_iso_date(&args[0])? else { return Ok(Value::Null); };
+    Ok(Value::Integer((days_since_epoch(date) + 4).rem_euclid(7) + 1))
+}
+
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "quarter", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: quarter },
     Function { name: "dayofyear", min_args: 1, max_args: 1,
         result_type: date_integer_type, call: dayofyear },
+    Function { name: "dayofweek", min_args: 1, max_args: 1,
+        result_type: date_integer_type, call: dayofweek },
 ];
 
 #[cfg(test)]
@@ -115,5 +134,19 @@ mod dayofyear_tests {
         assert_eq!(dayofyear(&[Value::Text("2023-12-31".into())]).unwrap(), Value::Integer(365));
         assert_eq!(dayofyear(&[Value::Null]).unwrap(), Value::Null);
         assert!(dayofyear(&[Value::Text("1900-02-29".into())]).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod dayofweek_tests {
+    use super::*;
+    #[test]
+    fn sunday_is_one_and_thursday_is_five() {
+        assert_eq!(days_since_epoch(CalendarDate { year: 1970, month: 1, day: 1 }), 0);
+        assert_eq!(dayofweek(&[Value::Text("1970-01-01".into())]).unwrap(), Value::Integer(5));
+        assert_eq!(dayofweek(&[Value::Text("2023-01-01".into())]).unwrap(), Value::Integer(1));
+        assert_eq!(dayofweek(&[Value::Text("2024-01-01".into())]).unwrap(), Value::Integer(2));
+        assert_eq!(dayofweek(&[Value::Null]).unwrap(), Value::Null);
     }
 }
