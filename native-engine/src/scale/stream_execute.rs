@@ -612,25 +612,69 @@ fn lower(
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
             let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
-            for key in keys {
-                let crate::expr::Expr::Column(name) = &key.expression else {
-                    return Err(Error::Unsupported("external sort requires column keys".into()));
-                };
-                schema.column(name)?;
+            if keys.is_empty() {
+                return child(input);
             }
+            // The external merge can compare only materialized columns. Evaluate
+            // computed ORDER BY expressions once per source row, spill their
+            // temporary values with the row, and remove them after merging.
+            let mut materialized = Vec::new();
+            let mut physical_keys = keys.clone();
+            let mut generated = false;
+            for (index, key) in physical_keys.iter_mut().enumerate() {
+                if let Expr::Column(name) = &key.expression {
+                    schema.column(name)?;
+                    continue;
+                }
+                if !generated {
+                    materialized = schema.fields().iter().map(|field|
+                        Selection::new(Expr::Column(field.name.clone()), &field.name)
+                    ).collect();
+                    generated = true;
+                }
+                let mut alias = format!("__rustspark_order_key_{index}");
+                while schema.fields().iter().any(|field|
+                    field.name.eq_ignore_ascii_case(&alias)) ||
+                    materialized.iter().any(|selection: &Selection|
+                        selection.alias.eq_ignore_ascii_case(&alias)) {
+                    alias.push('_');
+                }
+                materialized.push(Selection::new(key.expression.clone(), &alias));
+                key.expression = Expr::Column(alias);
+            }
+            let (source, sort_schema): (BatchStream, Schema) = if generated {
+                let empty = Batch::empty(schema.clone());
+                let projected = crate::project::project(&empty, &materialized)?;
+                let extended_schema = projected.schema().clone();
+                (Box::new(ProjectStream::new(
+                    child(input)?, materialized, control.clone(),
+                )), extended_schema)
+            } else {
+                (child(input)?, schema.clone())
+            };
             let runs = write_sorted_runs(
-                child(input)?, schema.clone(), keys, &options.scratch_directory,
-                options.sort_run_rows, control
+                source, sort_schema.clone(), &physical_keys,
+                &options.scratch_directory, options.sort_run_rows, control
             )?;
             let files = merge_to_fan_in(
-                runs, &options.scratch_directory, schema.clone(), keys,
+                runs, &options.scratch_directory, sort_schema.clone(), &physical_keys,
                 options.merge_fan_in, options.sort_run_rows, control
             )?;
             let reader = RunMerger::new(
-                files.files(), schema, keys,
+                files.files(), sort_schema, &physical_keys,
                 options.sort_run_rows, options.batch_rows, control.clone()
             )?;
-            Ok(Box::new(SortedOutput { reader, _files: files }))
+            let sorted: BatchStream = Box::new(SortedOutput { reader, _files: files });
+            if generated {
+                let original_columns = schema.fields().iter().map(|field|
+                    Selection::new(Expr::Column(field.name.clone()), &field.name)
+                ).collect();
+                Ok(Box::new(ProjectStream::new(
+                    sorted, original_columns, control.clone(),
+                )))
+            } else {
+                Ok(sorted)
+            }
         }
         Plan::Intersect { left, right } |
         Plan::IntersectAll { left, right } |
@@ -1549,5 +1593,53 @@ mod streamed_distinct_adjacency_run_regressions {
         assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod streaming_computed_sort_regressions {
+    use super::*;
+    use crate::{expr::BinaryOp, sort::SortKey};
+    use std::{fs, sync::atomic::{AtomicUsize, Ordering}};
+    static ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn sort_by_computed_expression_spills_and_drops_internal_keys() {
+        let folder = std::env::temp_dir().join(format!(
+            "rustspark-computed-order-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("data.csv");
+        fs::write(&path, "n,t\n9,a\n2,b\n5,c\n1,d\n").unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", &path, Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("t", DataType::Text, false),
+        ]).unwrap(), 1024).unwrap();
+        let key = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Multiply,
+            Expr::Literal(Value::Integer(-2)),
+        );
+        let plan = Plan::Sort {
+            input: Box::new(Plan::scan("t")),
+            keys: vec![SortKey::ascending(key)],
+        };
+        let options = StreamOptions {
+            batch_rows: 2, sort_run_rows: 2, merge_fan_in: 2,
+            scratch_directory: folder.clone(), ..StreamOptions::default()
+        };
+        let batches = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert!(batches.iter().all(|batch| batch.schema().len() == 2));
+        let rows = batches.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![
+            vec![Value::Integer(9), Value::Text("a".into())],
+            vec![Value::Integer(5), Value::Text("c".into())],
+            vec![Value::Integer(2), Value::Text("b".into())],
+            vec![Value::Integer(1), Value::Text("d".into())],
+        ]);
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+        fs::remove_dir_all(folder).unwrap();
     }
 }
