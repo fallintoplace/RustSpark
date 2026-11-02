@@ -392,11 +392,7 @@ fn infer(
             let source = child(input)?;
             let mut fields = Vec::new();
             for (expr, alias) in group_by {
-                let Expr::Column(name) = expr else {
-                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
-                };
-                let source_field = source.field(source.column(name)?)?;
-                fields.push(Field::new(alias, source_field.data_type, true));
+                fields.push(Field::new(alias, expr.output_type(&source)?, true));
             }
             for item in aggregates {
                 let kind = match &item.op {
@@ -580,14 +576,43 @@ fn lower(
                 return Ok(Box::new(std::iter::once(Ok(result))));
             }
             let mut groups = Vec::with_capacity(group_by.len());
-            for (expr, alias) in group_by {
-                let Expr::Column(name) = expr else {
-                    return Err(Error::Unsupported("spilled GROUP BY requires columns".into()));
-                };
-                groups.push((name.clone(), alias.clone()));
+            let mut selections = Vec::new();
+            let mut materialize_keys = false;
+            for (index, (expr, alias)) in group_by.iter().enumerate() {
+                if let Expr::Column(name) = expr {
+                    groups.push((name.clone(), alias.clone()));
+                    continue;
+                }
+                if !materialize_keys {
+                    selections = schema.fields().iter().map(|field|
+                        Selection::new(Expr::Column(field.name.clone()), &field.name)
+                    ).collect();
+                    materialize_keys = true;
+                }
+                let mut temp = format!("__rustspark_group_key_{index}");
+                while schema.fields().iter().any(|field|
+                    field.name.eq_ignore_ascii_case(&temp)) ||
+                    selections.iter().any(|selection: &Selection|
+                        selection.alias.eq_ignore_ascii_case(&temp)) {
+                    temp.push('_');
+                }
+                selections.push(Selection::new(expr.clone(), &temp));
+                groups.push((temp, alias.clone()));
             }
+            let (source, partition_schema): (BatchStream, Schema) =
+                if materialize_keys {
+                    // Project original columns too: aggregate expressions may
+                    // refer to any original source field.
+                    let empty = Batch::empty(schema.clone());
+                    let extended = crate::project::project(&empty, &selections)?;
+                    (Box::new(ProjectStream::new(
+                        child(input)?, selections, control.clone(),
+                    )), extended.schema().clone())
+                } else {
+                    (child(input)?, schema)
+                };
             let files = grouped_aggregate(
-                child(input)?, schema, &groups, aggregates,
+                source, partition_schema, &groups, aggregates,
                 &options.scratch_directory, 16, 200_000, options.batch_rows, control
             )?;
             Ok(Box::new(GroupedOutput {
@@ -1549,5 +1574,51 @@ mod streamed_distinct_adjacency_run_regressions {
         assert_eq!(first.column(0).unwrap(), &[Value::Integer(1), Value::Integer(2)]);
         assert!(output.next().unwrap().is_err());
         assert!(output.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod computed_grouping_streaming_regressions {
+    use super::*;
+    use crate::{aggregate::{AggregateItem, AggregateOp}, expr::BinaryOp};
+    use std::{fs, sync::atomic::{AtomicUsize, Ordering}};
+    static ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn groups_by_computed_key_across_batches_and_spill_shards() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustspark-computed-group-{}-{}",
+            std::process::id(), ID.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.csv");
+        fs::write(&file, "n,v\n1,2\n1,3\n2,7\n").unwrap();
+        let mut catalog = FileCatalog::new();
+        catalog.register_csv("t", &file, Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("v", DataType::Integer, false),
+        ]).unwrap(), 1024).unwrap();
+        let group = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Add,
+            Expr::Literal(Value::Integer(10)),
+        );
+        let plan = Plan::Aggregate {
+            input: Box::new(Plan::scan("t")),
+            group_by: vec![(group, "g".into())],
+            aggregates: vec![AggregateItem::new(
+                AggregateOp::Sum(Expr::Column("v".into())), "total")],
+        };
+        let options = StreamOptions {
+            batch_rows: 1, sort_run_rows: 2, merge_fan_in: 2,
+            scratch_directory: dir.clone(), ..StreamOptions::default()
+        };
+        let result = execute(&plan, &catalog, &options, QueryControl::default())
+            .unwrap().collect::<Result<Vec<_>>>().unwrap();
+        let rows = result.iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&vec![Value::Integer(11), Value::Integer(5)]));
+        assert!(rows.contains(&vec![Value::Integer(12), Value::Integer(7)]));
+        assert!(result.iter().all(|batch| batch.schema().len() == 2));
+        fs::remove_dir_all(dir).unwrap();
     }
 }
