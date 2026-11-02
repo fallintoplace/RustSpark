@@ -649,26 +649,64 @@ fn lower(
         Plan::Limit { input, offset, count } =>
             Ok(Box::new(LimitStream::new(child(input)?, *offset, *count, control.clone()))),
         Plan::Sort { input, keys } => {
-            let schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
-            for key in keys {
-                let crate::expr::Expr::Column(name) = &key.expression else {
-                    return Err(Error::Unsupported("external sort requires column keys".into()));
-                };
-                schema.column(name)?;
-            }
+            let source_schema = infer(input, catalog, depth + 1, options.max_plan_depth, cache)?;
+            let computed = keys.iter().any(|key| !matches!(key.expression, Expr::Column(_)));
+            let (source, schema, sort_keys, restore): (
+                BatchStream, Schema, Vec<crate::sort::SortKey>, Option<Vec<Selection>>
+            ) = if computed {
+                // External merge sorts physical columns. Materialize computed
+                // order expressions once in hidden columns, then remove them
+                // from the sorted output before returning to the parent plan.
+                let originals = source_schema.fields().iter()
+                    .map(|field| Selection::new(Expr::Column(field.name.clone()), field.name.clone()))
+                    .collect::<Vec<_>>();
+                let mut extended = originals.clone();
+                let mut sort_keys = Vec::with_capacity(keys.len());
+                for (index, key) in keys.iter().enumerate() {
+                    let mut key = key.clone();
+                    if !matches!(key.expression, Expr::Column(_)) {
+                        let mut hidden = format!("__rustspark_sort_key_{index}");
+                        while extended.iter().any(|item|
+                            item.alias.eq_ignore_ascii_case(&hidden)) {
+                            hidden.push('_');
+                        }
+                        extended.push(Selection::new(key.expression, hidden.clone()));
+                        key.expression = Expr::Column(hidden);
+                    }
+                    sort_keys.push(key);
+                }
+                let projected_schema = crate::project::project(
+                    &Batch::empty(source_schema), &extended,
+                )?.schema().clone();
+                let source = Box::new(ProjectStream::new(
+                    child(input)?, extended, control.clone(),
+                ));
+                (source, projected_schema, sort_keys, Some(originals))
+            } else {
+                for key in keys {
+                    if let Expr::Column(name) = &key.expression { source_schema.column(name)?; }
+                }
+                (child(input)?, source_schema, keys.clone(), None)
+            };
             let runs = write_sorted_runs(
-                child(input)?, schema.clone(), keys, &options.scratch_directory,
+                source, schema.clone(), &sort_keys, &options.scratch_directory,
                 options.sort_run_rows, control
             )?;
             let files = merge_to_fan_in(
-                runs, &options.scratch_directory, schema.clone(), keys,
+                runs, &options.scratch_directory, schema.clone(), &sort_keys,
                 options.merge_fan_in, options.sort_run_rows, control
             )?;
             let reader = RunMerger::new(
-                files.files(), schema, keys,
+                files.files(), schema, &sort_keys,
                 options.sort_run_rows, options.batch_rows, control.clone()
             )?;
-            Ok(Box::new(SortedOutput { reader, _files: files }))
+            let sorted: BatchStream = Box::new(SortedOutput { reader, _files: files });
+            match restore {
+                Some(selections) => Ok(Box::new(ProjectStream::new(
+                    sorted, selections, control.clone(),
+                ))),
+                None => Ok(sorted),
+            }
         }
         Plan::Intersect { left, right } |
         Plan::IntersectAll { left, right } |
