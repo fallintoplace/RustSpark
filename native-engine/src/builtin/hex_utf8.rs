@@ -57,8 +57,7 @@ const UNHEX_DIGITS: [u8; 256] = {
     table
 };
 
-fn unhex_utf8(args: &[Value]) -> Result<Value> {
-    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
+fn decode_hex_utf8(text: &str) -> Result<String> {
     if text.len() > MAX_INPUT_BYTES * 2 {
         return Err(Error::Execution("UNHEX_UTF8 input exceeds byte budget".into()));
     }
@@ -78,8 +77,14 @@ fn unhex_utf8(args: &[Value]) -> Result<Value> {
     }
     let decoded = String::from_utf8(bytes)
         .map_err(|_| Error::Type("UNHEX_UTF8 decoded bytes are not valid UTF-8".into()))?;
-    Ok(Value::Text(decoded))
+    Ok(decoded)
 }
+
+fn unhex_utf8(args: &[Value]) -> Result<Value> {
+    let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
+    Ok(Value::Text(decode_hex_utf8(text)?))
+}
+
 fn try_unhex_utf8(args: &[Value]) -> Result<Value> {
     match unhex_utf8(args) {
         Ok(value) => Ok(value),
@@ -348,5 +353,21 @@ mod fallible_hex_reservation_tests {
             assert_eq!(unhex_utf8(&[encoded]).unwrap(), input);
         }
         assert_eq!(try_unhex_utf8(&[Value::Text("ZZ".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod extracted_hex_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_decoder_errors_and_unicode() {
+        assert_eq!(decode_hex_utf8("C3a9F09f9982").unwrap(), "é🙂");
+        assert_eq!(decode_hex_utf8("").unwrap(), "");
+        assert!(matches!(decode_hex_utf8("A"), Err(Error::Parse(_))));
+        assert!(matches!(decode_hex_utf8("0g"), Err(Error::Parse(_))));
+        assert!(matches!(decode_hex_utf8("FF"), Err(Error::Type(_))));
+        assert!(matches!(decode_hex_utf8(&"00".repeat(MAX_INPUT_BYTES + 1)),
+            Err(Error::Execution(_))));
     }
 }
