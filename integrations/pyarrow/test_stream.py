@@ -299,3 +299,23 @@ class NamedSQLParameterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedTextPathValidationTests(unittest.TestCase):
+    def test_rejects_pathlike_returning_bytes_across_input_modes(self):
+        class BinaryPath(os.PathLike):
+            def __fspath__(self):
+                return b"/tmp/data.csv"
+
+        for kwargs in (
+            {"csv": BinaryPath()},
+            {"parquet": BinaryPath()},
+            {"json_input": BinaryPath()},
+            {"database_dir": BinaryPath()},
+            {"csv_tables": {"data": BinaryPath()}},
+            {"parquet_tables": {"data": BinaryPath()}},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "path"):
+                build_command("SELECT 1", **kwargs)
+        args = build_command("SELECT 1", json_tables={"events": Path("/tmp/data set.json")})
+        self.assertIn("events=/tmp/data set.json", args)

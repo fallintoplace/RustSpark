@@ -15,17 +15,26 @@ from typing import Iterator, Mapping
 TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
+def _checked_text_path(value, type_error: str, value_error: str) -> str:
+    if not isinstance(value, (str, os.PathLike)):
+        raise ValueError(type_error)
+    path = os.fspath(value)
+    if not isinstance(path, str) or not path:
+        raise ValueError(value_error)
+    return path
+
+
 def add_named_inputs(command, flag, tables):
     tables = tables or {}
     for name in tables:
         if not isinstance(name, str) or TABLE_NAME.fullmatch(name) is None:
             raise ValueError(f"Invalid SQL table name: {name!r}")
     for name, path in sorted(tables.items()):
-        if not isinstance(path, (str, os.PathLike)):
-            raise ValueError("Named input paths must be text paths")
-        file_path = os.fspath(path)
-        if not isinstance(file_path, str) or not file_path:
-            raise ValueError("Named input paths must be nonempty text paths")
+        file_path = _checked_text_path(
+            path,
+            "Named input paths must be text paths",
+            "Named input paths must be nonempty text paths",
+        )
         command.extend([flag, f"{name}={file_path}"])
 
 
@@ -73,19 +82,19 @@ def build_command(
         raise ValueError("query_timeout must be a positive integer")
     command = [binary, "--sql", sql, "--stdout-format", "arrow"]
     if database_dir is not None:
-        if not isinstance(database_dir, (str, os.PathLike)):
-            raise ValueError("database_dir must be a nonempty text path")
-        database_path = os.fspath(database_dir)
-        if not isinstance(database_path, str) or not database_path:
-            raise ValueError("database_dir must be a nonempty text path")
+        database_path = _checked_text_path(
+            database_dir,
+            "database_dir must be a nonempty text path",
+            "database_dir must be a nonempty text path",
+        )
         command.extend(["--database-dir", database_path])
     for format_name, path in selected:
         if path is not None:
-            if not isinstance(path, (str, os.PathLike)):
-                raise ValueError("Unnamed input paths must be nonempty text paths")
-            file_path = os.fspath(path)
-            if not isinstance(file_path, str) or not file_path:
-                raise ValueError("Unnamed input paths must be nonempty text paths")
+            file_path = _checked_text_path(
+                path,
+                "Unnamed input paths must be nonempty text paths",
+                "Unnamed input paths must be nonempty text paths",
+            )
             command.extend([f"--{format_name}", file_path])
     add_named_inputs(command, "--csv-table", csv_tables)
     add_named_inputs(command, "--parquet-table", parquet_tables)
