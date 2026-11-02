@@ -12,6 +12,39 @@ fn copy_bounded(text: &str) -> Result<String> {
     Ok(output)
 }
 
+fn ascii_lookup(characters: Option<&str>, input_is_ascii: bool) -> Option<[bool; 128]> {
+    characters
+        .filter(|chars| chars.len() >= 8 && (chars.is_ascii() || input_is_ascii))
+        .map(|chars| {
+            let mut lookup = [false; 128];
+            for character in chars.chars() {
+                if character.is_ascii() { lookup[character as usize] = true; }
+            }
+            lookup
+        })
+}
+
+fn unicode_lookup(
+    characters: Option<&str>, input_is_ascii: bool,
+) -> Result<Option<HashSet<char>>> {
+    if let Some(chars) = characters
+        .filter(|chars| chars.len() >= 32 && !chars.is_ascii() && !input_is_ascii)
+    {
+        let mut set = HashSet::new();
+        for character in chars.chars() {
+            if !set.contains(&character) {
+                set.try_reserve(1).map_err(|_| Error::Execution(
+                    "TRIM Unicode character set allocation failed".into()
+                ))?;
+                set.insert(character);
+            }
+        }
+        Ok(Some(set))
+    } else {
+        Ok(None)
+    }
+}
+
 fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let characters = if args.len() == 2 {
@@ -32,31 +65,8 @@ fn trim(args: &[Value], left: bool, right: bool) -> Result<Value> {
     // An ASCII input cannot match a non-ASCII trim character. Even with
     // mixed Unicode trim sets, use an ASCII lookup instead of building a
     // per-row HashSet of scalars that could never match this input.
-    let ascii_set = characters
-        .filter(|chars| chars.len() >= 8 && (chars.is_ascii() || text.is_ascii()))
-        .map(|chars| {
-            let mut lookup = [false; 128];
-            for character in chars.chars() {
-                if character.is_ascii() { lookup[character as usize] = true; }
-            }
-            lookup
-        });
-    let unicode_set = if let Some(chars) = characters
-        .filter(|chars| chars.len() >= 32 && !chars.is_ascii() && !text.is_ascii())
-    {
-        let mut set = HashSet::new();
-        for character in chars.chars() {
-            if !set.contains(&character) {
-                set.try_reserve(1).map_err(|_| Error::Execution(
-                    "TRIM Unicode character set allocation failed".into()
-                ))?;
-                set.insert(character);
-            }
-        }
-        Some(set)
-    } else {
-        None
-    };
+    let ascii_set = ascii_lookup(characters, text.is_ascii());
+    let unicode_set = unicode_lookup(characters, text.is_ascii())?;
     let contains = |ch: char| {
         if let Some(lookup) = &ascii_set {
             ch.is_ascii() && lookup[ch as usize]
@@ -408,5 +418,27 @@ mod fallible_trim_output_regressions {
             Value::Text("🙂é".into()));
         assert_eq!(normalize_space(&[Value::Text(" é\t🙂  界 ".into())]).unwrap(),
             Value::Text("é 🙂 界".into()));
+    }
+}
+
+#[cfg(test)]
+mod lookup_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn uses_ascii_tables_only_for_ascii_matchable_input() {
+        let table = ascii_lookup(Some("éABCDEF012"), true).unwrap();
+        assert!(table[b'A' as usize]);
+        assert!(!table[b'Z' as usize]);
+        assert!(ascii_lookup(Some("é".repeat(32).as_str()), false).is_none());
+    }
+
+    #[test]
+    fn uses_unicode_sets_for_long_non_ascii_patterns() {
+        let pattern = "é界".repeat(16);
+        let lookup = unicode_lookup(Some(&pattern), false).unwrap().unwrap();
+        assert!(lookup.contains(&'é'));
+        assert!(lookup.contains(&'界'));
+        assert!(unicode_lookup(Some(&pattern), true).unwrap().is_none());
     }
 }
