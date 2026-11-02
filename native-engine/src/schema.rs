@@ -141,6 +141,11 @@ impl Schema {
     }
 
     pub fn project_columns(&self, names: &[&str]) -> Result<Self> {
+        // Preserve the zero-allocation identity fast path.
+        if names.len() == self.len() && names.iter().enumerate()
+            .all(|(index, name)| self.column(name).ok() == Some(index)) {
+            return Ok(self.clone());
+        }
         let indices = names.iter().map(|name| self.column(name))
             .collect::<Result<Vec<_>>>()?;
         self.project_indices(&indices)
