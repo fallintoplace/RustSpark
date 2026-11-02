@@ -1316,19 +1316,20 @@ mod native_composite_hash_join_regressions {
             vec![Value::Integer(2), Value::Null],
             vec![Value::Integer(4), Value::Text("us".into())],
         ], "r");
-        let keys = &[("idl", "idr"), ("regionl", "regionr")];
-        let inner = hash_join_composite(&l, &r, keys, JoinKind::Inner).unwrap();
+        let left_keys = &["idl", "regionl"];
+        let right_keys = &["idr", "regionr"];
+        let inner = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Inner).unwrap();
         assert_eq!(inner.num_rows(), 2);
-        let semi = hash_join_composite(&l, &r, keys, JoinKind::Semi).unwrap();
+        let semi = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Semi).unwrap();
         assert_eq!(semi.num_rows(), 1);
-        let anti = hash_join_composite(&l, &r, keys, JoinKind::Anti).unwrap();
+        let anti = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Anti).unwrap();
         assert_eq!(anti.num_rows(), 3);
-        let full = hash_join_composite(&l, &r, keys, JoinKind::Full).unwrap();
+        let full = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Full).unwrap();
         assert_eq!(full.num_rows(), 7);
         assert_eq!(full.schema().len(), 4);
-        let right = hash_join_composite(&l, &r, keys, JoinKind::Right).unwrap();
+        let right = hash_join_composite(&l, &r, left_keys, right_keys, JoinKind::Right).unwrap();
         assert_eq!(right.num_rows(), 4);
-        assert!(hash_join_composite(&l, &r, &[], JoinKind::Inner).is_err());
-        assert!(hash_join_composite(&l, &r, &[("idl","regionr")], JoinKind::Inner).is_err());
+        assert!(hash_join_composite(&l, &r, &[], &[], JoinKind::Inner).is_err());
+        assert!(hash_join_composite(&l, &r, &["idl"], &["regionr"], JoinKind::Inner).is_err());
     }
 }
