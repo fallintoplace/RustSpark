@@ -942,7 +942,18 @@ impl Parser {
             let source = self.identifier()?;
             self.scan_or_cte(source)?
         };
-        if self.take_word("AS") {
+        let explicit_alias = self.take_word("AS");
+        // Spark accepts FROM source alias and FROM (query) alias(columns)
+        // without AS. Never consume a clause or join keyword as an alias.
+        const CLAUSE_KEYWORDS: &[&str] = &[
+            "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH",
+            "UNION", "INTERSECT", "EXCEPT", "MINUS", "JOIN", "INNER", "LEFT",
+            "RIGHT", "FULL", "CROSS", "OUTER", "SEMI", "ANTI", "ON", "USING",
+            "WINDOW", "QUALIFY", "LATERAL", "TABLESAMPLE",
+        ];
+        let implicit_alias = matches!(self.peek(), Some(Token::Word(word))
+            if !CLAUSE_KEYWORDS.iter().any(|reserved| word.eq_ignore_ascii_case(reserved)));
+        if explicit_alias || implicit_alias {
             self.identifier()?;
             if self.take_symbol('(') {
                 let mut names = Vec::new();
@@ -2108,5 +2119,37 @@ mod spark_boolean_aggregate_tests {
         nulls.register("n", Batch::from_rows(all_null, vec![vec![Value::Null]]).unwrap()).unwrap();
         assert_eq!(executor::execute(&parse_sql("SELECT EVERY(flag), SOME(flag) FROM n").unwrap(), &nulls)
             .unwrap().rows().unwrap(), vec![vec![Value::Null, Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod spark_relation_alias_without_as_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    fn run(query: &str) -> Vec<Vec<Value>> {
+        executor::execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn aliases_work_for_inline_values_derived_queries_and_ctes() {
+        assert_eq!(run("SELECT n FROM VALUES (2), (3) v(n) ORDER BY n"),
+            vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
+        assert_eq!(run("SELECT n FROM (SELECT 9 AS n) derived"),
+            vec![vec![Value::Integer(9)]]);
+        assert_eq!(run("WITH source AS (SELECT 5 AS n) SELECT n FROM source s"),
+            vec![vec![Value::Integer(5)]]);
+        assert_eq!(run("SELECT n FROM (VALUES (4)) v(n) WHERE n > 2"),
+            vec![vec![Value::Integer(4)]]);
+    }
+
+    #[test]
+    fn clause_keywords_do_not_become_relation_aliases() {
+        assert_eq!(run("SELECT n FROM (VALUES (1), (2)) v(n) WHERE n > 1"),
+            vec![vec![Value::Integer(2)]]);
+        assert!(parse_sql("SELECT n FROM (VALUES (1)) v(n) WHERE").is_err());
+        assert!(parse_sql("SELECT n FROM (VALUES (1)) v(n) JOIN").is_err());
+        assert!(parse_sql("SELECT n FROM (VALUES (1)) AS").is_err());
     }
 }
