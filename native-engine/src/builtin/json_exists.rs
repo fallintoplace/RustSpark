@@ -1,4 +1,4 @@
-use super::{Function, json_path};
+use super::{Function, json_path, json_array_length::BorrowedObjectKey};
 use crate::{scalar::Value, schema::DataType, Error, Result};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::fmt;
@@ -60,8 +60,8 @@ impl<'de> DeserializeSeed<'de> for RootMemberExists<'_> {
             fn visit_map<A: MapAccess<'de>>(
                 self, mut map: A,
             ) -> std::result::Result<bool, A::Error> {
-                while let Some(name) = map.next_key::<String>()? {
-                    let found = name == self.0;
+                while let Some(name) = map.next_key::<BorrowedObjectKey<'de>>()? {
+                    let found = name.0.as_ref() == self.0;
                     map.next_value::<IgnoredAny>()?;
                     if found {
                         while map.next_key::<IgnoredAny>()?.is_some() {
@@ -334,3 +334,19 @@ mod streamed_root_object_json_exists_regressions {
     }
 }
 
+
+#[cfg(test)]
+mod borrowed_json_member_exists_tests {
+    use super::*;
+
+    #[test]
+    fn detects_escaped_members_in_wide_objects() {
+        let mut input = String::from("{");
+        for index in 0..1000 {
+            input.push_str(&format!(r#""other_{index}":{index},"#));
+        }
+        input.push_str(r#""t\\u0061rget":null}"#);
+        assert_eq!(evaluate(&[Value::Text(input),
+            Value::Text("$.target".into())]).unwrap(), Value::Boolean(true));
+    }
+}
