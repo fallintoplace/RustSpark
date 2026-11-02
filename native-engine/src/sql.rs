@@ -102,6 +102,33 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
     }
 }
 
+/// Native DATE literals are represented as canonical ISO text until the
+/// engine has a dedicated Date scalar and schema type.
+fn validate_date_literal(value: &str) -> Result<()> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || !bytes.iter().enumerate().all(|(index, byte)|
+            index == 4 || index == 7 || byte.is_ascii_digit())
+    {
+        return Err(Error::Parse("DATE literal must be YYYY-MM-DD".into()));
+    }
+    let year: u32 = value[..4].parse().map_err(|_| Error::Parse("invalid DATE year".into()))?;
+    let month: u32 = value[5..7].parse().map_err(|_| Error::Parse("invalid DATE month".into()))?;
+    let day: u32 = value[8..10].parse().map_err(|_| Error::Parse("invalid DATE day".into()))?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || day == 0 || day > max_day {
+        return Err(Error::Parse("invalid DATE calendar day".into()));
+    }
+    Ok(())
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -574,6 +601,13 @@ impl Parser {
                 };
                 self.expect_symbol(')')?;
                 Ok(Expr::TryCast { expression: Box::new(expression), target })
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("DATE")
+                && matches!(self.peek(), Some(Token::Text(_))) =>
+            {
+                let Some(Token::Text(value)) = self.next() else { unreachable!() };
+                validate_date_literal(&value)?;
+                Ok(Expr::Literal(Value::Text(value)))
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 Ok(Expr::Literal(Value::Null))
