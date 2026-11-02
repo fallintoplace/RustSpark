@@ -1112,7 +1112,7 @@ mod parquet_predicate_pushdown_tests {
                 Some(1), Some(2), Some(3), Some(7), Some(8), Some(9),
             ])),
         ]).unwrap();
-        let properties = WriterProperties::builder().set_max_row_group_size(3).build();
+        let properties = WriterProperties::builder().set_max_row_group_row_count(Some(3)).build();
         let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
             schema, Some(properties)).unwrap();
         writer.write(&data).unwrap();
