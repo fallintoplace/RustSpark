@@ -75,6 +75,18 @@ fn compare_integer_float(integer: i64, float: f64) -> Option<Ordering> {
     }))
 }
 
+/// Parse Spark-style text boolean casts without allocating.
+pub(crate) fn parse_boolean_text(text: &str) -> Option<bool> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("true") || text == "1" {
+        Some(true)
+    } else if text.eq_ignore_ascii_case("false") || text == "0" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
@@ -177,14 +189,9 @@ impl Value {
             (Self::Text(value), DataType::Float) => value.trim().parse::<f64>().ok()
                 .filter(|n| n.is_finite()).map(Self::Float)
                 .ok_or_else(|| Error::Type("invalid DOUBLE cast".into())),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("true") =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim().eq_ignore_ascii_case("false") =>
-                Ok(Self::Boolean(false)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "1" =>
-                Ok(Self::Boolean(true)),
-            (Self::Text(value), DataType::Boolean) if value.trim() == "0" =>
-                Ok(Self::Boolean(false)),
+            (Self::Text(value), DataType::Boolean) => parse_boolean_text(value)
+                .map(Self::Boolean)
+                .ok_or_else(|| Error::Type("unsupported native CAST conversion".into())),
             _ => Err(Error::Type("unsupported native CAST conversion".into())),
         }
     }
