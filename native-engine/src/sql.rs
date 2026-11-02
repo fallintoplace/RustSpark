@@ -123,6 +123,62 @@ fn valid_iso_date(text: &str) -> bool {
     year != 0 && (1..=days).contains(&day)
 }
 
+/// Add an interval to an ISO date at parse time for literal TPC-H bounds.
+fn add_iso_date_interval(date: &str, amount: i64, unit: &str) -> Result<String> {
+    if !valid_iso_date(date) || !(-1_000_000..=1_000_000).contains(&amount) {
+        return Err(Error::Parse("DATE interval is out of supported range".into()));
+    }
+    let year = date[..4].parse::<i64>().expect("validated year");
+    let month = date[5..7].parse::<i64>().expect("validated month");
+    let day = date[8..10].parse::<i64>().expect("validated day");
+    let days_in_month = |y: i64, m: i64| -> i64 {
+        match m {
+            4 | 6 | 9 | 11 => 30,
+            2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+            2 => 28,
+            _ => 31,
+        }
+    };
+    let (year, month, day) = if unit.eq_ignore_ascii_case("DAY")
+        || unit.eq_ignore_ascii_case("DAYS")
+    {
+        // Civil date to days since Unix epoch and back. All intermediate
+        // calculations are i64 and the supported input range is bounded.
+        let mut y = year;
+        if month <= 2 { y -= 1; }
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let mp = month + if month > 2 { -3 } else { 9 };
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let serial = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468 + amount;
+        let z = serial + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let mut y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = mp + if mp < 10 { 3 } else { -9 };
+        if m <= 2 { y += 1; }
+        (y, m, d)
+    } else {
+        let months = match unit.to_ascii_uppercase().as_str() {
+            "MONTH" | "MONTHS" => amount,
+            "YEAR" | "YEARS" => amount * 12,
+            _ => return Err(Error::Unsupported(format!("DATE interval unit: {unit}"))),
+        };
+        let shifted = year * 12 + month - 1 + months;
+        let y = shifted.div_euclid(12);
+        let m = shifted.rem_euclid(12) + 1;
+        (y, m, day.min(days_in_month(y, m)))
+    };
+    if !(1..=9999).contains(&year) {
+        return Err(Error::Parse("DATE interval result is out of range".into()));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -264,6 +320,36 @@ impl Parser {
     fn parse_expression(&mut self, min_precedence: u8) -> Result<Expr> {
         let mut left = self.prefix()?;
         loop {
+            let interval_operator = if min_precedence <= 8 &&
+                matches!(self.tokens.get(self.index + 1), Some(Token::Word(word))
+                    if word.eq_ignore_ascii_case("INTERVAL")) {
+                match self.peek() {
+                    Some(Token::Operator(op)) if op == "+" => Some(1_i64),
+                    Some(Token::Operator(op)) if op == "-" => Some(-1_i64),
+                    _ => None,
+                }
+            } else { None };
+            if let Some(sign) = interval_operator {
+                self.next();
+                self.expect_word("INTERVAL")?;
+                let raw = match self.next() {
+                    Some(Token::Text(value) | Token::Number(value)) => value,
+                    _ => return Err(Error::Parse("INTERVAL requires a number".into())),
+                };
+                let amount = raw.parse::<i64>()
+                    .map_err(|_| Error::Parse("invalid DATE interval amount".into()))?;
+                let amount = amount.checked_mul(sign)
+                    .ok_or_else(|| Error::Parse("DATE interval amount overflow".into()))?;
+                let unit = self.identifier()?;
+                let Expr::Literal(Value::Text(date)) = &left else {
+                    return Err(Error::Unsupported(
+                        "DATE INTERVAL currently requires a constant date".into()
+                    ));
+                };
+                let shifted = add_iso_date_interval(date, amount, &unit)?;
+                left = Expr::Literal(Value::Text(shifted));
+                continue;
+            }
             if min_precedence <= 3 && self.peek() == Some(&Token::Operator("<=>".into())) {
                 self.next();
                 left = Expr::IsDistinctFrom {
@@ -2512,5 +2598,34 @@ mod tpch_date_literal_tests {
     #[test]
     fn date_remains_a_valid_column_name_without_a_string_literal() {
         assert!(parse_sql("SELECT date FROM dates").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tpch_constant_date_intervals_tests {
+    use super::*;
+
+    fn eval(query: &str) -> Value {
+        crate::executor::execute(&parse_sql(query).unwrap(),
+            &crate::catalog::Catalog::new()).unwrap().rows().unwrap()[0][0].clone()
+    }
+
+    #[test]
+    fn date_bounds_support_day_month_and_year_intervals() {
+        assert_eq!(eval("SELECT DATE '1998-12-01' - INTERVAL '90' DAY"),
+            Value::Text("1998-09-02".into()));
+        assert_eq!(eval("SELECT DATE '1994-01-01' + INTERVAL '1' YEAR"),
+            Value::Text("1995-01-01".into()));
+        assert_eq!(eval("SELECT DATE '1996-01-31' + INTERVAL '1' MONTH"),
+            Value::Text("1996-02-29".into()));
+        assert_eq!(eval("SELECT DATE '1996-03-01' - INTERVAL '1' DAY"),
+            Value::Text("1996-02-29".into()));
+    }
+
+    #[test]
+    fn dates_reject_unsupported_units_and_out_of_range_years() {
+        assert!(parse_sql("SELECT DATE '1998-01-01' + INTERVAL '1' SECOND").is_err());
+        assert!(parse_sql("SELECT DATE '0001-01-01' - INTERVAL '1' YEAR").is_err());
+        assert!(parse_sql("SELECT date_col + INTERVAL '1' DAY FROM dates").is_err());
     }
 }
