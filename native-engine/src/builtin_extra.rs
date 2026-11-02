@@ -11,6 +11,31 @@ fn normalized_uppercase(name: &str) -> Cow<'_, str> {
 }
 
 
+/// Validate the canonical ISO subset currently representable as native TEXT.
+fn require_iso_date(text: &str) -> Result<()> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
+        || !bytes.iter().enumerate().all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+    {
+        return Err(Error::Type("DATE requires YYYY-MM-DD text".into()));
+    }
+    let year: u32 = text[..4].parse().map_err(|_| Error::Type("invalid date year".into()))?;
+    let month: u32 = text[5..7].parse().map_err(|_| Error::Type("invalid date month".into()))?;
+    let day: u32 = text[8..10].parse().map_err(|_| Error::Type("invalid date day".into()))?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || day == 0 || day > last {
+        return Err(Error::Type("invalid calendar DATE".into()));
+    }
+    Ok(())
+}
+
 pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match normalized_uppercase(name).as_ref() {
         "COALESCE" => {
@@ -33,6 +58,15 @@ pub fn return_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataTyp
                 return Err(Error::Type("NULLIF arguments must have the same type".into()));
             }
             Ok(first)
+        },
+        "TO_DATE" | "TRY_TO_DATE" => {
+            if args.len() != 1 {
+                return Err(Error::Parse(format!("{name} expects one argument")));
+            }
+            if args[0].output_type(schema)? != DataType::Text {
+                return Err(Error::Type("DATE cast requires text input".into()));
+            }
+            Ok(DataType::Text)
         },
         "ABS" => {
             if args.len() != 1 { return Err(Error::Parse("ABS requires one argument".into())); }
@@ -285,6 +319,15 @@ pub fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
         "NULLIF" => match args {
             [first, second] => Ok(if first.sql_equal(second)? == Some(true) { Value::Null } else { first.clone() }),
             _ => Err(Error::Parse("NULLIF requires two arguments".into())),
+        },
+        "TO_DATE" | "TRY_TO_DATE" => match args {
+            [Value::Text(text)] => match require_iso_date(text) {
+                Ok(()) => Ok(Value::Text(text.clone())),
+                Err(_) if name.eq_ignore_ascii_case("TRY_TO_DATE") => Ok(Value::Null),
+                Err(error) => Err(error),
+            },
+            [Value::Null] => Ok(Value::Null),
+            _ => Err(Error::Type("DATE cast requires text input".into())),
         },
         "ABS" => match args {
             [Value::Integer(value)] => value.checked_abs().map(Value::Integer).ok_or_else(|| Error::Execution("ABS integer overflow".into())),
