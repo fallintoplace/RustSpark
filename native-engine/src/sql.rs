@@ -682,7 +682,14 @@ impl Parser {
         loop {
             if self.take_word("CROSS") {
                 self.expect_word("JOIN")?;
-                let right = Plan::scan(self.identifier()?);
+                let right = self.from_relation()?;
+                plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
+                continue;
+            }
+            // Spark treats comma-separated FROM items as Cartesian products.
+            // Parse the complete relation, including derived queries and VALUES.
+            if self.take_symbol(',') {
+                let right = self.from_relation()?;
                 plan = Plan::CrossJoin { left: Box::new(plan), right: Box::new(right) };
                 continue;
             }
@@ -2108,5 +2115,38 @@ mod spark_boolean_aggregate_tests {
         nulls.register("n", Batch::from_rows(all_null, vec![vec![Value::Null]]).unwrap()).unwrap();
         assert_eq!(executor::execute(&parse_sql("SELECT EVERY(flag), SOME(flag) FROM n").unwrap(), &nulls)
             .unwrap().rows().unwrap(), vec![vec![Value::Null, Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod spark_cross_join_relation_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor};
+
+    fn run(sql: &str) -> Vec<Vec<Value>> {
+        executor::execute(&parse_sql(sql).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn cross_join_accepts_derived_and_values_relations() {
+        let expected = vec![
+            vec![Value::Integer(1), Value::Integer(3)],
+            vec![Value::Integer(1), Value::Integer(4)],
+            vec![Value::Integer(2), Value::Integer(3)],
+            vec![Value::Integer(2), Value::Integer(4)],
+        ];
+        assert_eq!(run("SELECT x, y FROM (VALUES (1), (2)) AS a(x) CROSS JOIN (VALUES (3), (4)) AS b(y)"), expected);
+        assert_eq!(run("SELECT x, y FROM (VALUES (1), (2)) AS a(x), (VALUES (3), (4)) AS b(y)"), expected);
+        assert_eq!(run("SELECT x, y FROM (SELECT col1 AS x FROM VALUES (1), (2)) AS a CROSS JOIN (SELECT col1 AS y FROM VALUES (3), (4)) AS b"), expected);
+    }
+
+    #[test]
+    fn comma_join_and_explicit_cross_join_preserve_zero_cardinality() {
+        let sql = "SELECT x FROM (VALUES (1), (2)) AS a(x), (SELECT 1 AS y WHERE FALSE) AS b";
+        assert!(run(sql).is_empty());
+        assert_eq!(run("SELECT x FROM (VALUES (7)) AS a(x) CROSS JOIN (SELECT 1 AS y) AS b"),
+            vec![vec![Value::Integer(7)]]);
+        assert!(parse_sql("SELECT x FROM (VALUES (1)) AS a(x),").is_err());
     }
 }
