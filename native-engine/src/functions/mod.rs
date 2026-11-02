@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use crate::{batch::Batch, expr::Expr, scalar::Value, schema::{DataType, Schema}, Error, Result};
 
 mod coalesce;
+mod date;
 
 mod nullif;
 
@@ -115,6 +116,7 @@ fn try_numeric_binary(
 pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<DataType> {
     match uppercase_name(name).as_ref() {
         "COALESCE" => coalesce::output_type(args, schema),
+        "TO_DATE" => date::output_type(args, schema),
         "NVL" | "IFNULL" => {
             check_arity(name, args, 2, 2)?;
             coalesce::output_type(args, schema)
@@ -160,6 +162,7 @@ pub(crate) fn output_type(name: &str, args: &[Expr], schema: &Schema) -> Result<
 pub(crate) fn evaluate(name: &str, args: &[Expr], batch: &Batch, row: usize) -> Result<Value> {
     match uppercase_name(name).as_ref() {
         "COALESCE" => coalesce::eval(args, batch, row),
+        "TO_DATE" => date::eval(args, batch, row),
         "NVL" | "IFNULL" => coalesce::eval(args, batch, row),
         "NULLIF" => nullif::eval(args, batch, row),
         "IF" => if_expr::eval(args, batch, row),
