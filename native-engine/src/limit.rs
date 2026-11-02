@@ -16,7 +16,7 @@ fn slice_bounds(rows: usize, offset: usize, count: Option<usize>) -> (usize, usi
 
 pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
     validate_window(offset, count)?;
-    let (start, end) = slice_bounds(batch.num_rows(), offset, count)
+    let (start, end) = slice_bounds(batch.num_rows(), offset, count);
     if start == 0 && end == batch.num_rows() {
         return Ok(batch.clone());
     }
@@ -30,7 +30,7 @@ pub fn limit_owned(batch: Batch, offset: usize, count: Option<usize>) -> Result<
     if offset == 0 && count.is_none_or(|count| count >= batch.num_rows()) {
         return Ok(batch);
     }
-    let (start, end) = slice_bounds(batch.num_rows(), offset, count)
+    let (start, end) = slice_bounds(batch.num_rows(), offset, count);
     batch.slice_rows_owned(start, end)
 }
 
