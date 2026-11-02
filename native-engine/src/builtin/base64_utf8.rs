@@ -60,6 +60,12 @@ fn digit(c: u8) -> Result<u8> {
         Ok(decoded)
     }
 }
+// Decode a complete quartet. The caller selects how many bytes to keep
+// when the final quartet has RFC 4648 padding.
+fn decode_quartet(a: u8, b: u8, c: u8, d: u8) -> [u8; 3] {
+    [(a << 2) | (b >> 4), (b << 4) | (c >> 2), (c << 6) | d]
+}
+
 fn unbase64_utf8(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let input = text.as_bytes();
@@ -90,11 +96,7 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
         let b = digit(group[1])?;
         let c = digit(group[2])?;
         let d = digit(group[3])?;
-        bytes.extend_from_slice(&[
-            (a << 2) | (b >> 4),
-            (b << 4) | (c >> 2),
-            (c << 6) | d,
-        ]);
+        bytes.extend_from_slice(&decode_quartet(a, b, c, d));
     }
     if !tail.is_empty() {
         let padding = if tail[2] == b'=' { 2 } else if tail[3] == b'=' { 1 } else { 0 };
@@ -109,9 +111,7 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
         if (padding == 2 && (b & 15) != 0) || (padding == 1 && (c & 3) != 0) {
             return Err(Error::Parse("noncanonical BASE64 padding bits".into()));
         }
-        bytes.push((a << 2) | (b >> 4));
-        if padding < 2 { bytes.push((b << 4) | (c >> 2)); }
-        if padding == 0 { bytes.push((c << 6) | d); }
+        bytes.extend_from_slice(&decode_quartet(a, b, c, d)[..3 - padding]);
     }
     let decoded = String::from_utf8(bytes)
         .map_err(|_| Error::Type("UNBASE64_UTF8 decoded bytes are not UTF-8".into()))?;
@@ -371,5 +371,21 @@ mod base32_block_encoding_tests {
                 Value::Text(encoded.into()));
         }
         assert_eq!(to_base32(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod quartet_decoding_tests {
+    use super::*;
+
+    #[test]
+    fn unpadded_and_padded_quartets_share_byte_layout() {
+        assert_eq!(decode_quartet(19, 22, 5, 52), *b"Mat");
+        assert_eq!(decode_quartet(19, 22, 5, 52)[..1], b"M"[..]);
+        for text in ["", "M", "Ma", "Man", "é", "🙂", "something larger"] {
+            let encoded = base64(&[Value::Text(text.into())]).unwrap();
+            let decoded = unbase64_utf8(&[encoded]).unwrap();
+            assert_eq!(decoded, Value::Text(text.into()));
+        }
     }
 }
