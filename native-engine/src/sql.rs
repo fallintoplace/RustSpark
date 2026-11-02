@@ -782,6 +782,19 @@ impl Parser {
                 return Err(Error::Unsupported("native SQL JOIN requires an equality key".into()));
             }
             let right_key = self.identifier()?;
+            let mut residuals = Vec::new();
+            while self.peek_word("AND") {
+                if kind != JoinKind::Inner {
+                    return Err(Error::Unsupported(
+                        "compound ON predicates currently require INNER JOIN".into(),
+                    ));
+                }
+                self.next();
+                residuals.push(self.expression(3)?);
+                if residuals.len() > 64 {
+                    return Err(Error::Parse("JOIN ON exceeds 64 conjuncts".into()));
+                }
+            }
             plan = Plan::Join {
                 left: Box::new(plan),
                 right: Box::new(right),
@@ -789,6 +802,11 @@ impl Parser {
                 right_key,
                 kind,
             };
+            // For INNER joins only, a post-join filter is equivalent to the
+            // remaining ON conditions. This is not valid for OUTER joins.
+            for predicate in residuals {
+                plan = plan.filter(predicate);
+            }
         }
         if self.take_word("WHERE") {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
@@ -2455,5 +2473,39 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_compound_inner_join_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn inner_join_on_can_filter_multiple_conjuncts() {
+        let mut catalog = Catalog::new();
+        catalog.register("orders", Batch::from_rows(
+            Schema::new(vec![Field::new("o_orderkey", DataType::Integer, false)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+        ).unwrap()).unwrap();
+        catalog.register("lineitem", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("l_orderkey", DataType::Integer, false),
+                Field::new("l_quantity", DataType::Integer, false),
+            ]).unwrap(),
+            vec![
+                vec![Value::Integer(1), Value::Integer(5)],
+                vec![Value::Integer(1), Value::Integer(30)],
+                vec![Value::Integer(2), Value::Integer(40)],
+            ],
+        ).unwrap()).unwrap();
+        let sql = "SELECT o_orderkey FROM orders JOIN lineitem ON o_orderkey = l_orderkey AND l_quantity > 20 AND l_quantity < 40 ORDER BY o_orderkey";
+        let rows = execute(&parse_sql(sql).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(1)]]);
+    }
+
+    #[test]
+    fn outer_join_residuals_fail_closed() {
+        assert!(parse_sql("SELECT * FROM a LEFT JOIN b ON a_key = b_key AND score > 2").is_err());
     }
 }
