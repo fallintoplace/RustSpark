@@ -466,6 +466,16 @@ fn infer(
                     AggregateOp::Min(expr) | AggregateOp::Max(expr) |
                     AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) =>
                         expr.output_type(&source)?,
+                    AggregateOp::BitAnd(expr) | AggregateOp::BitOr(expr) |
+                    AggregateOp::BitXor(expr) => {
+                        let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                            DataType::Integer
+                        } else { expr.output_type(&source)? };
+                        if kind != DataType::Integer {
+                            return Err(Error::Type("bitwise aggregation requires integer input".into()));
+                        }
+                        DataType::Integer
+                    }
                     _ => return Err(Error::Unsupported(
                         "spilled GROUP BY does not support this aggregate".into())),
                 };

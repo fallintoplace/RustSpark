@@ -54,6 +54,9 @@ enum State {
     AvgDistinct { keys: HashSet<Value>, bytes: usize, sum: f64, compensation: f64, count: i64 },
     Min(Option<Value>),
     Max(Option<Value>),
+    BitAnd(Option<i64>),
+    BitOr(Option<i64>),
+    BitXor(Option<i64>),
     First(Option<Value>),
     Last(Option<Value>),
 }
@@ -64,6 +67,9 @@ fn new_state(op: &AggregateOp) -> Result<State> {
         AggregateOp::Sum(_) => Ok(State::Sum(None)),
         AggregateOp::Min(_) => Ok(State::Min(None)),
         AggregateOp::Max(_) => Ok(State::Max(None)),
+        AggregateOp::BitAnd(_) => Ok(State::BitAnd(None)),
+        AggregateOp::BitOr(_) => Ok(State::BitOr(None)),
+        AggregateOp::BitXor(_) => Ok(State::BitXor(None)),
         AggregateOp::First(_, _) => Ok(State::First(None)),
         AggregateOp::Last(_, _) => Ok(State::Last(None)),
         AggregateOp::Avg(_) => Ok(State::Avg { sum: 0.0, compensation: 0.0, count: 0 }),
@@ -201,6 +207,8 @@ fn add_to_state(
         AggregateOp::Avg(expr) | AggregateOp::Min(expr) |
         AggregateOp::Max(expr) | AggregateOp::SumDistinct(expr) |
         AggregateOp::AvgDistinct(expr) |
+        AggregateOp::BitAnd(expr) | AggregateOp::BitOr(expr) |
+        AggregateOp::BitXor(expr) |
         AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) => match direct_column {
             Some(index) => Cow::Borrowed(batch.value(row, index)?),
             None => Cow::Owned(expr.evaluate(batch, row)?),
@@ -233,6 +241,21 @@ fn add_to_state(
                 add_avg(sum, compensation, count, &value)?;
             }
         }
+        State::BitAnd(result) => match value.as_ref() {
+            Value::Integer(number) =>
+                *result = Some(result.map_or(*number, |current| current & *number)),
+            _ => return Err(Error::Type("BIT_AND requires integer input".into())),
+        },
+        State::BitOr(result) => match value.as_ref() {
+            Value::Integer(number) =>
+                *result = Some(result.map_or(*number, |current| current | *number)),
+            _ => return Err(Error::Type("BIT_OR requires integer input".into())),
+        },
+        State::BitXor(result) => match value.as_ref() {
+            Value::Integer(number) =>
+                *result = Some(result.map_or(*number, |current| current ^ *number)),
+            _ => return Err(Error::Type("BIT_XOR requires integer input".into())),
+        },
         State::First(current) => {
             if current.is_none() {
                 *current = Some(copy_retained_scalar(
@@ -268,6 +291,8 @@ fn bind_aggregate_column(op: &AggregateOp, schema: &Schema) -> Result<Option<usi
         AggregateOp::Sum(expr) | AggregateOp::SumDistinct(expr) |
         AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) |
         AggregateOp::Min(expr) | AggregateOp::Max(expr) |
+        AggregateOp::BitAnd(expr) | AggregateOp::BitOr(expr) |
+        AggregateOp::BitXor(expr) |
         AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) => expr,
         _ => return Err(Error::Unsupported("grouped spill does not support this aggregate".into())),
     };
@@ -294,6 +319,16 @@ fn output_schema(input: &Schema, group_names: &[(String, String)], items: &[Aggr
             },
             AggregateOp::Min(expr) | AggregateOp::Max(expr) |
             AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) => expr.output_type(input)?,
+            AggregateOp::BitAnd(expr) | AggregateOp::BitOr(expr) |
+            AggregateOp::BitXor(expr) => {
+                let kind = if matches!(expr, Expr::Literal(Value::Null)) {
+                    DataType::Integer
+                } else { expr.output_type(input)? };
+                if kind != DataType::Integer {
+                    return Err(Error::Type("bitwise aggregation requires integer input".into()));
+                }
+                DataType::Integer
+            },
             AggregateOp::Avg(expr) | AggregateOp::AvgDistinct(expr) => match expr.output_type(input)? {
                 DataType::Integer | DataType::Float => DataType::Float,
                 _ => return Err(Error::Type("AVG requires numeric input".into())),
@@ -435,6 +470,8 @@ fn aggregate_shard_with_budget(
                     } else {
                         Value::Float((sum + compensation) / count as f64)
                     },
+                State::BitAnd(v) | State::BitOr(v) | State::BitXor(v) =>
+                    v.map(Value::Integer).unwrap_or(Value::Null),
                 State::SumDistinct { total: v, .. } |
                 State::Sum(v) | State::Min(v) | State::Max(v) |
                 State::First(v) | State::Last(v) => v.unwrap_or(Value::Null),
