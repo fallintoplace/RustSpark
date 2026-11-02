@@ -105,11 +105,16 @@ def measure(command, repeat, warmup, timeout, ordered=False):
 
 
 def command_for(binary, input_args, sql_file, partitions, *,
-                batch_size=None, memory_limit_mb=None, pushdown_filters=False):
+                batch_size=None, memory_limit_mb=None, pushdown_filters=False,
+                native_cli=False):
     command = [
         str(binary), *input_args, "--sql-file", str(sql_file),
-        "--stdout-format", "json", "--target-partitions", str(partitions),
+        "--stdout-format", "json",
     ]
+    if native_cli and (batch_size is not None or memory_limit_mb is not None or pushdown_filters):
+        raise ValueError("native CLI does not support legacy TPC-H tuning options")
+    if not native_cli:
+        command.extend(["--target-partitions", str(partitions)])
     if batch_size is not None:
         command.extend(["--batch-size", str(batch_size)])
     if memory_limit_mb is not None:
@@ -120,18 +125,22 @@ def command_for(binary, input_args, sql_file, partitions, *,
 
 
 def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partitions=2,
-              *, batch_size=None, memory_limit_mb=None, pushdown_filters=False):
+              *, batch_size=None, memory_limit_mb=None, pushdown_filters=False,
+              native_cli=False):
     if repeat < 1 or warmup < 0 or timeout < 1 or partitions < 1:
         raise ValueError("Invalid repeat, warmup, timeout or partitions")
     if any(type(value) is not int or value < 1
            for value in (batch_size, memory_limit_mb) if value is not None):
         raise ValueError("Batch size and memory limit must be positive integers")
+    if native_cli and (batch_size is not None or memory_limit_mb is not None or pushdown_filters):
+        raise ValueError("native CLI does not support legacy TPC-H tuning options")
     args = input_arguments(parquet)
     reports = []
     for number, path in queries:
         command = command_for(binary, args, path, partitions,
                               batch_size=batch_size, memory_limit_mb=memory_limit_mb,
-                              pushdown_filters=pushdown_filters)
+                              pushdown_filters=pushdown_filters,
+                              native_cli=native_cli)
         entry = {"id": number}
         try:
             sql_bytes = path.read_bytes()
@@ -150,7 +159,8 @@ def benchmark(binary, queries, parquet, repeat=3, warmup=1, timeout=120, partiti
         "platform": platform.platform(),
         "binary_sha256": (hashlib.sha256(Path(binary).read_bytes()).hexdigest()
                           if Path(binary).is_file() else None),
-        "target_partitions": partitions,
+        "target_partitions": None if native_cli else partitions,
+        "cli_mode": "native" if native_cli else "legacy",
         "timeout_seconds": timeout,
         "repeat": repeat,
         "warmup": warmup,
@@ -176,6 +186,8 @@ def main(argv=None):
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--memory-limit-mb", type=int)
     parser.add_argument("--parquet-pushdown-filters", action="store_true")
+    parser.add_argument("--native-cli", action="store_true",
+                        help="Use the current native CLI without legacy tuning flags")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -185,6 +197,7 @@ def main(argv=None):
             args.timeout, args.target_partitions,
             batch_size=args.batch_size, memory_limit_mb=args.memory_limit_mb,
             pushdown_filters=args.parquet_pushdown_filters,
+            native_cli=args.native_cli,
         )
     except (OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")
