@@ -93,6 +93,7 @@ mod sha1_digest;
 mod xxhash64;
 mod xxh3_hash;
 mod get_json_object;
+mod date_calendar;
 // MODULE_IMPORTS
 
 #[derive(Clone, Copy)]
@@ -216,6 +217,7 @@ const MODULES: &[&[Function]] = &[
     &xxhash64::FUNCTIONS,
     &xxh3_hash::FUNCTIONS,
     &get_json_object::FUNCTIONS,
+    &date_calendar::FUNCTIONS,
     // FUNCTION_LIST
 ];
 
