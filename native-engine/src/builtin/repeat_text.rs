@@ -23,7 +23,16 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if bytes > 16 * 1024 * 1024 {
         return Err(Error::Execution("REPEAT result exceeds 16 MiB".into()));
     }
-    Ok(Value::Text(text.repeat(count)))
+    let mut output = Vec::new();
+    output.try_reserve_exact(bytes)
+        .map_err(|_| Error::Execution("REPEAT output allocation failed".into()))?;
+    output.extend_from_slice(text.as_bytes());
+    while output.len() < bytes {
+        let chunk = output.len().min(bytes - output.len());
+        output.extend_from_within(..chunk);
+    }
+    Ok(Value::Text(String::from_utf8(output)
+        .expect("repeating UTF-8 preserves UTF-8")))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
@@ -60,5 +69,22 @@ mod empty_repeat_regression_tests {
         assert_eq!(evaluate(&[Value::Text(String::new()), Value::Integer(0)]).unwrap(), Value::Text(String::new()));
         assert!(evaluate(&[Value::Text("x".into()), Value::Integer(1_000_001)]).is_err());
         assert_eq!(evaluate(&[Value::Null, Value::Integer(1_000_001)]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod fallible_repeat_reservation_tests {
+    use super::*;
+    #[test]
+    fn repeated_unicode_is_exact_across_doubling_boundaries() {
+        for count in [1_i64, 2, 3, 5, 7, 17] {
+            let text = "é🦀";
+            assert_eq!(evaluate(&[
+                Value::Text(text.into()), Value::Integer(count),
+            ]).unwrap(), Value::Text(text.repeat(count as usize)));
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("x".into()), Value::Integer(0),
+        ]).unwrap(), Value::Text(String::new()));
     }
 }
