@@ -1644,7 +1644,12 @@ pub fn parse_sql(sql: &str) -> Result<Plan> {
         return Err(Error::Unsupported("EXPLAIN ANALYZE requires execution metrics".into()));
     }
     parser.parse_ctes()?;
-    let mut plan = parser.select_with_intersections()?;
+    let mut plan = if parser.take_word("TABLE") {
+        let name = parser.identifier()?;
+        parser.scan_or_cte(name)?
+    } else {
+        parser.select_with_intersections()?
+    };
     loop {
         if parser.take_word("UNION") {
             let all = parser.take_word("ALL");
