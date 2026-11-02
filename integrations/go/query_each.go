@@ -13,8 +13,6 @@ import (
 
 const maxNDJSONRowBytes = 16 * 1024 * 1024
 
-// scanNDJSONRows checks complete JSON object rows before calling the visitor.
-// The line bound prevents a single untrusted result from exhausting memory.
 // decodeNDJSONRow validates one SQL result object without invoking a visitor.
 // The byte limit is checked before building the JSON decoder.
 func decodeNDJSONRow(raw []byte, index int) (map[string]any, error) {
@@ -48,6 +46,8 @@ func decodeNDJSONRow(raw []byte, index int) (map[string]any, error) {
     return row, nil
 }
 
+// scanNDJSONRows checks complete JSON object rows before calling the visitor.
+// The line bound prevents a single untrusted result from exhausting memory.
 func scanNDJSONRows(input io.Reader, visit func(map[string]any) error) error {
     scanner := bufio.NewScanner(input)
     // Scanner needs room for the line ending in addition to row bytes.
