@@ -35,8 +35,6 @@ pub mod sort;
 
 pub mod window;
 
-pub mod window_offsets;
-
 pub mod aggregate;
 
 pub mod distinct;
@@ -105,6 +103,8 @@ pub mod bloom;
 pub mod stages;
 
 pub mod cancellation;
+
+pub mod window_offsets;
 
 pub mod batch_chunks;
 
