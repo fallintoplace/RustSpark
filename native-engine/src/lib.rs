@@ -35,6 +35,8 @@ pub mod sort;
 
 pub mod window;
 
+pub mod window_offsets;
+
 pub mod aggregate;
 
 pub mod distinct;
