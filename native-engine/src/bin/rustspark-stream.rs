@@ -264,6 +264,8 @@ fn run() -> Result<()> {
     } else {
         QueryControl::default()
     };
+    // Reject invalid SQL before reading Parquet metadata or CSV headers.
+    let plan = sql::parse_sql(&args.sql)?;
     let mut catalog = if let Some(path) = &args.catalog_manifest {
         catalog_manifest::load(path)?
     } else {
@@ -278,7 +280,6 @@ fn run() -> Result<()> {
     for (name, path) in &args.parquet_tables {
         catalog.register_parquet(name, path)?;
     }
-    let plan = sql::parse_sql(&args.sql)?;
     let options = StreamOptions {
         batch_rows: args.batch_rows, scratch_directory: args.scratch,
         ..StreamOptions::default()
