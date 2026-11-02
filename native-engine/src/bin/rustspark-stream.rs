@@ -31,6 +31,7 @@ struct Args {
     csv: Option<PathBuf>, parquet: Option<PathBuf>, catalog_manifest: Option<PathBuf>,
     table: String, schema: Option<Schema>, sql: String,
     batch_rows: usize, record_bytes: usize, scratch: PathBuf,
+    explain: bool,
 }
 
 fn parse_schema(text: &str) -> Result<Schema> {
@@ -66,9 +67,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut batch_rows = 4096;
     let mut record_bytes = 8 * 1024 * 1024;
     let mut scratch = env::temp_dir();
+    let mut explain = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         if flag == "--help" || flag == "-h" { return Ok(None); }
+        if flag == "--explain" { explain = true; continue; }
         let value = args.next()
             .ok_or_else(|| Error::Parse(format!("missing value for {flag}")))?;
         match flag.as_str() {
@@ -122,6 +125,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     }
     Ok(Some(Args {
         csv, parquet, catalog_manifest, table, schema, sql, batch_rows, record_bytes, scratch,
+        explain,
     }))
 }
 
@@ -208,6 +212,11 @@ fn run() -> Result<()> {
         ..StreamOptions::default()
     };
     let schema = stream_execute::output_schema(&plan, &catalog, &options)?;
+    if args.explain {
+        let graph = rustspark_native::stages::StageGraph::from_plan(&plan)?;
+        print!("{}", graph.explain_text());
+        return Ok(());
+    }
     let input = stream_execute::execute(&plan, &catalog, &options, QueryControl::default())?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
@@ -308,5 +317,20 @@ mod borrowed_csv_output_tests {
         let mut output = Vec::new();
         write_csv(&schema, [Ok(input)], &mut output).unwrap();
         assert_eq!(output, b"\n\n\n\n\n");
+    }
+}
+
+#[cfg(test)]
+mod explain_cli_regressions {
+    use super::*;
+
+    #[test]
+    fn parses_explain_without_swallowing_following_flags() {
+        let args = ["--explain", "--parquet", "source.parquet",
+            "--sql", "SELECT * FROM data"];
+        let parsed = parse_args(args.into_iter().map(String::from))
+            .unwrap().unwrap();
+        assert!(parsed.explain);
+        assert_eq!(parsed.sql, "SELECT * FROM data");
     }
 }
