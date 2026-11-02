@@ -11,7 +11,9 @@ fn base64(args: &[Value]) -> Result<Value> {
     }
     // Emit each quartet as four ASCII bytes in one bulk append, then
     // validate UTF-8 once. Avoid four UTF-8 character pushes per 3-byte block.
-    let mut output = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut output = Vec::new();
+    output.try_reserve_exact(bytes.len().div_ceil(3) * 4)
+        .map_err(|_| Error::Execution("BASE64 output allocation failed".into()))?;
     let mut triples = bytes.chunks_exact(3);
     for chunk in &mut triples {
         let (a, b, c) = (chunk[0], chunk[1], chunk[2]);
@@ -73,7 +75,9 @@ fn unbase64_utf8(args: &[Value]) -> Result<Value> {
     if decoded_len > MAX_BYTES {
         return Err(Error::Execution("decoded BASE64 exceeds byte budget".into()));
     }
-    let mut bytes = Vec::with_capacity(decoded_len);
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(decoded_len)
+        .map_err(|_| Error::Execution("UNBASE64_UTF8 output allocation failed".into()))?;
     // Only the final quartet may be padded. Decode all preceding full
     // quartets with one path and no per-group last-element checks.
     let full_len = input.len().saturating_sub(4);
@@ -293,5 +297,19 @@ mod spark_to_base32_utf8_tests {
         let plan = sql::parse_sql("SELECT TO_BASE32('foo')").unwrap();
         assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
             vec![vec![Value::Text("MZXW6===".into())]]);
+    }
+}
+
+#[cfg(test)]
+mod fallible_base64_reservation_tests {
+    use super::*;
+    #[test]
+    fn utf8_roundtrips_and_all_padding_shapes() {
+        for text in ["", "a", "ab", "abc", "é🙂", "hello world"] {
+            let input = Value::Text(text.into());
+            let encoded = base64(&[input.clone()]).unwrap();
+            assert_eq!(unbase64_utf8(&[encoded]).unwrap(), input);
+        }
+        assert_eq!(base64(&[Value::Null]).unwrap(), Value::Null);
     }
 }
