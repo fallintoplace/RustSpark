@@ -39,6 +39,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         preserved.push_str(text);
         return Ok(Value::Text(preserved));
     }
+    Ok(Value::Text(soundex_code(text, first)))
+}
+
+fn soundex_code(text: &str, first: char) -> String {
     let mut result = String::with_capacity(4);
     result.push(first.to_ascii_uppercase());
     let mut last = soundex_digit(first);
@@ -60,7 +64,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         }
     }
     while result.len() < 4 { result.push('0'); }
-    Ok(Value::Text(result))
+    result
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
