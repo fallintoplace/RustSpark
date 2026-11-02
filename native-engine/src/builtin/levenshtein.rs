@@ -326,17 +326,9 @@ fn jaro_winkler_type(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Float)
 }
 
-fn jaro_winkler_similarity(args: &[Value]) -> Result<Value> {
-    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
-    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
-    // A naive pairwise search is quadratic; cap it before allocating UTF-16 state.
-    if left.len() > 4096 || right.len() > 4096 {
-        return Err(Error::Execution("JARO_WINKLER_SIMILARITY input exceeds 4096 bytes".into()));
-    }
-    if left == right { return Ok(Value::Float(1.0)); }
-    if left.is_empty() || right.is_empty() { return Ok(Value::Float(0.0)); }
-    let a = left.encode_utf16().collect::<Vec<_>>();
-    let b = right.encode_utf16().collect::<Vec<_>>();
+// ASCII code units are identical in UTF-8 and UTF-16. Use borrowed
+// bytes for ASCII pairs and retain Spark's UTF-16 behavior elsewhere.
+fn jaro_winkler_units<T: Eq>(a: &[T], b: &[T]) -> f64 {
     let window = (a.len().max(b.len()) / 2).saturating_sub(1);
     let mut a_matched = vec![false; a.len()];
     let mut b_matched = vec![false; b.len()];
@@ -353,7 +345,7 @@ fn jaro_winkler_similarity(args: &[Value]) -> Result<Value> {
             break;
         }
     }
-    if matches == 0 { return Ok(Value::Float(0.0)); }
+    if matches == 0 { return 0.0; }
     let mut transpositions = 0usize;
     let mut j = 0usize;
     for (i, matched) in a_matched.iter().enumerate() {
@@ -367,7 +359,25 @@ fn jaro_winkler_similarity(args: &[Value]) -> Result<Value> {
         + matches_f64 / b.len() as f64
         + (matches_f64 - transpositions as f64 / 2.0) / matches_f64) / 3.0;
     let prefix = a.iter().zip(&b).take(4).take_while(|(left, right)| left == right).count();
-    Ok(Value::Float(jaro + prefix as f64 * 0.1 * (1.0 - jaro)))
+    jaro + prefix as f64 * 0.1 * (1.0 - jaro)
+}
+
+fn jaro_winkler_similarity(args: &[Value]) -> Result<Value> {
+    let Some(left) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(right) = super::string(&args[1])? else { return Ok(Value::Null); };
+    if left.len() > 4096 || right.len() > 4096 {
+        return Err(Error::Execution("JARO_WINKLER_SIMILARITY input exceeds 4096 bytes".into()));
+    }
+    if left == right { return Ok(Value::Float(1.0)); }
+    if left.is_empty() || right.is_empty() { return Ok(Value::Float(0.0)); }
+    let score = if left.is_ascii() && right.is_ascii() {
+        jaro_winkler_units(left.as_bytes(), right.as_bytes())
+    } else {
+        let a = left.encode_utf16().collect::<Vec<_>>();
+        let b = right.encode_utf16().collect::<Vec<_>>();
+        jaro_winkler_units(&a, &b)
+    };
+    Ok(Value::Float(score))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -843,5 +853,40 @@ mod fallible_levenshtein_dp_rows_regressions {
         let a = vec![b'a'; 2000];
         let b = vec![b'b'; 2000];
         assert!(distance_units(&a, &b, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod jaro_ascii_borrowed_units_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_fast_path_matches_utf16_reference() {
+        for (left, right) in [
+            ("MARTHA", "MARHTA"), ("DWAYNE", "DUANE"),
+            ("a", "ab"), ("abc", "abcde"), ("abca", "abda"),
+            ("abcdefgh", "zyxwvutsr"), ("aabbcc", "aabbbc"),
+        ] {
+            let a = left.encode_utf16().collect::<Vec<_>>();
+            let b = right.encode_utf16().collect::<Vec<_>>();
+            let expected = jaro_winkler_units(&a, &b);
+            assert_eq!(jaro_winkler_similarity(&[
+                Value::Text(left.into()), Value::Text(right.into()),
+            ]).unwrap(), Value::Float(expected));
+        }
+    }
+
+    #[test]
+    fn unicode_still_uses_utf16_code_units() {
+        for (left, right) in [("café", "cafe"), ("🙂x", "🙂y"), ("東京", "東海")] {
+            let a = left.encode_utf16().collect::<Vec<_>>();
+            let b = right.encode_utf16().collect::<Vec<_>>();
+            assert_eq!(jaro_winkler_similarity(&[
+                Value::Text(left.into()), Value::Text(right.into()),
+            ]).unwrap(), Value::Float(jaro_winkler_units(&a, &b)));
+        }
+        assert_eq!(jaro_winkler_similarity(&[
+            Value::Null, Value::Text("abc".into()),
+        ]).unwrap(), Value::Null);
     }
 }
