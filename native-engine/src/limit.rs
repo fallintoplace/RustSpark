@@ -8,12 +8,15 @@ fn validate_window(offset: usize, count: Option<usize>) -> Result<()> {
     Ok(())
 }
 
+fn slice_bounds(rows: usize, offset: usize, count: Option<usize>) -> (usize, usize) {
+    let start = offset.min(rows);
+    let end = count.map_or(rows, |count| start.saturating_add(count).min(rows));
+    (start, end)
+}
+
 pub fn limit(batch: &Batch, offset: usize, count: Option<usize>) -> Result<Batch> {
     validate_window(offset, count)?;
-    let start = offset.min(batch.num_rows());
-    let end = count.map_or(batch.num_rows(), |count| {
-        start.saturating_add(count).min(batch.num_rows())
-    });
+    let (start, end) = slice_bounds(batch.num_rows(), offset, count)
     if start == 0 && end == batch.num_rows() {
         return Ok(batch.clone());
     }
@@ -27,10 +30,7 @@ pub fn limit_owned(batch: Batch, offset: usize, count: Option<usize>) -> Result<
     if offset == 0 && count.is_none_or(|count| count >= batch.num_rows()) {
         return Ok(batch);
     }
-    let start = offset.min(batch.num_rows());
-    let end = count.map_or(batch.num_rows(), |count| {
-        start.saturating_add(count).min(batch.num_rows())
-    });
+    let (start, end) = slice_bounds(batch.num_rows(), offset, count)
     batch.slice_rows_owned(start, end)
 }
 
