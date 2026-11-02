@@ -41,6 +41,15 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if count.unsigned_abs() > u64::try_from(max_matches).unwrap_or(u64::MAX) {
         return bounded_substring_index_result(text);
     }
+    if count < 0 && delimiter.chars().count() == 1 {
+        // A single Unicode scalar cannot overlap itself, so reverse
+        // matches select exactly the same delimiters as forward splitting.
+        // Stop as soon as the requested match is found near the tail.
+        let index = usize::try_from(count.unsigned_abs() - 1).unwrap_or(usize::MAX);
+        let suffix = text.rmatch_indices(delimiter).nth(index)
+            .map_or(text, |(position, _)| &text[position + delimiter.len()..]);
+        return bounded_substring_index_result(suffix);
+    }
     if count == 1 {
         return bounded_substring_index_result(text.split_once(delimiter).map_or(text, |(head, _)| head));
     }
@@ -394,5 +403,35 @@ mod shared_trailing_delimiter_scan_tests {
                     "delimiter={delimiter:?} count={count}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reverse_single_scalar_substring_index_tests {
+    use super::*;
+
+    #[test]
+    fn reverse_matches_agree_with_forward_nonoverlapping_delimiters() {
+        for (text, separator) in [
+            ("a.b.c", "."), ("a::b::c", ":"), ("é🙂界🙂a", "🙂"),
+            ("aaaaa", "a"), ("no match", "/"), ("🙂🙂🙂", "🙂"),
+        ] {
+            let positions: Vec<_> = text.match_indices(separator)
+                .map(|(start, _)| start).collect();
+            for count in 1..=positions.len() + 2 {
+                let from_end = count as i64;
+                let expected = positions.iter().rev().nth(count - 1)
+                    .map_or(text, |&position| &text[position + separator.len()..]);
+                assert_eq!(evaluate(&[
+                    Value::Text(text.into()), Value::Text(separator.into()),
+                    Value::Integer(-from_end),
+                ]).unwrap(), Value::Text(expected.into()),
+                    "text={text:?} delimiter={separator:?} count={count}");
+            }
+        }
+        assert_eq!(evaluate(&[
+            Value::Text("x🙂y".into()), Value::Text("🙂".into()),
+            Value::Integer(i64::MIN),
+        ]).unwrap(), Value::Text("x🙂y".into()));
     }
 }
