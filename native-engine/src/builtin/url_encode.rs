@@ -7,6 +7,19 @@ fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 fn is_url_safe(byte: u8) -> bool {
     matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*')
 }
+fn append_checked(output: &mut Vec<u8>, run: &[u8], escaped: &[u8]) -> Result<()> {
+    let added = run.len().checked_add(escaped.len())
+        .ok_or_else(|| Error::Execution("URL_ENCODE output size overflow".into()))?;
+    output.len().checked_add(added)
+        .filter(|&len| len <= MAX_OUTPUT_BYTES)
+        .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
+    output.try_reserve(added)
+        .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
+    output.extend_from_slice(run);
+    output.extend_from_slice(escaped);
+    Ok(())
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
@@ -27,32 +40,17 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     let mut start = 0usize;
     for (index, &byte) in bytes.iter().enumerate() {
         if is_url_safe(byte) { continue; }
-        let added = if byte == b' ' { 1 } else { 3 };
-        let append = (index - start).checked_add(added)
-            .ok_or_else(|| Error::Execution("URL_ENCODE output size overflow".into()))?;
-        output.len().checked_add(append)
-            .filter(|&len| len <= MAX_OUTPUT_BYTES)
-            .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
-        output.try_reserve(append)
-            .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
-        output.extend_from_slice(&bytes[start..index]);
-        if byte == b' ' {
-            output.push(b'+');
+        let escaped = if byte == b' ' {
+            [b'+', 0, 0]
         } else {
-            output.extend_from_slice(&[
-                b'%', DIGITS[usize::from(byte >> 4)],
-                DIGITS[usize::from(byte & 15)],
-            ]);
-        }
+            [b'%', DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 15)]]
+        };
+        let escaped_len = if byte == b' ' { 1 } else { 3 };
+        append_checked(&mut output, &bytes[start..index], &escaped[..escaped_len])?;
         start = index + 1;
     }
-    let remaining = bytes.len() - start;
-    output.len().checked_add(remaining)
-        .filter(|&len| len <= MAX_OUTPUT_BYTES)
-        .ok_or_else(|| Error::Execution("URL_ENCODE output exceeds native 16 MiB budget".into()))?;
-    output.try_reserve(remaining)
-        .map_err(|_| Error::Execution("URL_ENCODE output allocation failed".into()))?;
-    output.extend_from_slice(&bytes[start..]);
+    append_checked(&mut output, &bytes[start..], &[])?;
     Ok(Value::Text(String::from_utf8(output)
         .expect("URL_ENCODE produces ASCII-only bytes")))
 }
@@ -163,6 +161,27 @@ mod fallible_url_encoding_regressions {
     fn rejects_encoded_growth_beyond_limit_but_accepts_safe_boundary() {
         assert_eq!(evaluate(&[Value::Text("x".repeat(MAX_OUTPUT_BYTES))]).unwrap(),
             Value::Text("x".repeat(MAX_OUTPUT_BYTES)));
+        assert!(evaluate(&[Value::Text("/".repeat(MAX_OUTPUT_BYTES / 3 + 1))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod checked_url_append_refactor_tests {
+    use super::*;
+
+    #[test]
+    fn output_budget_and_escaping_are_unchanged() {
+        for (input, expected) in [
+            ("", ""), ("safe-._*09", "safe-._*09"),
+            ("é +", "%C3%A9+%2B"), ("🙂/x", "%F0%9F%99%82%2Fx"),
+        ] {
+            assert_eq!(evaluate(&[Value::Text(input.into())]).unwrap(),
+                Value::Text(expected.into()));
+        }
+        let boundary = "/".repeat(MAX_OUTPUT_BYTES / 3);
+        let Value::Text(encoded) = evaluate(&[Value::Text(boundary)]).unwrap()
+            else { panic!("text expected") };
+        assert_eq!(encoded.len(), (MAX_OUTPUT_BYTES / 3) * 3);
         assert!(evaluate(&[Value::Text("/".repeat(MAX_OUTPUT_BYTES / 3 + 1))]).is_err());
     }
 }
