@@ -48,7 +48,7 @@ class NativeGroupedOracleTests(unittest.TestCase):
         self.assertEqual(rows, [])
         call = run.call_args
         self.assertIn("GROUP BY region, category", call.args[0][-1])
-        self.assertIn("region:text!", call.args[0])
+        self.assertIn("region:text!", call.args[0][call.args[0].index("--schema") + 1])
         self.assertEqual(call.kwargs["timeout"], 15)
 
 
