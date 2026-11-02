@@ -21,3 +21,4 @@ pub mod hll;
 pub mod file_catalog;
 pub mod catalog_manifest;
 pub mod stream_execute;
+pub mod topk_stream;
