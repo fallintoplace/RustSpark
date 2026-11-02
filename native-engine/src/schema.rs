@@ -147,9 +147,12 @@ impl Schema {
             .all(|(index, name)| self.column(name).ok() == Some(index)) {
             return Ok(self.clone());
         }
-        Self::new(names.iter().map(|name| {
-            Ok(self.field(self.column(name)?)?.clone())
-        }).collect::<Result<Vec<_>>>()?)
+        // Resolve each name once, then use the same validation and metadata
+        // construction path as physical index projections.
+        let indices = names.iter()
+            .map(|name| self.column(name))
+            .collect::<Result<Vec<_>>>()?;
+        self.project_indices(&indices)
     }
 }
 
