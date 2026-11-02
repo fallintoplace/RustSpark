@@ -790,7 +790,72 @@ impl Parser {
                 kind,
             };
         }
-        if self.take_word("WHERE") {
+        let where_not_in_select = self.peek_word("WHERE")
+            && matches!(
+                (
+                    self.tokens.get(self.index + 1),
+                    self.tokens.get(self.index + 2),
+                    self.tokens.get(self.index + 3),
+                    self.tokens.get(self.index + 4),
+                    self.tokens.get(self.index + 5),
+                ),
+                (Some(Token::Word(_)), Some(Token::Word(not)),
+                 Some(Token::Word(in_word)), Some(Token::Symbol('(')),
+                 Some(Token::Word(select)))
+                    if not.eq_ignore_ascii_case("NOT")
+                        && in_word.eq_ignore_ascii_case("IN")
+                        && select.eq_ignore_ascii_case("SELECT")
+            );
+        if where_not_in_select {
+            self.expect_word("WHERE")?;
+            let left_key = self.identifier()?;
+            self.expect_word("NOT")?;
+            self.expect_word("IN")?;
+            self.expect_symbol('(')?;
+            if self.subquery_depth >= 32 {
+                return Err(Error::Parse("NOT IN subquery nesting limit exceeded".into()));
+            }
+            self.subquery_depth += 1;
+            let inner = self.select_with_intersections()?;
+            let inner = self.finish_query(inner)?;
+            self.expect_symbol(')')?;
+            self.subquery_depth -= 1;
+            let Plan::Project { selections, .. } = &inner else {
+                return Err(Error::Unsupported("NOT IN subquery needs one projected column".into()));
+            };
+            if selections.len() != 1 {
+                return Err(Error::Parse("NOT IN subquery must return one column".into()));
+            }
+            let right_key = selections[0].alias.clone();
+            let anti = Plan::Join {
+                left: Box::new(plan.clone()), right: Box::new(inner.clone()),
+                left_key: left_key.clone(), right_key: right_key.clone(),
+                kind: JoinKind::Anti,
+            };
+            // Unlike a basic ANTI join, SQL NOT IN rejects unmatched rows
+            // if the right set contains NULL. A NULL probe also fails when
+            // the right set is nonempty. Keep duplicates via EXCEPT ALL.
+            let null_witness = inner.clone()
+                .filter(Expr::IsNull(Box::new(Expr::Column(right_key))))
+                .limit(0, Some(1)).project(Vec::new());
+            let reject_for_rhs_null = Plan::CrossJoin {
+                left: Box::new(anti.clone()), right: Box::new(null_witness),
+            };
+            let remaining = Plan::ExceptAll {
+                left: Box::new(anti), right: Box::new(reject_for_rhs_null),
+            };
+            let nonempty_witness = inner.limit(0, Some(1)).project(Vec::new());
+            let null_probes = plan.filter(Expr::IsNull(Box::new(Expr::Column(left_key))));
+            let reject_null_probes = Plan::CrossJoin {
+                left: Box::new(null_probes), right: Box::new(nonempty_witness),
+            };
+            plan = Plan::ExceptAll {
+                left: Box::new(remaining), right: Box::new(reject_null_probes),
+            };
+            if self.take_word("AND") {
+                plan = plan.filter(self.expression(2)?);
+            }
+        } else if self.take_word("WHERE") {
             // An uncorrelated EXISTS is a one-bit relation test. Project the
             // subquery down to zero columns and at most one row. CROSS JOIN
             // then preserves the outer schema while returning outer rows
@@ -2455,5 +2520,43 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_not_in_subquery_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    fn rows(right: Vec<Value>) -> Vec<Vec<Value>> {
+        let mut catalog = Catalog::new();
+        catalog.register("part", Batch::from_rows(
+            Schema::new(vec![Field::new("p_key", DataType::Integer, true)]).unwrap(),
+            vec![vec![Value::Integer(1)], vec![Value::Integer(1)],
+                 vec![Value::Integer(2)], vec![Value::Null]],
+        ).unwrap()).unwrap();
+        catalog.register("blocked", Batch::from_rows(
+            Schema::new(vec![Field::new("s_key", DataType::Integer, true)]).unwrap(),
+            right.into_iter().map(|v| vec![v]).collect(),
+        ).unwrap()).unwrap();
+        execute(&parse_sql("SELECT p_key FROM part WHERE p_key NOT IN (SELECT s_key FROM blocked) ORDER BY p_key NULLS LAST").unwrap(), &catalog)
+            .unwrap().rows().unwrap()
+    }
+
+    #[test]
+    fn not_in_preserves_sql_null_semantics_and_duplicate_rows() {
+        assert_eq!(rows(vec![Value::Integer(2)]), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+        ]);
+        assert!(rows(vec![Value::Integer(2), Value::Null]).is_empty());
+        assert_eq!(rows(vec![]), vec![
+            vec![Value::Integer(1)], vec![Value::Integer(1)],
+            vec![Value::Integer(2)], vec![Value::Null],
+        ]);
+    }
+
+    #[test]
+    fn rejects_multicolumn_not_in_subqueries() {
+        assert!(parse_sql("SELECT p_key FROM part WHERE p_key NOT IN (SELECT s_key, s_key FROM blocked)").is_err());
     }
 }
