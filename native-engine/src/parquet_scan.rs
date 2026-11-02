@@ -101,6 +101,66 @@ fn scan_with_expected_file(
     Ok(ParquetScan { inner: reader, finished: false })
 }
 
+/// Push a conservative predicate into Parquet row-group selection.
+/// This only skips groups proven to contain no matches; callers MUST still
+/// apply the predicate to the decoded rows.
+pub(crate) fn scan_checked_open_file_pruned(
+    file: File, batch_size: usize, expected: &crate::schema::Schema,
+    predicate: &crate::expr::Expr,
+) -> Result<ParquetScan> {
+    use crate::{pruning, scalar::Value, statistics::ColumnStatistics};
+    use parquet::file::statistics::Statistics;
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    predicate.validate_budget()?;
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let actual = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
+    if &actual != expected {
+        return Err(Error::Schema(
+            "registered Parquet table schema changed since registration".into()));
+    }
+    let mut selected = Vec::new();
+    selected.try_reserve_exact(builder.metadata().num_row_groups())
+        .map_err(|_| Error::Execution("row group pruning allocation failed".into()))?;
+    for index in 0..builder.metadata().num_row_groups() {
+        let group = builder.metadata().row_group(index);
+        let mut columns = std::collections::HashMap::new();
+        // Only signed INT64 and INT32 flat root columns are interpreted.
+        // Nested and logical unsigned columns need their own sort semantics.
+        for (column, field) in builder.schema().fields().iter().enumerate() {
+            if !matches!(field.data_type(),
+                arrow_schema::DataType::Int64 | arrow_schema::DataType::Int32) ||
+                column >= group.num_columns() {
+                continue;
+            }
+            let Some(stats) = group.column(column).statistics() else { continue; };
+            let (min, max) = match (field.data_type(), stats) {
+                (arrow_schema::DataType::Int64, Statistics::Int64(stats)) =>
+                    (stats.min_opt().copied().map(Value::Integer),
+                     stats.max_opt().copied().map(Value::Integer)),
+                (arrow_schema::DataType::Int32, Statistics::Int32(stats)) =>
+                    (stats.min_opt().copied().map(|n| Value::Integer(n as i64)),
+                     stats.max_opt().copied().map(|n| Value::Integer(n as i64))),
+                _ => continue,
+            };
+            let Some(nulls) = stats.null_count_opt() else { continue; };
+            let Ok(rows) = u64::try_from(group.num_rows()) else { continue; };
+            columns.insert(field.name().to_ascii_lowercase(),
+                ColumnStatistics { rows, nulls, min, max });
+        }
+        if !pruning::can_skip_columns(&columns, predicate) {
+            selected.push(index);
+        }
+    }
+    builder = builder.with_row_groups(selected);
+    let rows = bounded_native_batch_rows(batch_size, builder.schema().fields().len());
+    let inner = builder.with_batch_size(rows)
+        .build().map_err(|e| Error::Execution(format!("Parquet reader: {e}")))?;
+    Ok(ParquetScan { inner, finished: false })
+}
+
 /// Compose Parquet decoder pushdowns without decoding discarded columns,
 /// row groups, or row windows in separate intermediate stages.
 #[derive(Clone, Copy, Debug, Default)]
@@ -212,6 +272,7 @@ fn validate_row_groups(indices: &[usize], available: usize) -> Result<()> {
 pub fn scan_with_options(
     path: impl AsRef<Path>, batch_size: usize, options: ParquetScanOptions<'_>,
 ) -> Result<ParquetScan> {
+    // Reject invalid requests before opening or touching the filesystem.
     if batch_size == 0 || batch_size > 1_000_000 {
         return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
     }
@@ -219,9 +280,40 @@ pub fn scan_with_options(
         options.offset.checked_add(limit)
             .ok_or_else(|| Error::Execution("Parquet OFFSET + LIMIT overflow".into()))?;
     }
-    let file = File::open(path)?;
+    scan_with_options_open_file(File::open(path)?, batch_size, options, None)
+}
+
+/// Apply scan pushdown on the same registered descriptor that is checked
+/// against the catalog schema. This prevents a replacement file from
+/// silently changing source columns during a projected query.
+pub(crate) fn scan_checked_options_open_file(
+    file: File, batch_size: usize, expected: &crate::schema::Schema,
+    options: ParquetScanOptions<'_>,
+) -> Result<ParquetScan> {
+    scan_with_options_open_file(file, batch_size, options, Some(expected))
+}
+
+fn scan_with_options_open_file(
+    file: File, batch_size: usize, options: ParquetScanOptions<'_>,
+    expected: Option<&crate::schema::Schema>,
+) -> Result<ParquetScan> {
+    if batch_size == 0 || batch_size > 1_000_000 {
+        return Err(Error::Execution("Parquet batch size must be in 1..=1000000".into()));
+    }
+    if let Some(limit) = options.limit {
+        options.offset.checked_add(limit)
+            .ok_or_else(|| Error::Execution("Parquet OFFSET + LIMIT overflow".into()))?;
+    }
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    if let Some(expected) = expected {
+        let actual = arrow_bridge::schema_from_arrow(builder.schema().as_ref())?;
+        if &actual != expected {
+            return Err(Error::Schema(
+                "registered Parquet table schema changed since registration".into()
+            ));
+        }
+    }
     if let Some(columns) = options.columns {
         let selected = projection_indices(builder.schema().fields(), columns)?;
         let mask = ProjectionMask::roots(builder.parquet_schema(), selected);
@@ -965,5 +1057,190 @@ mod fallible_parquet_scan_selection_regressions {
         assert!(validate_row_groups(&[0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
             12, 13, 14, 15, 16], 64).is_err());
         assert!(validate_row_groups(&[64], 64).is_err());
+    }
+}
+
+
+/// Iterator that applies an exact predicate after conservative Parquet row-group pruning.
+/// Metadata only skips groups proved impossible; every retained row is still filtered.
+pub struct FilteredParquetScan {
+    scan: ParquetScan,
+    predicate: crate::expr::Expr,
+    finished: bool,
+}
+
+impl Iterator for FilteredParquetScan {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished { return None; }
+        loop {
+            let batch = match self.scan.next()? {
+                Ok(batch) => batch,
+                Err(error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+            };
+            match crate::filter::filter_owned(batch, &self.predicate) {
+                Ok(filtered) if filtered.num_rows() == 0 => continue,
+                Ok(filtered) => return Some(Ok(filtered)),
+                Err(error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
+/// Return only row groups whose statistics cannot disprove an INT64 predicate.
+/// Unknown, inexact, corrupt or missing metadata always keeps the row group.
+fn int64_candidate_groups(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    arrow_schema: &arrow_schema::Schema,
+    predicate: &crate::expr::Expr,
+) -> Result<Option<Vec<usize>>> {
+    use crate::{expr::Expr, scalar::Value, statistics::ColumnStatistics};
+    use parquet::file::statistics::Statistics;
+    let name = match predicate {
+        Expr::Binary { left, right, .. } => match (left.as_ref(), right.as_ref()) {
+            (Expr::Column(name), Expr::Literal(Value::Integer(_))) |
+            (Expr::Literal(Value::Integer(_)), Expr::Column(name)) => name.as_str(),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let Some(index) = arrow_schema.fields().iter().position(|field|
+        field.name().eq_ignore_ascii_case(name) &&
+        field.data_type() == &arrow_schema::DataType::Int64) else {
+        return Ok(None);
+    };
+    let mut selected = Vec::new();
+    selected.try_reserve_exact(metadata.num_row_groups())
+        .map_err(|_| Error::Execution("Parquet row-group pruning allocation failed".into()))?;
+    for group_index in 0..metadata.num_row_groups() {
+        let group = metadata.row_group(group_index);
+        let Some(column) = group.columns().get(index) else {
+            selected.push(group_index);
+            continue;
+        };
+        // Only leaf columns that are a single, exact root INT64 may use
+        // the ordinal shortcut. Nested Parquet fields need a separate mapping.
+        if !column.column_path().string().eq_ignore_ascii_case(name) {
+            selected.push(group_index);
+            continue;
+        }
+        let Some(Statistics::Int64(stats)) = column.statistics() else {
+            selected.push(group_index);
+            continue;
+        };
+        let (Some(&min), Some(&max), Some(nulls), Ok(rows)) = (
+            stats.min_opt(), stats.max_opt(), stats.null_count_opt(),
+            u64::try_from(group.num_rows()),
+        ) else {
+            selected.push(group_index);
+            continue;
+        };
+        if min > max || nulls > rows || !stats.min_is_exact() || !stats.max_is_exact() {
+            selected.push(group_index);
+            continue;
+        }
+        let summary = ColumnStatistics {
+            rows,
+            nulls,
+            min: Some(crate::scalar::Value::Integer(min)),
+            max: Some(crate::scalar::Value::Integer(max)),
+        };
+        if !crate::pruning::can_skip(&summary, name, predicate) {
+            selected.push(group_index);
+        }
+    }
+    Ok(Some(selected))
+}
+
+/// Scan filtered Parquet batches using row-group statistics when safe.
+///
+/// Non-INT64 or complex predicates still work: they fall back to exact row
+/// filtering without assuming that incomplete metadata proves anything.
+pub fn scan_filtered(
+    path: impl AsRef<Path>, batch_size: usize, predicate: crate::expr::Expr,
+) -> Result<FilteredParquetScan> {
+    use crate::schema::DataType;
+    predicate.validate_budget()?;
+    let path = path.as_ref();
+    let expected = file_schema(path)?;
+    if predicate.output_type(&expected)? != DataType::Boolean {
+        return Err(Error::Type("Parquet filter predicate must be boolean".into()));
+    }
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)
+        .map_err(|e| Error::Execution(format!("Parquet metadata: {e}")))?;
+    let candidates = int64_candidate_groups(builder.metadata(), builder.schema(), &predicate)?;
+    let scan = scan_with_options(path, batch_size, ParquetScanOptions {
+        row_groups: candidates.as_deref(),
+        ..ParquetScanOptions::default()
+    })?;
+    Ok(FilteredParquetScan { scan, predicate, finished: false })
+}
+
+#[cfg(test)]
+mod parquet_predicate_pushdown_tests {
+    use super::*;
+    use crate::{expr::{BinaryOp, Expr}, scalar::Value};
+    use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+
+    #[test]
+    fn skips_disjoint_int64_row_groups_and_filters_exact_survivors() {
+        use std::sync::Arc;
+        let path = std::env::temp_dir().join(format!(
+            "rustspark-prune-{}-{}.parquet",
+            std::process::id(), "int64"
+        ));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("n", arrow_schema::DataType::Int64, true),
+        ]));
+        let data = arrow_array::RecordBatch::try_new(schema.clone(), vec![
+            Arc::new(arrow_array::Int64Array::from(vec![
+                Some(1), Some(2), Some(3), Some(7), Some(8), Some(9),
+            ])),
+        ]).unwrap();
+        let properties = WriterProperties::builder().set_max_row_group_row_count(Some(3)).build();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(),
+            schema, Some(properties)).unwrap();
+        writer.write(&data).unwrap();
+        writer.close().unwrap();
+        let condition = Expr::binary(
+            Expr::Column("n".into()), BinaryOp::Greater,
+            Expr::Literal(Value::Integer(6)),
+        );
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+        let selected = int64_candidate_groups(builder.metadata(), builder.schema(), &condition)
+            .unwrap().unwrap();
+        assert_eq!(selected, vec![1]);
+        let actual = scan_filtered(&path, 2, condition).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap()
+            .into_iter().flat_map(|batch| batch.rows().unwrap()).collect::<Vec<_>>();
+        assert_eq!(actual, vec![
+            vec![Value::Integer(7)],
+            vec![Value::Integer(8)],
+            vec![Value::Integer(9)],
+        ]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn never_uses_stale_or_inexact_statistics_to_remove_possible_rows() {
+        let summary = crate::statistics::ColumnStatistics {
+            rows: 3, nulls: 1,
+            min: Some(Value::Integer(1)), max: Some(Value::Integer(7)),
+        };
+        for predicate in [
+            Expr::binary(Expr::Column("n".into()), BinaryOp::Greater,
+                Expr::Literal(Value::Integer(6))),
+            Expr::binary(Expr::Literal(Value::Integer(6)), BinaryOp::Less,
+                Expr::Column("n".into())),
+        ] {
+            assert!(!crate::pruning::can_skip(&summary, "n", &predicate));
+        }
     }
 }

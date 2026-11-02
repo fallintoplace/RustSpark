@@ -132,6 +132,48 @@ impl TaskScheduler {
         Ok(self.lease_ready(worker, until))
     }
 
+    /// Prefer data-local tasks, then fall back to the globally ready queue.
+    /// Every task still receives a unique attempt and the usual TTL fencing.
+    /// The caller's preferred list is bounded before mutating leases.
+    pub fn lease_many_preferred(
+        &mut self, worker: u64, now: Instant, ttl: Duration,
+        preferred: &[u64], max_tasks: usize, max_active_per_worker: usize,
+    ) -> Result<Vec<Lease>> {
+        const MAX_PREFERENCES: usize = 4096;
+        if preferred.len() > MAX_PREFERENCES {
+            return Err(Error::Execution("too many preferred task IDs".into()));
+        }
+        if max_active_per_worker == 0 || ttl.is_zero() {
+            return Err(Error::Execution("invalid preferred lease window".into()));
+        }
+        let until = now.checked_add(ttl)
+            .ok_or_else(|| Error::Execution("task lease deadline overflow".into()))?;
+        self.expire_leases(now);
+        let active = self.by_worker.get(&worker).map_or(0, HashSet::len);
+        let count = max_tasks.min(max_active_per_worker.saturating_sub(active))
+            .min(self.ready.len());
+        let mut leases = allocate_window(count)?;
+        for &id in preferred {
+            if leases.len() == count { break; }
+            if !self.ready.remove(&id) { continue; }
+            let task = self.tasks.get_mut(&id).expect("queued preferred task exists");
+            task.attempts += 1;
+            task.status = TaskStatus::Leased {
+                worker, attempt: task.attempts, until,
+            };
+            self.counts.queued -= 1;
+            self.counts.leased += 1;
+            self.deadlines.insert((until, id));
+            self.by_worker.entry(worker).or_default().insert(id);
+            leases.push(Lease { task: id, worker, attempt: task.attempts });
+        }
+        while leases.len() < count {
+            leases.push(self.lease_ready(worker, until)
+                .expect("ready fallback task exists"));
+        }
+        Ok(leases)
+    }
+
     /// Claim a bounded window of tasks with one expiry sweep and deadline
     /// calculation. Single-task leasing remains allocation-free.
     pub fn lease_many(
@@ -1013,5 +1055,54 @@ mod atomic_scheduler_response_allocation_tests {
         let before = scheduler.status(42).cloned();
         assert!(scheduler.renew_many(&leases, now, Duration::ZERO).is_err());
         assert_eq!(scheduler.status(42), before.as_ref());
+    }
+}
+
+#[cfg(test)]
+mod locality_aware_leasing_regressions {
+    use super::*;
+
+    #[test]
+    fn prefers_local_tasks_then_fills_remaining_capacity() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(5);
+        let mut scheduler = TaskScheduler::new([1, 2, 3, 4, 5], 3).unwrap();
+        let leases = scheduler.lease_many_preferred(
+            9, now, ttl, &[4, 3, 4, 99], 3, 3).unwrap();
+        assert_eq!(leases.iter().map(|lease| lease.task).collect::<Vec<_>>(),
+            vec![4, 3, 1]);
+        assert_eq!(scheduler.counts().queued, 2);
+        assert_eq!(scheduler.counts().leased, 3);
+        assert!(scheduler.lease_many_preferred(
+            9, now, ttl, &[2], 2, 3).unwrap().is_empty());
+        let other = scheduler.lease_many_preferred(
+            11, now, ttl, &[5], 2, 2).unwrap();
+        assert_eq!(other.iter().map(|lease| lease.task).collect::<Vec<_>>(),
+            vec![5, 2]);
+    }
+
+    #[test]
+    fn rejects_oversized_preferences_before_changing_task_states() {
+        let mut scheduler = TaskScheduler::new([10, 20], 2).unwrap();
+        let before = scheduler.counts();
+        assert!(scheduler.lease_many_preferred(
+            2, Instant::now(), Duration::from_secs(2),
+            &vec![10; 4097], 2, 2).is_err());
+        assert_eq!(scheduler.counts(), before);
+    }
+
+    #[test]
+    fn expired_preferred_task_retries_with_new_attempt() {
+        let now = Instant::now();
+        let mut scheduler = TaskScheduler::new([7], 2).unwrap();
+        let previous = scheduler.lease_many_preferred(
+            1, now, Duration::from_secs(1), &[7], 1, 1).unwrap().remove(0);
+        let later = now + Duration::from_secs(2);
+        let current = scheduler.lease_many_preferred(
+            2, later, Duration::from_secs(1), &[7], 1, 1).unwrap().remove(0);
+        assert_eq!(previous.attempt, 1);
+        assert_eq!(current.attempt, 2);
+        assert!(!scheduler.finish_at(&previous, true, later));
+        assert!(scheduler.finish_at(&current, true, later));
     }
 }
