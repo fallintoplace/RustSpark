@@ -74,17 +74,21 @@ fn parse_records_with_limits(
         let mut records = Vec::new();
         let mut total_cells = 0usize;
         for line in input.split('\n').filter(|line| !line.is_empty()) {
-            // Stop at the first impossible column before allocating all
-            // fields from an otherwise byte-bounded but extremely wide line.
-            let fields = line.split(',').take(MAX_CSV_COLUMNS + 1)
-                .map(str::to_owned).collect::<Vec<_>>();
-            if fields.len() > MAX_CSV_COLUMNS {
-                return Err(Error::Execution("CSV column count exceeds 4096 limit".into()));
-            }
-            admit_record(&mut records, fields, &mut total_cells, max_cells)?;
-            if records.len() > max_records {
+            if records.len() >= max_records {
                 return Err(Error::Execution("CSV row count limit exceeded".into()));
             }
+            // Validate shape and the remaining cell budget before cloning
+            // UTF-8 fields. A rejected wide row must not allocate thousands
+            // of Strings or a large temporary vector.
+            let width = line.split(',').take(MAX_CSV_COLUMNS + 1).count();
+            if width > MAX_CSV_COLUMNS {
+                return Err(Error::Execution("CSV column count exceeds 4096 limit".into()));
+            }
+            total_cells.checked_add(width)
+                .filter(|&count| count <= max_cells)
+                .ok_or_else(|| Error::Execution("CSV total cell count exceeds memory budget".into()))?;
+            let fields = line.split(',').map(str::to_owned).collect::<Vec<_>>();
+            admit_record(&mut records, fields, &mut total_cells, max_cells)?;
         }
         return Ok(records);
     }
@@ -741,5 +745,24 @@ mod fallible_eager_csv_materialization_regressions {
         assert!(typed.rows().unwrap().iter().any(|row| row.iter().any(Value::is_null)));
         assert!(matches!(from_csv_str_typed(&format!("{header}\n1,2\n"),
             typed.schema().clone()), Err(Error::Parse(_))));
+    }
+}
+
+#[cfg(test)]
+mod unquoted_csv_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn checks_row_column_and_cell_limits_without_changing_records() {
+        let input = "city,amount\nBerlin,10\n";
+        assert_eq!(parse_records_with_limits(input, 2, 4).unwrap(),
+            vec![vec!["city", "amount"], vec!["Berlin", "10"]]);
+        assert!(parse_records_with_limits(input, 1, 4).is_err());
+        assert!(parse_records_with_limits(input, 2, 3).is_err());
+        assert!(parse_records_with_limits(&",".repeat(MAX_CSV_COLUMNS), 2,
+            MAX_CSV_CELLS).is_err());
+        assert!(parse_records_with_limits("\n\n", 0, 0).unwrap().is_empty());
+        assert_eq!(parse_records_with_limits("é,🙂", 1, 2).unwrap(),
+            vec![vec!["é", "🙂"]]);
     }
 }
