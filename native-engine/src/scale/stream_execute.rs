@@ -404,7 +404,9 @@ fn infer(
                         crate::schema::DataType::Float => crate::schema::DataType::Float,
                         _ => return Err(Error::Type("SUM requires numeric input".into())),
                     },
-                    AggregateOp::Min(expr) | AggregateOp::Max(expr) => expr.output_type(&source)?,
+                    AggregateOp::Min(expr) | AggregateOp::Max(expr) |
+                    AggregateOp::First(expr, _) | AggregateOp::Last(expr, _) =>
+                        expr.output_type(&source)?,
                     _ => return Err(Error::Unsupported(
                         "spilled GROUP BY does not support this aggregate".into())),
                 };
