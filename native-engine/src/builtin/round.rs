@@ -26,7 +26,16 @@ fn round(args: &[Value]) -> Result<Value> {
             .map_err(|_| Error::Execution("ROUND integer overflow".into()));
     }
     let Some(number) = super::number(&args[0])? else { return Ok(Value::Null) };
-    let scale = 10_f64.powi(digits.unsigned_abs() as i32);
+    // Precision is restricted to [-15, 15]. Lookup avoids recomputing
+    // the same decimal exponent for each row in a ROUND projection.
+    const DECIMAL_SCALES: [f64; 16] = [
+        1.0, 10.0, 100.0, 1_000.0,
+        10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0,
+        100_000_000.0, 1_000_000_000.0, 10_000_000_000.0,
+        100_000_000_000.0, 1_000_000_000_000.0, 10_000_000_000_000.0,
+        100_000_000_000_000.0, 1_000_000_000_000_000.0,
+    ];
+    let scale = DECIMAL_SCALES[digits.unsigned_abs() as usize];
     let result = if digits >= 0 {
         if number.abs() > f64::MAX / scale { return super::finite(number); }
         (number * scale).round() / scale
@@ -131,5 +140,36 @@ mod inexact_large_negative_scale_regressions {
             Value::Float(160.0));
         assert_eq!(round(&[Value::Float(-155.0), Value::Integer(-1)]).unwrap(),
             Value::Float(-160.0));
+    }
+}
+
+#[cfg(test)]
+mod decimal_scale_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn every_supported_scale_retains_decimal_rounding() {
+        for precision in -15..=15_i64 {
+            for value in [
+                0.0, -0.0, 1.23456789, -2.3456789, 12_345.6789,
+                1e100, -1e100, f64::MAX,
+            ] {
+                // Compare with the original reference formula, including
+                // its guard against floating-point overflow and lost ULPs.
+                let scale = 10_f64.powi(precision.unsigned_abs() as i32);
+                let reference = if precision >= 0 {
+                    if value.abs() > f64::MAX / scale { value }
+                    else { (value * scale).round() / scale }
+                } else if value.abs() >= scale * (1u64 << 53) as f64 {
+                    value
+                } else {
+                    (value / scale).round() * scale
+                };
+                assert_eq!(round(&[Value::Float(value), Value::Integer(precision)]).unwrap(),
+                    Value::Float(reference), "value={value}, precision={precision}");
+            }
+        }
+        assert_eq!(round(&[Value::Null, Value::Integer(2)]).unwrap(), Value::Null);
+        assert!(round(&[Value::Float(1.0), Value::Integer(16)]).is_err());
     }
 }
