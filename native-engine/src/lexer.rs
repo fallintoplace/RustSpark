@@ -84,6 +84,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             while let Some(next) = chars.peek() {
                 if next.is_ascii_alphanumeric() || *next == '_' {
                     value.push(chars.next().expect("peeked character"));
+                } else if *next == '.' {
+                    // TPC-H references aliased columns as n1.n_name and
+                    // l1.l_orderkey. Only absorb the dot before another
+                    // identifier, not before '*' or a numeric literal.
+                    let mut lookahead = chars.clone();
+                    let _ = lookahead.next();
+                    if lookahead.next().is_some_and(|ch|
+                        ch.is_ascii_alphabetic() || ch == '_') {
+                        value.push(chars.next().expect("peeked dot"));
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
