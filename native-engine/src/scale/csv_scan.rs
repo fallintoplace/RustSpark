@@ -32,6 +32,13 @@ fn preflight_record_width(record: &str, max_columns: usize) -> Result<()> {
     Ok(())
 }
 
+fn append_record_bytes(buffer: &mut Vec<u8>, span: &[u8]) -> Result<()> {
+    buffer.try_reserve(span.len())
+        .map_err(|_| Error::Execution("CSV record buffer allocation failed".into()))?;
+    buffer.extend_from_slice(span);
+    Ok(())
+}
+
 // Decode a borrowed CSV cell directly. Plain numeric fields never need an
 // intermediate String, while TEXT values still retain their own allocation.
 fn parse_cell(value: &str, field: &Field) -> Result<Value> {
@@ -44,7 +51,13 @@ fn parse_cell(value: &str, field: &Field) -> Result<Value> {
         return Ok(Value::Null);
     }
     match field.data_type {
-        DataType::Text => Ok(Value::Text(value.to_owned())),
+        DataType::Text => {
+            let mut text = String::new();
+            text.try_reserve_exact(value.len())
+                .map_err(|_| Error::Execution("CSV text cell allocation failed".into()))?;
+            text.push_str(value);
+            Ok(Value::Text(text))
+        },
         DataType::Boolean => {
             if value.eq_ignore_ascii_case("true") { Ok(Value::Boolean(true)) }
             else if value.eq_ignore_ascii_case("false") { Ok(Value::Boolean(false)) }
@@ -126,7 +139,7 @@ impl<R: BufRead> CsvRows<R> {
                         return Err(Error::Execution("CSV record exceeds byte limit".into()));
                     }
                     let after_separator = available[plain - 1] == b',';
-                    bytes.extend_from_slice(&available[..plain]);
+                    append_record_bytes(&mut bytes, &available[..plain])?;
                     self.reader.consume(plain);
                     state = if after_separator { QuoteState::Start }
                         else { QuoteState::Unquoted };
@@ -142,7 +155,7 @@ impl<R: BufRead> CsvRows<R> {
                     if bytes.len().saturating_add(plain) > self.max_record_bytes {
                         return Err(Error::Execution("CSV record exceeds byte limit".into()));
                     }
-                    bytes.extend_from_slice(&available[..plain]);
+                    append_record_bytes(&mut bytes, &available[..plain])?;
                     self.reader.consume(plain);
                     continue;
                 }
@@ -157,7 +170,7 @@ impl<R: BufRead> CsvRows<R> {
                     if bytes.len().saturating_add(plain) > self.max_record_bytes {
                         return Err(Error::Execution("CSV record exceeds byte limit".into()));
                     }
-                    bytes.extend_from_slice(&available[..plain]);
+                    append_record_bytes(&mut bytes, &available[..plain])?;
                     self.reader.consume(plain);
                     continue;
                 }
@@ -197,7 +210,7 @@ impl<R: BufRead> CsvRows<R> {
                     break;
                 }
             }
-            bytes.extend_from_slice(&available[..consumed]);
+            append_record_bytes(&mut bytes, &available[..consumed])?;
             self.reader.consume(consumed);
             if complete { break; }
         }
@@ -218,7 +231,9 @@ impl<R: BufRead> CsvRows<R> {
             let line = text.strip_suffix('\n').unwrap_or(text);
             if line.is_empty() { return Ok(None); }
             let mut parts = line.split(',');
-            let mut values = Vec::with_capacity(self.schema.len());
+            let mut values = Vec::new();
+            values.try_reserve_exact(self.schema.len())
+                .map_err(|_| Error::Execution("CSV row allocation failed".into()))?;
             for field in self.schema.fields() {
                 let part = parts.next().ok_or_else(||
                     Error::Parse("CSV row width differs from declared schema".into()))?;
@@ -625,5 +640,38 @@ mod streaming_csv_quoted_width_preflight_regressions {
         let input = format!("id,body\n\"x,y\",{}\n", "v,".repeat(4096));
         let mut rows = CsvRows::new(Cursor::new(input), schema(), 32 * 1024).unwrap();
         assert!(rows.next().unwrap().unwrap_err().to_string().contains("row width"));
+    }
+}
+
+#[cfg(test)]
+mod fallible_record_and_text_materialization_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn tiny_source_buffers_preserve_quoted_unicode_and_large_plain_text() {
+        let schema = Schema::new(vec![
+            Field::new("label", DataType::Text, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap();
+        let quoted = "é🙂,東京".repeat(1024);
+        let plain = "abc東京".repeat(1024);
+        let csv = format!("label,n\n\"{quoted}\",1\n{plain},2\n");
+        let rows = CsvRows::new(BufReader::with_capacity(7, Cursor::new(csv)),
+            schema, 128 * 1024).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Text(quoted), Value::Integer(1)],
+            vec![Value::Text(plain), Value::Integer(2)],
+        ]);
+    }
+
+    #[test]
+    fn record_budget_still_rejects_overlong_plain_text() {
+        let schema = Schema::new(vec![Field::new("label", DataType::Text, false)]).unwrap();
+        let input = format!("label\n{}\n", "x".repeat(128));
+        let mut rows = CsvRows::new(BufReader::with_capacity(3, Cursor::new(input)),
+            schema, 64).unwrap();
+        assert!(rows.next().unwrap().is_err());
+        assert!(rows.next().is_none());
     }
 }
