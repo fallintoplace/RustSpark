@@ -705,6 +705,24 @@ impl Parser {
                 self.expect_symbol(')')?;
                 Ok(Expr::Call { name: word, args })
             }
+            // Spark allows common scalar type names as casting functions.
+            Some(Token::Word(word))
+                if ["BIGINT", "DOUBLE", "BOOLEAN", "STRING"]
+                    .iter().any(|name| word.eq_ignore_ascii_case(name))
+                    && self.peek() == Some(&Token::Symbol('(')) =>
+            {
+                let target = match word.to_ascii_uppercase().as_str() {
+                    "BIGINT" => DataType::Integer,
+                    "DOUBLE" => DataType::Float,
+                    "BOOLEAN" => DataType::Boolean,
+                    "STRING" => DataType::Text,
+                    _ => unreachable!(),
+                };
+                self.expect_symbol('(')?;
+                let expression = self.expression(0)?;
+                self.expect_symbol(')')?;
+                Ok(Expr::Cast { expression: Box::new(expression), target })
+            }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
                 if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
