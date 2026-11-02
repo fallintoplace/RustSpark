@@ -1492,7 +1492,11 @@ impl Parser {
             if !self.take_word("FIRST") && !self.take_word("NEXT") {
                 return Err(Error::Parse("expected FIRST or NEXT after FETCH".into()));
             }
-            let requested = self.usize_literal()?;
+            let requested = if self.peek_word("ROW") || self.peek_word("ROWS") {
+                1
+            } else {
+                self.usize_literal()?
+            };
             if !self.take_word("ROWS") {
                 self.expect_word("ROW")?;
             }
