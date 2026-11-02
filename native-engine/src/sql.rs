@@ -604,6 +604,25 @@ impl Parser {
                     Ok(Expr::Call { name: "locate".into(), args })
                 }
             }
+            Some(Token::Word(word)) if (word.eq_ignore_ascii_case("SUBSTRING")
+                || word.eq_ignore_ascii_case("SUBSTR"))
+                && self.peek() == Some(&Token::Symbol('(')) => {
+                self.expect_symbol('(')?;
+                let value = self.expression(0)?;
+                let mut args = vec![value];
+                if self.take_word("FROM") {
+                    args.push(self.expression(0)?);
+                    if self.take_word("FOR") {
+                        args.push(self.expression(0)?);
+                    }
+                } else {
+                    while self.take_symbol(',') {
+                        args.push(self.expression(0)?);
+                    }
+                }
+                self.expect_symbol(')')?;
+                Ok(Expr::Call { name: "substring".into(), args })
+            }
             Some(Token::Word(word)) if self.peek() == Some(&Token::Symbol('(')) => {
                 self.expect_symbol('(')?;
                 if word.eq_ignore_ascii_case("COUNT") && self.take_symbol('*') {
@@ -2455,5 +2474,32 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_substring_from_for_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor::execute};
+
+    #[test]
+    fn accepts_standard_substring_syntax_used_by_tpch_q22() {
+        let query = "SELECT SUBSTRING('1234567' FROM 1 FOR 2) AS cntrycode";
+        let rows = execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("12".into())]]);
+        let query = "SELECT SUBSTRING('abcde' FROM 3) AS suffix";
+        let rows = execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("cde".into())]]);
+    }
+
+    #[test]
+    fn comma_arguments_remain_compatible() {
+        let query = "SELECT SUBSTR('abcde', 2, 2) AS x";
+        let rows = execute(&parse_sql(query).unwrap(), &Catalog::new())
+            .unwrap().rows().unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("bc".into())]]);
+        assert!(parse_sql("SELECT SUBSTRING('abc' FROM 1 FOR 2, 3)").is_err());
     }
 }
