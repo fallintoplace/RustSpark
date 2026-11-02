@@ -102,6 +102,22 @@ fn filtered_aggregate(op: AggregateOp, condition: Expr) -> AggregateOp {
     }
 }
 
+/// Match a sort expression against an aggregate already computed by
+/// the GROUP BY. Do not re-evaluate SUM/COUNT as scalar functions.
+fn order_aggregate_alias(expr: &Expr, aggregates: &[AggregateItem]) -> Option<String> {
+    let Expr::Call { name, args } = expr else { return None };
+    let op = match (name.to_ascii_uppercase().as_str(), args.as_slice()) {
+        ("__SPARK_COUNT_STAR", []) => AggregateOp::CountAll,
+        ("COUNT", [value]) => AggregateOp::Count(value.clone()),
+        ("SUM", [value]) => AggregateOp::Sum(value.clone()),
+        ("AVG", [value]) | ("MEAN", [value]) => AggregateOp::Avg(value.clone()),
+        ("MIN", [value]) => AggregateOp::Min(value.clone()),
+        ("MAX", [value]) => AggregateOp::Max(value.clone()),
+        _ => return None,
+    };
+    aggregates.iter().find(|item| item.op == op).map(|item| item.alias.clone())
+}
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
@@ -1291,7 +1307,15 @@ impl Parser {
             }
             plan = match plan {
                 Plan::Project { input, selections } => {
+                    let grouped = match input.as_ref() {
+                        Plan::Aggregate { aggregates, .. } => Some(aggregates.as_slice()),
+                        _ => None,
+                    };
                     let resolved = keys.into_iter().map(|mut key| {
+                        if let Some(alias) = grouped.and_then(|items|
+                            order_aggregate_alias(&key.expression, items)) {
+                            key.expression = Expr::Column(alias);
+                        }
                         key.expression = rewrite_order_aliases(key.expression, &selections);
                         key
                     }).collect();
@@ -2455,5 +2479,36 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_order_aggregate_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn orders_by_selected_sum_and_count_expressions() {
+        let mut catalog = Catalog::new();
+        catalog.register("lineitem", Batch::from_rows(
+            Schema::new(vec![
+                Field::new("l_returnflag", DataType::Text, false),
+                Field::new("l_quantity", DataType::Integer, false),
+            ]).unwrap(),
+            vec![
+                vec![Value::Text("A".into()), Value::Integer(10)],
+                vec![Value::Text("B".into()), Value::Integer(25)],
+                vec![Value::Text("A".into()), Value::Integer(20)],
+            ],
+        ).unwrap()).unwrap();
+        let sql = "SELECT l_returnflag, SUM(l_quantity) AS sum_qty FROM lineitem GROUP BY l_returnflag ORDER BY SUM(l_quantity) DESC";
+        let rows = execute(&parse_sql(sql).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows, vec![
+            vec![Value::Text("A".into()), Value::Integer(30)],
+            vec![Value::Text("B".into()), Value::Integer(25)],
+        ]);
+        let sql = "SELECT l_returnflag, COUNT(*) AS n FROM lineitem GROUP BY l_returnflag ORDER BY COUNT(*) DESC";
+        let rows = execute(&parse_sql(sql).unwrap(), &catalog).unwrap().rows().unwrap();
+        assert_eq!(rows[0][0], Value::Text("A".into()));
     }
 }
