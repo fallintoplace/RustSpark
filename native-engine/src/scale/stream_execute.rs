@@ -1907,3 +1907,75 @@ mod computed_group_by_stream_tests {
         assert_eq!(rows_sorted(actual), rows_sorted(expected));
     }
 }
+
+#[cfg(test)]
+mod computed_external_sort_sql_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    fn collect(plan: &Plan, options: &StreamOptions) -> Result<Vec<Vec<Value>>> {
+        let source = execute(plan, &FileCatalog::new(), options, QueryControl::default())?;
+        let batches = source.collect::<Result<Vec<_>>>()?;
+        Ok(batches.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn sorts_expression_keys_across_multiple_runs_and_restores_schema() {
+        let query = "SELECT id, score FROM \
+(VALUES (1, 7), (2, 3), (3, 4), (4, 5), (5, 1)) AS t(id, score) \
+ORDER BY score + id DESC, id ASC";
+        let plan = sql::parse_sql(query).unwrap();
+        let options = StreamOptions {
+            sort_run_rows: 2, merge_fan_in: 2, batch_rows: 2,
+            ..StreamOptions::default()
+        };
+        let expected = executor::execute(&plan, &Catalog::new()).unwrap();
+        assert_eq!(collect(&plan, &options).unwrap(), expected.rows().unwrap());
+        assert_eq!(output_schema(&plan, &FileCatalog::new(), &options).unwrap(),
+            expected.schema().clone());
+    }
+
+    #[test]
+    fn temporary_column_names_do_not_clobber_user_fields() {
+        use crate::{expr::BinaryOp, sort::SortKey};
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("__rustspark_sort_key_0", DataType::Integer, false),
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![
+            vec![Value::Integer(30), Value::Integer(2)],
+            vec![Value::Integer(10), Value::Integer(1)],
+        ]).unwrap();
+        let plan = Plan::Sort {
+            input: Box::new(Plan::Values { batch: input.clone() }),
+            keys: vec![SortKey::ascending(Expr::binary(
+                Expr::Column("n".into()), BinaryOp::Multiply,
+                Expr::Literal(Value::Integer(-1)),
+            ))],
+        };
+        let options = StreamOptions { sort_run_rows: 1, merge_fan_in: 2,
+            ..StreamOptions::default() };
+        let actual = collect(&plan, &options).unwrap();
+        assert_eq!(actual, vec![
+            vec![Value::Integer(30), Value::Integer(2)],
+            vec![Value::Integer(10), Value::Integer(1)],
+        ]);
+    }
+
+    #[test]
+    fn computed_key_errors_are_not_swallowed_during_spilling() {
+        use crate::{expr::BinaryOp, sort::SortKey};
+        let input = Batch::from_rows(Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+        ]).unwrap(), vec![vec![Value::Integer(0)]]).unwrap();
+        let plan = Plan::Sort {
+            input: Box::new(Plan::Values { batch: input }),
+            keys: vec![SortKey::ascending(Expr::binary(
+                Expr::Literal(Value::Integer(1)), BinaryOp::Divide,
+                Expr::Column("n".into()),
+            ))],
+        };
+        assert!(execute(&plan, &FileCatalog::new(), &StreamOptions::default(),
+            QueryControl::default()).is_err());
+    }
+}
