@@ -369,14 +369,19 @@ fn parse_stream_schema(spec: &str) -> Result<Schema> {
     let fields = spec.split(',').map(|part| {
         let (name, kind) = part.split_once(':')
             .ok_or_else(|| Error::Parse("CSV schema fields must use NAME:TYPE".into()))?;
-        let kind = match kind.trim().to_ascii_lowercase().as_str() {
-            "text" => DataType::Text,
+        let kind = kind.trim().to_ascii_lowercase();
+        let (kind, nullable) = match kind.strip_suffix('!') {
+            Some(required) => (required, false),
+            None => (kind.as_str(), true),
+        };
+        let data_type = match kind {
+            "text" | "string" => DataType::Text,
             "bool" | "boolean" => DataType::Boolean,
-            "int64" | "integer" => DataType::Integer,
-            "float64" | "float" => DataType::Float,
+            "int" | "int64" | "integer" => DataType::Integer,
+            "float" | "float64" | "double" => DataType::Float,
             _ => return Err(Error::Parse(format!("unsupported CSV schema type: {kind}"))),
         };
-        Ok(Field::new(name.trim(), kind, true))
+        Ok(Field::new(name.trim(), data_type, nullable))
     }).collect::<Result<Vec<_>>>()?;
     Schema::new(fields)
 }
@@ -1006,5 +1011,33 @@ mod cli_deadline_contract_tests {
             &plan, &Catalog::new(), executor::ExecutionOptions::default(), &guard,
         ).unwrap_err();
         assert!(err.to_string().contains("deadline"));
+    }
+}
+
+#[cfg(test)]
+mod streaming_csv_schema_contract_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_required_columns_and_both_streaming_type_dialects() {
+        let schema = parse_stream_schema(
+            "id:int64!,category:string,amount:double!,active:bool!",
+        ).unwrap();
+        assert_eq!(schema.fields(), &[
+            Field::new("id", DataType::Integer, false),
+            Field::new("category", DataType::Text, true),
+            Field::new("amount", DataType::Float, false),
+            Field::new("active", DataType::Boolean, false),
+        ]);
+        let compact = parse_stream_schema("n:int,m:float,flag:boolean").unwrap();
+        assert_eq!(compact.fields()[0].data_type, DataType::Integer);
+        assert!(compact.fields().iter().all(|field| field.nullable));
+    }
+
+    #[test]
+    fn rejects_invalid_required_types_and_duplicate_names() {
+        assert!(parse_stream_schema("id:unknown!").is_err());
+        assert!(parse_stream_schema("id:int!!").is_err());
+        assert!(parse_stream_schema("id:int,ID:text").is_err());
     }
 }
