@@ -443,7 +443,7 @@ mod borrowed_json_object_keys_tests {
 
     #[test]
     fn direct_members_and_depth_preserve_escaped_and_duplicate_key_semantics() {
-        let doc = r#"{"target":1,"t\\u0061rget":[true],"other":{"nested":42}}"#;
+        let doc = r#"{"target":1,"t\u0061rget":[true],"other":{"nested":42}}"#;
         assert_eq!(evaluate(&[Value::Text(doc.into()),
             Value::Text("$.target".into())]).unwrap(), Value::Text("ARRAY".into()));
         assert_eq!(json_depth(&[Value::Text(doc.into())]).unwrap(), Value::Integer(3));
