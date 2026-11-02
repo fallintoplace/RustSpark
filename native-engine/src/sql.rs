@@ -584,6 +584,28 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("FALSE") => {
                 Ok(Expr::Literal(Value::Boolean(false)))
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("EXTRACT")
+                && self.peek() == Some(&Token::Symbol('(')) => {
+                self.expect_symbol('(')?;
+                let unit = self.identifier()?;
+                if !unit.eq_ignore_ascii_case("YEAR") {
+                    return Err(Error::Unsupported(format!("native EXTRACT field: {unit}")));
+                }
+                self.expect_word("FROM")?;
+                let input = self.expression(0)?;
+                self.expect_symbol(')')?;
+                // The native TPC-H date transport is fixed-width ISO text.
+                // Reuse the typed string and integer casts rather than adding
+                // a second date parser to the expression evaluator.
+                Ok(Expr::Cast {
+                    expression: Box::new(Expr::Call {
+                        name: "substring".into(),
+                        args: vec![input, Expr::Literal(Value::Integer(1)),
+                            Expr::Literal(Value::Integer(4))],
+                    }),
+                    target: DataType::Integer,
+                })
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("POSITION")
                 && self.peek() == Some(&Token::Symbol('(')) =>
             {
@@ -2455,5 +2477,29 @@ mod uncorrelated_exists_conjunction_tests {
         assert!(parse_sql(
             "SELECT n FROM data WHERE EXISTS (SELECT 1) AND n > 1 OR n = 0"
         ).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_extract_year_tests {
+    use super::*;
+    use crate::{batch::Batch, catalog::Catalog, executor::execute};
+
+    #[test]
+    fn extracts_year_from_tpch_iso_date_column() {
+        let mut catalog = Catalog::new();
+        catalog.register("orders", Batch::from_rows(
+            Schema::new(vec![Field::new("o_orderdate", DataType::Text, true)]).unwrap(),
+            vec![vec![Value::Text("1995-04-10".into())], vec![Value::Null]],
+        ).unwrap()).unwrap();
+        let plan = parse_sql("SELECT EXTRACT(YEAR FROM o_orderdate) AS o_year FROM orders").unwrap();
+        assert_eq!(execute(&plan, &catalog).unwrap().rows().unwrap(), vec![
+            vec![Value::Integer(1995)], vec![Value::Null],
+        ]);
+    }
+
+    #[test]
+    fn rejects_unsupported_extract_fields() {
+        assert!(parse_sql("SELECT EXTRACT(MONTH FROM x) FROM orders").is_err());
     }
 }
