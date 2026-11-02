@@ -605,7 +605,7 @@ impl Parser {
                 let expression = self.expression(0)?;
                 self.expect_word("AS")?;
                 let target = match self.identifier()?.to_ascii_uppercase().as_str() {
-                    "BIGINT" | "INT" | "INTEGER" => DataType::Integer,
+                    "BIGINT" | "LONG" | "INT" | "INTEGER" => DataType::Integer,
                     "DOUBLE" | "FLOAT" | "REAL" => DataType::Float,
                     "BOOLEAN" | "BOOL" => DataType::Boolean,
                     "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
@@ -619,7 +619,7 @@ impl Parser {
                 let expression = self.expression(0)?;
                 self.expect_word("AS")?;
                 let target = match self.identifier()?.to_ascii_uppercase().as_str() {
-                    "INT" | "INTEGER" | "BIGINT" | "INT64" => crate::schema::DataType::Integer,
+                    "INT" | "INTEGER" | "BIGINT" | "LONG" | "INT64" => crate::schema::DataType::Integer,
                     "FLOAT" | "FLOAT64" | "DOUBLE" => crate::schema::DataType::Float,
                     "BOOL" | "BOOLEAN" => crate::schema::DataType::Boolean,
                     "STRING" | "TEXT" | "VARCHAR" => crate::schema::DataType::Text,
