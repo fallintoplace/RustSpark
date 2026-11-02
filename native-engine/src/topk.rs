@@ -1,12 +1,12 @@
 //! Top-K selection using O(k) candidate memory instead of a full sort.
-use std::{borrow::Cow, cmp::Ordering, collections::BinaryHeap, sync::Arc};
+use std::{borrow::Cow, cmp::Ordering, collections::BinaryHeap};
 use crate::{batch::Batch, expr::Expr, scalar::Value, sort::SortKey, Result};
 
 #[derive(Clone, Debug)]
 struct Candidate<'a> {
     row: usize,
     values: Vec<Cow<'a, Value>>,
-    options: Arc<Vec<(bool, bool)>>,
+    options: &'a [(bool, bool)],
 }
 
 fn compare(left: &Candidate<'_>, right: &Candidate<'_>) -> Ordering {
@@ -55,7 +55,7 @@ impl Ord for ColumnCandidate<'_> {
 }
 
 // A common ORDER BY expression has only one computed key. It does not
-// need a Vec<Cow<Value>> and an Arc clone for every candidate row.
+// need a Vec<Cow<Value>> or shared sort options for every candidate row.
 #[derive(Debug)]
 struct ExpressionCandidate {
     row: usize,
@@ -119,7 +119,7 @@ fn top_k_columns(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Batch> {
 // Both borrowed and owned consumers use the same bounded candidate heap.
 // Returning row indices lets the owned path transfer TEXT payloads directly.
 fn mixed_top_k_indices(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Vec<usize>> {
-    let options = Arc::new(keys.iter().map(|key| (key.descending, key.nulls_first)).collect());
+    let options = keys.iter().map(|key| (key.descending, key.nulls_first)).collect::<Vec<_>>();
     let key_columns = keys.iter().map(|key| match &key.expression {
         Expr::Column(name) => {
             let index = batch.schema().column(name)?;
@@ -141,7 +141,7 @@ fn mixed_top_k_indices(batch: &Batch, keys: &[SortKey], k: usize) -> Result<Vec<
             heap.push(Candidate {
                 row,
                 values: std::mem::replace(&mut scratch, Vec::with_capacity(keys.len())),
-                options: Arc::clone(&options),
+                options: &options,
             });
         } else if let Some(mut worst) = heap.peek_mut() {
             let order = scratch.iter().zip(&worst.values).zip(options.iter())
