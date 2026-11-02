@@ -3,14 +3,18 @@ use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
 
+// Single and multi-argument CONCAT paths reserve with the same error contract.
+fn reserved_output(length: usize) -> Result<String> {
+    let mut output = reserved_output(length)?;
+    Ok(output)
+}
+
 fn concat(args: &[Value]) -> Result<Value> {
     if let [Value::Text(text)] = args {
         if text.len() > 16 * 1024 * 1024 {
             return Err(Error::Execution("CONCAT output exceeds 16 MiB".into()));
         }
-        let mut output = String::new();
-        output.try_reserve_exact(text.len())
-            .map_err(|_| Error::Execution("CONCAT output allocation failed".into()))?;
+        let mut output = reserved_output(text.len())?;
         output.push_str(text);
         return Ok(Value::Text(output));
     }
@@ -90,5 +94,21 @@ mod fallible_concat_reservation_tests {
         let multiple = concat(&[Value::Text("é".into()), Value::Text("🙂".into())]).unwrap();
         assert_eq!(multiple, one);
         assert_eq!(concat(&[Value::Text("a".into()), Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod shared_concat_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn same_size_inputs_agree_across_argument_counts() {
+        for text in ["", "a", "é🙂", "x".repeat(1024).as_str()] {
+            let single = concat(&[Value::Text(text.into())]).unwrap();
+            let split = concat(&[
+                Value::Text(String::new()), Value::Text(text.into()),
+            ]).unwrap();
+            assert_eq!(single, split);
+        }
     }
 }
