@@ -610,14 +610,11 @@ fn lower(
             }
             let source = child(input)?;
             let (source, schema): (BatchStream, Schema) = if needs_projection {
-                let fields = projections.iter().map(|selection| {
-                    Ok(Field::new(
-                        &selection.alias,
-                        selection.expression.output_type(&schema)?,
-                        true,
-                    ))
-                }).collect::<Result<Vec<_>>>()?;
-                let projected_schema = Schema::new(fields)?;
+                // Build the exact schema used by ProjectStream, including
+                // source nullability and nonnullable computed predicates.
+                let projected_schema = crate::project::project(
+                    &Batch::empty(schema.clone()), &projections
+                )?.schema().clone();
                 (Box::new(ProjectStream::new(source, projections, control.clone())),
                  projected_schema)
             } else {
