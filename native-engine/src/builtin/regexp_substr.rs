@@ -2,6 +2,14 @@ use super::{Function, regex_support};
 use crate::{scalar::Value, schema::DataType, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+fn copy_match(text: &str) -> Result<Value> {
+    let mut output = String::new();
+    output.try_reserve_exact(text.len())
+        .map_err(|_| crate::Error::Execution("REGEXP_SUBSTR output allocation failed".into()))?;
+    output.push_str(text);
+    Ok(Value::Text(output))
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null) };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null) };
@@ -15,7 +23,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let width = if pattern == "[A-Za-z]" { 1 } else {
             text[start..].bytes().take_while(u8::is_ascii_alphabetic).count()
         };
-        return Ok(Value::Text(text[start..start + width].to_owned()));
+        return copy_match(&text[start..start + width]);
     }
     // Plain start-anchored identifiers cannot match anywhere else. Avoid
     // compiling a regex for a common token-extraction predicate.
@@ -23,11 +31,8 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         && prefix.len() <= 4095
         && prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
     {
-        return Ok(if text.starts_with(prefix) {
-            Value::Text(prefix.to_owned())
-        } else {
-            Value::Null
-        });
+        return if text.starts_with(prefix) { copy_match(prefix) }
+            else { Ok(Value::Null) };
     }
     if pattern == "[0-9]" || pattern == "[0-9]+" {
         // Byte-wise digit searches preserve UTF-8 boundaries because all
@@ -37,16 +42,18 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let width = if pattern == "[0-9]" { 1 } else {
             text[start..].bytes().take_while(u8::is_ascii_digit).count()
         };
-        return Ok(Value::Text(text[start..start + width].to_owned()));
+        return copy_match(&text[start..start + width]);
     }
     if pattern == ".+" {
         // The first greedy nonempty dot run ends before the next LF.
-        return Ok(text.split('\n').find(|part| !part.is_empty())
-            .map_or(Value::Null, |part| Value::Text(part.to_owned())));
+        return match text.split('\n').find(|part| !part.is_empty()) {
+            Some(part) => copy_match(part),
+            None => Ok(Value::Null),
+        };
     }
     if pattern == ".*" {
         // A greedy unanchored dot-star match starts at zero and stops at LF.
-        return Ok(Value::Text(text.split('\n').next().unwrap_or("").to_owned()));
+        return copy_match(text.split('\n').next().unwrap_or(""));
     }
     if pattern == "." {
         // The default regex dot matches one Unicode scalar other than LF.
@@ -55,11 +62,14 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
     if pattern.len() <= 4096 && pattern.chars().all(|ch|
         ch.is_alphanumeric() || ch == '_') {
-        return Ok(text.find(pattern)
-            .map_or(Value::Null, |_| Value::Text(pattern.to_owned())));
+        return if text.contains(pattern) { copy_match(pattern) }
+            else { Ok(Value::Null) };
     }
     let pattern = regex_support::compile(pattern)?;
-    Ok(pattern.find(text).map_or(Value::Null, |m| Value::Text(m.as_str().to_string())))
+    match pattern.find(text) {
+        Some(matched) => copy_match(matched.as_str()),
+        None => Ok(Value::Null),
+    }
 }
 pub(super) const FUNCTIONS: &[Function] = &[Function {
     name: "regexp_substr", min_args: 2, max_args: 2, result_type: output, call: evaluate,
@@ -252,5 +262,28 @@ mod ascii_alpha_substr_regressions {
         assert_eq!(evaluate(&[
             Value::Null, Value::Text("[A-Za-z]+".into())
         ]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod fallible_regexp_substr_copy_tests {
+    use super::*;
+
+    fn match_value(input: &str, pattern: &str) -> Value {
+        evaluate(&[Value::Text(input.into()), Value::Text(pattern.into())]).unwrap()
+    }
+
+    #[test]
+    fn copies_fast_path_and_compiled_matches_without_semantic_changes() {
+        assert_eq!(match_value("é🙂abc123", "[A-Za-z]+"), Value::Text("abc".into()));
+        assert_eq!(match_value("é🙂abc123", "[0-9]+"), Value::Text("123".into()));
+        assert_eq!(match_value("abc\nxyz", ".+"), Value::Text("abc".into()));
+        assert_eq!(match_value("abc\nxyz", ".*"), Value::Text("abc".into()));
+        assert_eq!(match_value("é🙂abc", "."), Value::Text("é".into()));
+        assert_eq!(match_value("é🙂abc", "🙂a"), Value::Text("🙂a".into()));
+        assert_eq!(match_value("abc123", "^abc"), Value::Text("abc".into()));
+        assert_eq!(match_value("aab123", "a+b"), Value::Text("aab".into()));
+        assert_eq!(match_value("abc", "[0-9]+"), Value::Null);
+        assert_eq!(evaluate(&[Value::Null, Value::Text(".".into())]).unwrap(), Value::Null);
     }
 }

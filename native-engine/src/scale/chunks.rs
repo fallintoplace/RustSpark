@@ -20,6 +20,18 @@ fn initial_row_capacity(hint: (usize, Option<usize>), limit: usize) -> usize {
     lower.min(limit).max(upper.unwrap_or(256).min(limit).min(256))
 }
 
+
+fn reserve_row_slot(columns: &mut [Vec<Value>], first_capacity: usize) -> Result<()> {
+    for column in columns {
+        if column.len() == column.capacity() {
+            column.try_reserve(first_capacity.max(1)).map_err(|_| {
+                Error::Execution("row batch column allocation failed".into())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub struct RowBatcher<I> {
     input: I,
     schema: Schema,
@@ -129,12 +141,17 @@ where I: Iterator<Item = Result<Vec<Value>>>
                         self.pending_row = Some(row);
                         break;
                     }
-                    if row_count == 0 {
-                        // Preserve the original bounded reservation heuristic
-                        // after schema, type, and byte-budget admission.
-                        for column in &mut columns {
-                            column.reserve(capacity);
+                    // Reserve every column before moving any of this row's
+                    // Values. Later growth is fallible too, so a valid prefix
+                    // remains available when memory admission fails.
+                    let reserve = if row_count == 0 { capacity } else { 1 };
+                    if let Err(error) = reserve_row_slot(&mut columns, reserve) {
+                        if row_count == 0 {
+                            self.finished = true;
+                            return Some(Err(error));
                         }
+                        self.pending_error = Some(error);
+                        break;
                     }
                     retained_bytes += row_bytes;
                     for (column, value) in columns.iter_mut().zip(row) {
@@ -716,5 +733,45 @@ mod speculative_row_hint_reservation_tests {
             vec![512, 1]);
         assert_eq!(batches[1].row(0).unwrap(),
             vec![Value::Text("row-512".into())]);
+    }
+}
+
+#[cfg(test)]
+mod fallible_row_batch_growth_tests {
+    use super::*;
+    use crate::schema::{DataType, Field};
+
+    #[test]
+    fn impossible_reservation_returns_a_typed_error() {
+        let mut columns = vec![Vec::<Value>::new()];
+        assert!(matches!(reserve_row_slot(&mut columns, usize::MAX),
+            Err(Error::Execution(_))));
+        assert!(columns[0].is_empty());
+        assert!(reserve_row_slot(&mut [], usize::MAX).is_ok());
+    }
+
+    #[test]
+    fn repeated_growth_keeps_every_row_and_valid_prefix_on_errors() {
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Integer, false),
+            Field::new("s", DataType::Text, true),
+        ]).unwrap();
+        let rows = (0..193).map(|i| Ok(vec![
+            Value::Integer(i),
+            if i % 17 == 0 { Value::Null }
+            else { Value::Text("🙂".repeat(16)) },
+        ]));
+        let batches = RowBatcher::new(rows, schema.clone(), 193).unwrap()
+            .collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 193);
+        assert_eq!(batches[0].value(192, 0).unwrap(), &Value::Integer(192));
+
+        let valid = (0..10).map(|i| Ok(vec![Value::Integer(i), Value::Null]));
+        let invalid = std::iter::once(Ok(vec![Value::Null, Value::Null]));
+        let mut stream = RowBatcher::new(valid.chain(invalid), schema, 32).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().num_rows(), 10);
+        assert!(matches!(stream.next().unwrap(), Err(Error::Type(_))));
+        assert!(stream.next().is_none());
     }
 }

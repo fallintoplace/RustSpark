@@ -9,6 +9,14 @@ fn output(types: &[DataType]) -> Result<DataType> {
     }
 }
 
+fn copy_text(text: &str) -> Result<Value> {
+    let mut result = String::new();
+    result.try_reserve_exact(text.len())
+        .map_err(|_| Error::Execution("native text output allocation failed".into()))?;
+    result.push_str(text);
+    Ok(Value::Text(result))
+}
+
 fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let width = match &args[1] {
@@ -45,7 +53,7 @@ fn slice(args: &[Value], from_right: bool) -> Result<Value> {
     if result.len() > 16 * 1024 * 1024 {
         return Err(Error::Execution("LEFT/RIGHT result exceeds native 16 MiB budget".into()));
     }
-    Ok(Value::Text(result.to_owned()))
+    copy_text(result)
 }
 
 fn left(args: &[Value]) -> Result<Value> { slice(args, false) }
@@ -59,12 +67,17 @@ fn reverse(args: &[Value]) -> Result<Value> {
         return Err(Error::Execution("REVERSE input exceeds 16 MiB".into()));
     }
     if text.is_ascii() {
-        let mut bytes = text.as_bytes().to_vec();
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("REVERSE output allocation failed".into()))?;
+        bytes.extend_from_slice(text.as_bytes());
         bytes.reverse();
         return Ok(Value::Text(String::from_utf8(bytes)
             .expect("reversing ASCII bytes preserves UTF-8")));
     }
-    let mut result = String::with_capacity(text.len());
+    let mut result = String::new();
+    result.try_reserve_exact(text.len())
+        .map_err(|_| Error::Execution("REVERSE output allocation failed".into()))?;
     for character in text.chars().rev() {
         result.push(character);
     }
@@ -80,7 +93,7 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
             return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
         }
         // Compare bytes once instead of decoding every matching Unicode scalar.
-        return Ok(Value::Text(left.to_owned()));
+        return copy_text(left);
     }
     let mut end = 0;
     for (&first, &second) in left.as_bytes().iter().zip(right.as_bytes()) {
@@ -93,7 +106,7 @@ fn common_prefix(args: &[Value]) -> Result<Value> {
     if end > 16 * 1024 * 1024 {
         return Err(Error::Execution("COMMON_PREFIX result exceeds native 16 MiB budget".into()));
     }
-    Ok(Value::Text(left[..end].to_string()))
+    copy_text(&left[..end])
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[
@@ -274,5 +287,25 @@ mod bounded_text_output_regressions {
             Value::Text(long)]), Err(Error::Execution(_))));
         assert_eq!(common_prefix(&[Value::Null, Value::Text("a".into())]).unwrap(),
             Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod fallible_text_slice_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_slices_reversals_and_prefixes() {
+        assert_eq!(left(&[Value::Text("é🙂abc".into()), Value::Integer(2)]).unwrap(),
+            Value::Text("é🙂".into()));
+        assert_eq!(right(&[Value::Text("é🙂abc".into()), Value::Integer(2)]).unwrap(),
+            Value::Text("bc".into()));
+        assert_eq!(reverse(&[Value::Text("é🙂ab".into())]).unwrap(),
+            Value::Text("ba🙂é".into()));
+        assert_eq!(common_prefix(&[Value::Text("é🙂abc".into()),
+            Value::Text("é🙂xyz".into())]).unwrap(), Value::Text("é🙂".into()));
+        assert_eq!(common_prefix(&[Value::Text("é🙂".into()),
+            Value::Text("é🙂".into())]).unwrap(), Value::Text("é🙂".into()));
+        assert_eq!(reverse(&[Value::Null]).unwrap(), Value::Null);
     }
 }

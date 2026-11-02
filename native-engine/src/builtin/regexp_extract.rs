@@ -9,6 +9,14 @@ fn output(types: &[DataType]) -> Result<DataType> {
     Ok(DataType::Text)
 }
 
+fn copy_capture(value: &str) -> Result<Value> {
+    let mut output = String::new();
+    output.try_reserve_exact(value.len())
+        .map_err(|_| Error::Execution("REGEXP_EXTRACT output allocation failed".into()))?;
+    output.push_str(value);
+    Ok(Value::Text(output))
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(text) = super::string(&args[0])? else { return Ok(Value::Null); };
     let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
@@ -27,12 +35,12 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         let width = if pattern == "[0-9]" { 1 } else {
             text[start..].bytes().take_while(u8::is_ascii_digit).count()
         };
-        return Ok(Value::Text(text[start..start + width].to_owned()));
+        return copy_capture(&text[start..start + width]);
     }
     if group == 0 && !pattern.is_empty() && pattern.len() <= 4096 &&
         pattern.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
     {
-        return Ok(Value::Text(text.find(pattern).map_or("", |_| pattern).to_owned()));
+        return copy_capture(text.find(pattern).map_or("", |_| pattern));
     }
     // Group zero can use the anchored prefix directly. Group validation
     // and capture expansion still use the regular expression engine.
@@ -41,9 +49,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             if prefix.len() <= 4095 &&
                 prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
             {
-                return Ok(Value::Text(
-                    if text.starts_with(prefix) { prefix } else { "" }.to_owned()
-                ));
+                return copy_capture(if text.starts_with(prefix) { prefix } else { "" });
             }
         }
     }
@@ -53,10 +59,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
     // Group zero can avoid a capture allocation.
     if group == 0 {
-        return Ok(Value::Text(re.find(text).map_or("", |matched| matched.as_str()).to_owned()));
+        return copy_capture(re.find(text).map_or("", |matched| matched.as_str()));
     }
-    Ok(Value::Text(re.captures(text).and_then(|captures| captures.get(group))
-        .map_or("", |value| value.as_str()).to_owned()))
+    copy_capture(re.captures(text).and_then(|captures| captures.get(group))
+        .map_or("", |value| value.as_str()))
 }
 
 pub(super) const FUNCTIONS: &[Function] = &[Function {
@@ -226,5 +232,29 @@ mod regexp_extract_zero_digit_regressions {
         assert!(evaluate(&[
             Value::Text("123".into()), Value::Text("[0-9]+".into()),
         ]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fallible_regexp_extract_copy_tests {
+    use super::*;
+
+    fn extract_value(input: &str, pattern: &str, group: i64) -> Value {
+        evaluate(&[Value::Text(input.into()), Value::Text(pattern.into()),
+            Value::Integer(group)]).unwrap()
+    }
+
+    #[test]
+    fn captures_and_fast_paths_preserve_empty_string_behavior() {
+        assert_eq!(extract_value("é🙂abc123", "[0-9]+", 0), Value::Text("123".into()));
+        assert_eq!(extract_value("abc123", "abc", 0), Value::Text("abc".into()));
+        assert_eq!(extract_value("abc123", "^abc", 0), Value::Text("abc".into()));
+        assert_eq!(extract_value("abc123", "(abc)([0-9]+)", 2),
+            Value::Text("123".into()));
+        assert_eq!(extract_value("abc123", "([a-z]+)([0-9]+)", 1),
+            Value::Text("abc".into()));
+        assert_eq!(extract_value("abc", "[0-9]+", 0), Value::Text("".into()));
+        assert_eq!(extract_value("abc", "(x)", 1), Value::Text("".into()));
+        assert_eq!(evaluate(&[Value::Null, Value::Text("a".into())]).unwrap(), Value::Null);
     }
 }

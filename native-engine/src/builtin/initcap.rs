@@ -2,12 +2,28 @@ use super::Function;
 use crate::{scalar::Value, schema::DataType, Error, Result};
 
 fn output(types: &[DataType]) -> Result<DataType> { super::text_type(types) }
+fn push_checked(output: &mut String, character: char, limit: usize) -> Result<()> {
+    let width = character.len_utf8();
+    if width > limit.saturating_sub(output.len()) {
+        return Err(Error::Execution("INITCAP output exceeds byte limit".into()));
+    }
+    if width > output.capacity().saturating_sub(output.len()) {
+        output.try_reserve(width)
+            .map_err(|_| Error::Execution("INITCAP output allocation failed".into()))?;
+    }
+    output.push(character);
+    Ok(())
+}
+
 fn initcap_bounded(text: &str, limit: usize) -> Result<String> {
     if text.len() > limit {
         return Err(Error::Execution("INITCAP input exceeds byte limit".into()));
     }
     if text.is_ascii() {
-        let mut bytes = text.as_bytes().to_vec();
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(text.len())
+            .map_err(|_| Error::Execution("INITCAP output allocation failed".into()))?;
+        bytes.extend_from_slice(text.as_bytes());
         let mut start_of_word = true;
         for byte in &mut bytes {
             // Keep ASCII boundaries equivalent to char::is_whitespace.
@@ -21,20 +37,23 @@ fn initcap_bounded(text: &str, limit: usize) -> Result<String> {
         }
         return Ok(String::from_utf8(bytes).expect("ASCII input"));
     }
-    let mut result = String::with_capacity(text.len());
+    let mut result = String::new();
+    result.try_reserve_exact(text.len())
+        .map_err(|_| Error::Execution("INITCAP output allocation failed".into()))?;
     let mut start_of_word = true;
     for ch in text.chars() {
         if ch.is_whitespace() {
-            result.push(ch);
+            push_checked(&mut result, ch, limit)?;
             start_of_word = true;
         } else {
             if ch.is_ascii() {
-                result.push(if start_of_word { ch.to_ascii_uppercase() }
-                    else { ch.to_ascii_lowercase() });
+                push_checked(&mut result,
+                    if start_of_word { ch.to_ascii_uppercase() }
+                    else { ch.to_ascii_lowercase() }, limit)?;
             } else if start_of_word {
-                result.extend(ch.to_uppercase());
+                for mapped in ch.to_uppercase() { push_checked(&mut result, mapped, limit)?; }
             } else {
-                result.extend(ch.to_lowercase());
+                for mapped in ch.to_lowercase() { push_checked(&mut result, mapped, limit)?; }
             }
             start_of_word = false;
         }
@@ -97,5 +116,17 @@ mod initcap_bounded_output_tests {
         assert_eq!(initcap_bounded("éCOLE wow", 16).unwrap(), "École Wow");
         assert!(initcap_bounded("éCOLE wow", 4).is_err());
         assert_eq!(initcap_bounded("abc DEF", 7).unwrap(), "Abc Def");
+    }
+}
+
+#[cfg(test)]
+mod fallible_initcap_reservation_tests {
+    use super::*;
+    #[test]
+    fn unicode_expansion_checks_byte_ceiling_before_append() {
+        assert_eq!(initcap_bounded("straße ßET", 32).unwrap(), "Straße SSet");
+        assert!(initcap_bounded("ΐ", 3).is_err());
+        assert_eq!(initcap_bounded("a B", 3).unwrap(), "A B");
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }

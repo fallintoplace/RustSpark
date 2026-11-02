@@ -56,9 +56,46 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     }
     Ok(Value::Integer(i64::from(!crc)))
 }
-pub(super) const FUNCTIONS: &[Function] = &[Function {
-    name: "crc32", min_args: 1, max_args: 1, result_type: output, call: evaluate,
-}];
+// Castagnoli polynomial, distinct from the IEEE CRC32 lookup tables.
+const CRC32C_TABLE: [u32; 256] = {
+    let mut table = [0_u32; 256];
+    let mut index = 0;
+    while index < table.len() {
+        let mut checksum = index as u32;
+        let mut step = 0;
+        while step < 8 {
+            checksum = if checksum & 1 != 0 {
+                (checksum >> 1) ^ 0x82F6_3B78
+            } else {
+                checksum >> 1
+            };
+            step += 1;
+        }
+        table[index] = checksum;
+        index += 1;
+    }
+    table
+};
+
+fn crc32c(args: &[Value]) -> Result<Value> {
+    let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    if input.len() > 16 * 1024 * 1024 {
+        return Err(crate::Error::Execution("CRC32C input exceeds 16 MiB budget".into()));
+    }
+    let mut checksum = u32::MAX;
+    for &byte in input.as_bytes() {
+        let index = usize::from((checksum as u8) ^ byte);
+        checksum = (checksum >> 8) ^ CRC32C_TABLE[index];
+    }
+    Ok(Value::Integer(i64::from(!checksum)))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "crc32", min_args: 1, max_args: 1,
+        result_type: output, call: evaluate },
+    Function { name: "crc32c", min_args: 1, max_args: 1,
+        result_type: output, call: crc32c },
+];
 
 #[cfg(test)]
 mod tests {
@@ -124,5 +161,28 @@ mod bounded_crc32_input_regressions {
         assert_eq!(evaluate(&[Value::Text("123456789".into())]).unwrap(),
             Value::Integer(0xCBF4_3926));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod crc32c_castagnoli_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+    #[test]
+    fn reference_vector_and_nulls() {
+        assert!(crate::builtin::supports("crc32c"));
+        assert_eq!(crc32c(&[Value::Text("123456789".into())]).unwrap(),
+            Value::Integer(0xE306_9283));
+        assert_eq!(crc32c(&[Value::Text(String::new())]).unwrap(), Value::Integer(0));
+        assert_eq!(crc32c(&[Value::Null]).unwrap(), Value::Null);
+        assert!(output(&[DataType::Integer]).is_err());
+        assert!(crc32c(&[Value::Text("x".repeat(16 * 1024 * 1024 + 1))]).is_err());
+    }
+
+    #[test]
+    fn native_sql_uses_castagnoli_not_ieee() {
+        let query = sql::parse_sql("SELECT CRC32C('123456789'), CRC32('123456789')").unwrap();
+        assert_eq!(executor::execute(&query, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Integer(0xE306_9283), Value::Integer(0xCBF4_3926)]]);
     }
 }

@@ -82,10 +82,26 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         .map_err(|_| Error::Execution("REGEXP_COUNT overflow".into()))?))
 }
 
-pub(super) const FUNCTIONS: &[Function] = &[Function {
-    name: "regexp_count", min_args: 2, max_args: 2,
-    result_type: output, call: evaluate,
-}];
+fn regexp_predicate_type(types: &[DataType]) -> Result<DataType> {
+    super::text_type(types)?;
+    Ok(DataType::Boolean)
+}
+
+fn regexp_predicate(args: &[Value]) -> Result<Value> {
+    let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
+    let Some(pattern) = super::string(&args[1])? else { return Ok(Value::Null); };
+    regex_support::check_input(input)?;
+    Ok(Value::Boolean(regex_support::compile(pattern)?.is_match(input)))
+}
+
+pub(super) const FUNCTIONS: &[Function] = &[
+    Function { name: "regexp", min_args: 2, max_args: 2,
+        result_type: regexp_predicate_type, call: regexp_predicate },
+    Function { name: "rlike", min_args: 2, max_args: 2,
+        result_type: regexp_predicate_type, call: regexp_predicate },
+    Function { name: "regexp_count", min_args: 2, max_args: 2,
+        result_type: output, call: evaluate },
+];
 
 #[cfg(test)]
 mod tests {
@@ -278,5 +294,30 @@ mod ascii_alpha_class_count_regressions {
             }
         }
         assert_eq!(evaluate(&[Value::Null, Value::Text("[A-Za-z]+".into())]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod native_regexp_predicate_alias_tests {
+    use super::*;
+
+    #[test]
+    fn regexp_and_rlike_follow_regex_null_and_validation_semantics() {
+        assert!(crate::builtin::supports("regexp"));
+        assert!(crate::builtin::supports("rlike"));
+        for (text, pattern, expected) in [
+            ("Spark", "^Spa", true),
+            ("café 🙂", "é\\s", true),
+            ("Spark", "^park", false),
+            ("", "^$", true),
+            ("a\nb", "^b", false),
+        ] {
+            assert_eq!(regexp_predicate(&[
+                Value::Text(text.into()), Value::Text(pattern.into()),
+            ]).unwrap(), Value::Boolean(expected));
+        }
+        assert_eq!(regexp_predicate(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+        assert!(regexp_predicate(&[Value::Text("a".into()), Value::Text("(".into())]).is_err());
+        assert!(regexp_predicate_type(&[DataType::Text, DataType::Integer]).is_err());
     }
 }

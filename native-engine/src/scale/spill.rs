@@ -20,6 +20,17 @@ fn check_native_slots(cells: usize) -> Result<()> {
 }
 const ENCODE_BUFFER_BYTES: usize = 16 * 1024;
 
+ // Keep the total number of slots allocated from an untrusted row header
+ // bounded across *all* columns. MAX_NATIVE_BATCH_BYTES applies to decoded
+ // values, but it must not authorize a huge eager allocation before the first
+ // cell is verified. Growing valid columns later remains amortized linear.
+ const MAX_EAGER_NATIVE_SLOTS: usize = 4_096;
+ fn initial_column_capacity(rows: usize, columns: usize) -> usize {
+     if columns == 0 { return 0; }
+     rows.min(1_024).min(MAX_EAGER_NATIVE_SLOTS / columns)
+ }
+
+
 fn write_u32(out: &mut impl Write, value: usize) -> Result<()> {
     let value = u32::try_from(value)
         .map_err(|_| Error::Execution("spill length exceeds u32".into()))?;
@@ -450,7 +461,7 @@ impl<R: Read> SpillReader<R> {
         // A spill header is untrusted until the payload has been decoded.
         // A huge claimed row count with a truncated body must not reserve
         // millions of scalar slots before the first cell is read.
-        let initial_capacity = rows.min(1_024);
+        let initial_capacity = initial_column_capacity(rows, self.schema.len());
         if self.schema.len() == 1 &&
             matches!(self.schema.field(0)?.data_type,
                 DataType::Integer | DataType::Float | DataType::Boolean)
@@ -1357,5 +1368,47 @@ mod single_text_spill_decoder_tests {
         assert_ne!(reader.schema(), &required);
         assert_eq!(reader.next_batch().unwrap().unwrap().rows().unwrap(),
             vec![vec![Value::Null]]);
+    }
+}
+
+#[cfg(test)]
+mod bounded_wide_spill_startup_tests {
+    use super::*;
+
+    #[test]
+    fn hostile_wide_headers_cannot_reserve_megabytes_before_decoding() {
+        for columns in [0, 1, 2, 8, 64, 512, 2048, MAX_FIELDS] {
+            for rows in [0, 1, 17, 1_024, MAX_CELLS] {
+                let capacity = initial_column_capacity(rows, columns);
+                assert!(capacity <= rows);
+                assert!(capacity.saturating_mul(columns) <= MAX_EAGER_NATIVE_SLOTS);
+            }
+        }
+        assert_eq!(initial_column_capacity(1_000_000, 1), 1_024);
+        assert_eq!(initial_column_capacity(1_000_000, 2048), 2);
+        assert_eq!(initial_column_capacity(1_000_000, 4096), 1);
+        assert_eq!(initial_column_capacity(1_000_000, 0), 0);
+    }
+
+    #[test]
+    fn wide_spill_still_round_trips_and_rejects_truncated_values() {
+        let schema = Schema::new((0..96)
+            .map(|index| Field::new(format!("c{index}"), DataType::Integer, true))
+            .collect()).unwrap();
+        let batch = Batch::from_rows(schema.clone(),
+            (0..128).map(|row| (0..96).map(|column| {
+                if (row + column) % 11 == 0 { Value::Null }
+                else { Value::Integer((row * 96 + column) as i64) }
+            }).collect()).collect()).unwrap();
+        let mut writer = SpillWriter::new(Vec::new(), schema.clone()).unwrap();
+        writer.write_batch(&batch).unwrap();
+        let encoded = writer.finish().unwrap();
+        let mut reader = SpillReader::new(encoded.as_slice(), 256).unwrap();
+        assert_eq!(reader.next_batch().unwrap().unwrap(), batch);
+        assert!(reader.next_batch().unwrap().is_none());
+
+        let truncated = &encoded[..encoded.len() - 1];
+        let mut reader = SpillReader::new(truncated, 256).unwrap();
+        assert!(reader.next_batch().is_err());
     }
 }

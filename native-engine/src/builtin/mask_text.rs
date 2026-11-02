@@ -19,6 +19,18 @@ fn replacement(args: &[Value], index: usize, default: Option<char>) -> Result<Op
     Ok(Some(character))
 }
 
+fn push_masked(output: &mut String, selected: char) -> Result<()> {
+    if selected.len_utf8() > MAX_OUTPUT.saturating_sub(output.len()) {
+        return Err(Error::Execution("MASK output exceeds 16 MiB budget".into()));
+    }
+    if output.capacity().saturating_sub(output.len()) < selected.len_utf8() {
+        output.try_reserve(selected.len_utf8())
+            .map_err(|_| Error::Execution("MASK output allocation failed".into()))?;
+    }
+    output.push(selected);
+    Ok(())
+}
+
 fn evaluate(args: &[Value]) -> Result<Value> {
     let Some(input) = super::string(&args[0])? else { return Ok(Value::Null); };
     if input.len() > MAX_OUTPUT {
@@ -33,7 +45,10 @@ fn evaluate(args: &[Value]) -> Result<Value> {
     if input.is_ascii() &&
         [uppercase, lowercase, digits, others].into_iter().flatten()
             .all(|character| character.is_ascii()) {
-        let mut bytes = input.as_bytes().to_vec();
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(input.len())
+            .map_err(|_| Error::Execution("MASK output allocation failed".into()))?;
+        bytes.extend_from_slice(input.as_bytes());
         for byte in &mut bytes {
             let selected = match *byte {
                 b'A'..=b'Z' => uppercase,
@@ -46,7 +61,9 @@ fn evaluate(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(String::from_utf8(bytes)
             .expect("ASCII MASK replacements preserve ASCII")));
     }
-    let mut result = String::with_capacity(input.len());
+    let mut result = String::new();
+    result.try_reserve_exact(input.len())
+        .map_err(|_| Error::Execution("MASK output allocation failed".into()))?;
     if input.is_ascii() {
         for &byte in input.as_bytes() {
             let original = char::from(byte);
@@ -56,10 +73,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
                 b'0'..=b'9' => digits.unwrap_or(original),
                 _ => others.unwrap_or(original),
             };
-            if selected.len_utf8() > MAX_OUTPUT.saturating_sub(result.len()) {
-                return Err(Error::Execution("MASK output exceeds 16 MiB budget".into()));
-            }
-            result.push(selected);
+            push_masked(&mut result, selected)?;
         }
         return Ok(Value::Text(result));
     }
@@ -74,10 +88,7 @@ fn evaluate(args: &[Value]) -> Result<Value> {
             others
         };
         let selected = substitution.unwrap_or(character);
-        if selected.len_utf8() > MAX_OUTPUT.saturating_sub(result.len()) {
-            return Err(Error::Execution("MASK output exceeds 16 MiB budget".into()));
-        }
-        result.push(selected);
+        push_masked(&mut result, selected)?;
     }
     Ok(Value::Text(result))
 }
@@ -173,6 +184,25 @@ mod ascii_mask_byte_buffer_regressions {
         ]).unwrap(), Value::Text("éx".into()));
         assert_eq!(evaluate(&[Value::Text("Ab🙂3".into())]).unwrap(),
             Value::Text("Xx🙂n".into()));
+        assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod fallible_mask_growth_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_and_unicode_replacements_keep_output_semantics() {
+        assert_eq!(evaluate(&[Value::Text("Az9!".into())]).unwrap(),
+            Value::Text("Xxn!".into()));
+        assert_eq!(evaluate(&[
+            Value::Text("Az9!".into()), Value::Text("界".into()),
+            Value::Text("é".into()), Value::Text("🙂".into()),
+            Value::Text("?".into())
+        ]).unwrap(), Value::Text("界é🙂?".into()));
+        assert_eq!(evaluate(&[Value::Text("Éé３!".into())]).unwrap(),
+            Value::Text("Xxn!".into()));
         assert_eq!(evaluate(&[Value::Null]).unwrap(), Value::Null);
     }
 }

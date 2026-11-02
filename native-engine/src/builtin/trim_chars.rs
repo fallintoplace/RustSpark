@@ -106,6 +106,7 @@ fn normalize_space(args: &[Value]) -> Result<Value> {
 
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "normalize_space", min_args: 1, max_args: 1, result_type: normalize_space_type, call: normalize_space },
+    Function { name: "trim", min_args: 1, max_args: 2, result_type: output, call: btrim },
     Function { name: "btrim", min_args: 1, max_args: 2, result_type: output, call: btrim },
     Function { name: "ltrim", min_args: 1, max_args: 2, result_type: output, call: ltrim },
     Function { name: "rtrim", min_args: 1, max_args: 2, result_type: output, call: rtrim },
@@ -326,5 +327,35 @@ mod oversized_trim_set_budget_tests {
             Value::Text("éhelloé".into()),
             Value::Text("é".into()),
         ]).unwrap(), Value::Text("hello".into()));
+    }
+}
+
+#[cfg(test)]
+mod spark_trim_character_set_tests {
+    use super::*;
+    use crate::{catalog::Catalog, executor, sql};
+
+    #[test]
+    fn trim_reuses_btrim_for_unicode_and_custom_sets() {
+        assert!(crate::builtin::supports("trim"));
+        let cases = [
+            ("xyyxHELLOyxy", "xy", "HELLO"),
+            ("é🙂abc🙂é", "🙂é", "abc"),
+            ("   abc  ", "", "   abc  "),
+        ];
+        for (text, characters, expected) in cases {
+            let args = [Value::Text(text.into()), Value::Text(characters.into())];
+            assert_eq!(btrim(&args).unwrap(), Value::Text(expected.into()));
+            assert_eq!(crate::builtin::supports("trim"), true);
+        }
+        assert_eq!(btrim(&[Value::Null, Value::Text("x".into())]).unwrap(), Value::Null);
+        assert!(output(&[DataType::Text, DataType::Integer]).is_err());
+    }
+
+    #[test]
+    fn trim_calls_follow_native_dispatch() {
+        let plan = sql::parse_sql("SELECT TRIM('  Spark  ')").unwrap();
+        assert_eq!(executor::execute(&plan, &Catalog::new()).unwrap().rows().unwrap(),
+            vec![vec![Value::Text("Spark".into())]]);
     }
 }

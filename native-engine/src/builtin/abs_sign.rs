@@ -55,31 +55,10 @@ fn is_even(args: &[Value]) -> Result<Value> {
     Ok(Value::Boolean(number & 1 == 0))
 }
 
-fn positive(args: &[Value]) -> Result<Value> {
-    match &args[0] {
-        Value::Integer(value) => Ok(Value::Integer(*value)),
-        Value::Float(value) => super::finite(*value),
-        Value::Null => Ok(Value::Null),
-        _ => Err(Error::Type("POSITIVE expects numeric input".into())),
-    }
-}
-
-fn negative(args: &[Value]) -> Result<Value> {
-    match &args[0] {
-        Value::Integer(value) => value.checked_neg().map(Value::Integer)
-            .ok_or_else(|| Error::Execution("NEGATIVE integer overflow".into())),
-        Value::Float(value) => super::finite(-value),
-        Value::Null => Ok(Value::Null),
-        _ => Err(Error::Type("NEGATIVE expects numeric input".into())),
-    }
-}
-
 pub(super) const FUNCTIONS: &[Function] = &[
     Function { name: "positive", min_args: 1, max_args: 1, result_type: abs_type, call: positive },
     Function { name: "negative", min_args: 1, max_args: 1, result_type: abs_type, call: negative },
     Function { name: "is_even", min_args: 1, max_args: 1, result_type: is_even_type, call: is_even },
-    Function { name: "positive", min_args: 1, max_args: 1, result_type: abs_type, call: positive },
-    Function { name: "negative", min_args: 1, max_args: 1, result_type: abs_type, call: negative },
 
     Function { name: "abs", min_args: 1, max_args: 1, result_type: abs_type, call: abs },
     Function { name: "sign", min_args: 1, max_args: 1, result_type: float_type, call: sign },
