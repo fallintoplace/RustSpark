@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int8Array,
+    Array, ArrayRef, BooleanArray, Date32Array, DictionaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
     LargeStringArray, RecordBatch, RecordBatchOptions, StringArray, UInt64Array,
     builder::{StringBuilder, LargeStringBuilder}, types::{Int8Type, Int16Type, Int32Type, Int64Type,
@@ -18,6 +18,27 @@ use crate::{
 };
 
 const MAX_ARROW_DECODED_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Format Arrow DATE32 days as fixed-width ISO text for the native SQL
+/// engine. Lexical order then agrees with calendar order for TPC-H dates.
+fn date32_to_iso(days: i32) -> Result<String> {
+    // Civil-from-days using a 400-year Gregorian cycle, with wide arithmetic
+    // for the entire signed Date32 input range.
+    let z = i64::from(days) + 719468;
+    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    if !(1..=9999).contains(&year) {
+        return Err(Error::Unsupported("Arrow DATE32 is outside native ISO date range".into()));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
 
 fn needs_large_utf8(payload_bytes: usize) -> bool {
     payload_bytes > i32::MAX as usize
@@ -151,7 +172,7 @@ pub fn schema_from_arrow(input: &ArrowSchema) -> Result<Schema> {
             ArrowType::UInt8 | ArrowType::UInt16 | ArrowType::UInt32 |
             ArrowType::UInt64 => DataType::Integer,
             ArrowType::Float32 | ArrowType::Float64 => DataType::Float,
-            ArrowType::Utf8 | ArrowType::LargeUtf8 => DataType::Text,
+            ArrowType::Utf8 | ArrowType::LargeUtf8 | ArrowType::Date32 => DataType::Text,
             ArrowType::Dictionary(key, value)
                 if matches!(key.as_ref(),
                     ArrowType::Int8 | ArrowType::Int16 | ArrowType::Int32 | ArrowType::Int64 |
@@ -268,6 +289,18 @@ pub fn from_arrow(input: &RecordBatch) -> Result<Batch> {
                     if values.is_null(row) { Value::Null }
                     else { Value::Float(values.value(row)) }
                 }).collect())
+            }
+            ArrowType::Date32 => {
+                let values = array.as_any().downcast_ref::<Date32Array>()
+                    .ok_or_else(|| Error::Type("invalid Date32 Arrow array".into()))?;
+                Some((0..values.len()).map(|row| {
+                    if values.is_null(row) { Ok(Value::Null) }
+                    else {
+                        remaining_text_bytes = remaining_text_bytes.checked_sub(10)
+                            .ok_or_else(|| Error::Execution("Arrow text decode budget exceeded".into()))?;
+                        Ok(Value::Text(date32_to_iso(values.value(row))?))
+                    }
+                }).collect::<Result<Vec<_>>>()?)
             }
             ArrowType::Utf8 => {
                 let values = array.as_any().downcast_ref::<StringArray>()
@@ -735,5 +768,26 @@ mod direct_arrow_metadata_contract_tests {
             ArrowField::new("bytes", ArrowType::Binary, true),
         ]);
         assert!(schema_from_arrow(&unsupported).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tpch_arrow_date32_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_parquet_calendar_dates_to_iso_text() {
+        let input = RecordBatch::try_from_iter(vec![(
+            "l_shipdate", Arc::new(Date32Array::from(vec![Some(-1), Some(0), Some(11016), None])) as ArrayRef,
+        )]).unwrap();
+        let output = from_arrow(&input).unwrap();
+        assert_eq!(output.schema().field(0).unwrap().data_type, DataType::Text);
+        assert_eq!(output.column(0).unwrap(), &[
+            Value::Text("1969-12-31".into()),
+            Value::Text("1970-01-01".into()),
+            Value::Text("2000-02-29".into()),
+            Value::Null,
+        ]);
+        assert!(date32_to_iso(i32::MAX).is_err());
     }
 }
