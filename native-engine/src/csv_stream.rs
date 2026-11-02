@@ -41,6 +41,14 @@ fn retained_row_bytes(row: &[Value], row_width: usize) -> usize {
     })
 }
 
+// The initial column buffers must fit in the same retained-byte budget
+// enforced when collecting rows. A 4096-column schema at 1024 rows would
+// otherwise allocate more than 128 MiB before reading its first cell.
+fn initial_output_capacity(rows: usize, columns: usize, budget: usize) -> usize {
+    let row_width = columns.saturating_mul(std::mem::size_of::<Value>());
+    rows.min(1_024).min((budget / row_width.max(1)).max(1))
+}
+
 struct Records<R> {
     input: R,
     max_record_bytes: usize,
@@ -330,10 +338,26 @@ impl<R: BufRead> CsvStream<R> {
             self.exhausted = true;
             return Some(Err(error));
         }
-        let mut columns = (0..self.schema.len()).map(|_|
-            Vec::with_capacity(self.batch_rows.min(1_024))
-        ).collect::<Vec<_>>();
-        let mut row = Vec::with_capacity(self.schema.len());
+        let width = self.schema.len();
+        let capacity = initial_output_capacity(self.batch_rows, width, byte_budget);
+        let mut columns = Vec::new();
+        if columns.try_reserve_exact(width).is_err() {
+            self.exhausted = true;
+            return Some(Err(Error::Execution("CSV output column allocation failed".into())));
+        }
+        for _ in 0..width {
+            let mut column = Vec::new();
+            if column.try_reserve_exact(capacity).is_err() {
+                self.exhausted = true;
+                return Some(Err(Error::Execution("CSV output row allocation failed".into())));
+            }
+            columns.push(column);
+        }
+        let mut row = Vec::new();
+        if row.try_reserve_exact(width).is_err() {
+            self.exhausted = true;
+            return Some(Err(Error::Execution("CSV parser row allocation failed".into())));
+        }
         let mut row_count = 0usize;
         let mut used = 0usize;
         let row_width = self.schema.len().saturating_mul(std::mem::size_of::<Value>());
@@ -902,6 +926,38 @@ mod streamed_validated_columns_perf_tests {
             Cursor::new("n\nnot-a-number\n"), 4, 1024, schema,
         ).unwrap();
         assert!(stream.next().unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod budgeted_csv_initial_capacity_regressions {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn output_preallocation_never_exceeds_batch_budget_for_wide_schemas() {
+        for width in [1, 2, 16, 128, 1_024, 4_096] {
+            let capacity = initial_output_capacity(65_536, width, MAX_BATCH_BYTES);
+            assert!((1..=1_024).contains(&capacity));
+            assert!(width * capacity * std::mem::size_of::<Value>() <= MAX_BATCH_BYTES);
+        }
+        assert_eq!(initial_output_capacity(7, 128, MAX_BATCH_BYTES), 7);
+    }
+
+    #[test]
+    fn many_nullable_columns_match_eager_reader_across_small_batches() {
+        let header = (0..128).map(|index| format!("field_{index}"))
+            .collect::<Vec<_>>().join(",");
+        let row = (0..128).map(|index| if index % 3 == 0 { "" } else { "hi" })
+            .collect::<Vec<_>>().join(",");
+        let input = format!("{header}\n{row}\n{row}\n{row}\n");
+        let eager = crate::csv::from_csv_str(&input).unwrap();
+        let streamed = CsvStream::new_typed(Cursor::new(input), 2, 1024,
+            eager.schema().clone()).unwrap().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(streamed.len(), 2);
+        let rows = streamed.into_iter().flat_map(|batch| batch.rows().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, eager.rows().unwrap());
     }
 }
 
